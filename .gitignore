@@ -1,0 +1,11 @@
+node_modules/
+*.log
+*.tgz
+.trash-*
+
+# Guard scratch: each guard keeps its isolated latches and audit log here.
+build/iso-*
+
+# The plugin's own runtime output, when a profile is pointed at this directory.
+shots/
+audit.jsonl
