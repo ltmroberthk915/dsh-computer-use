@@ -5394,6 +5394,7 @@ namespace DshComputerUse.Worker
             d["rect"] = Dict("x", (int)r.X, "y", (int)r.Y, "width", (int)r.Width, "height", (int)r.Height);
             try { d["automationId"] = e.Current.AutomationId; } catch { }
             try { d["className"] = e.Current.ClassName; } catch { }
+            try { d["runtimeId"] = String.Join(".", e.GetRuntimeId()); d["pid"] = e.Current.ProcessId; } catch { }
             try { d["isPassword"] = e.Current.IsPassword; } catch { }
             try
             {
@@ -5429,13 +5430,25 @@ namespace DshComputerUse.Worker
                     GetS(a, "automationId", null), GetS(a, "role", null), maxDepth, maxNodes,
                     Math.Max(1, Math.Min(80, GetI(a, "limit", 80))), out scanned, out truncated);
                 List<object> selected = new List<object>();
+                string witness = root != IntPtr.Zero && GetB(a, "targets", false) ? UiWindowWitness(root) : null;
+                var ancestorCache = new Dictionary<string, List<object>>();
                 foreach (AutomationElement match in matches)
                 {
-                    try { selected.Add(ElemDict(match)); } catch { truncated = true; }
+                    try {
+                        var item = ElemDict(match);
+                        if (witness != null) {
+                            try { item["target"] = RememberUiTarget(match, root, witness, rootEl, ancestorCache, item); }
+                            catch { item["targetUnavailable"] = true; }
+                        }
+                        selected.Add(item);
+                    } catch { truncated = true; }
                 }
-                return Dict("flat", selected, "count", selected.Count, "scanned", scanned, "truncated", truncated);
+                if (witness != null && witness != UiWindowWitness(root)) throw new Exception("TARGET_STALE: window changed during observation; retry the query");
+                return Dict("flat", selected, "count", selected.Count, "scanned", scanned, "truncated", truncated,
+                    "hwnd", root.ToInt64(), "pid", root == IntPtr.Zero ? 0 : PidOf(root));
             }
             List<object> flat = new List<object>();
+            bool treeTruncated = false;
             // breadth-first so the first `maxNodes` elements cover the shallow UI evenly
             Queue<KeyValuePair<AutomationElement, int>> q = new Queue<KeyValuePair<AutomationElement, int>>();
             q.Enqueue(new KeyValuePair<AutomationElement, int>(rootEl, 0));
@@ -5443,21 +5456,147 @@ namespace DshComputerUse.Worker
             {
                 KeyValuePair<AutomationElement, int> kv = q.Dequeue();
                 try { flat.Add(ElemDict(kv.Key)); }
-                catch { continue; }
+                catch { treeTruncated = true; continue; }
                 if (kv.Value < maxDepth)
                 {
                     try
                     {
                         foreach (AutomationElement c in kv.Key.FindAll(TreeScope.Children, Condition.TrueCondition))
                         {
-                            if (flat.Count + q.Count >= maxNodes) break;
+                            if (flat.Count + q.Count >= maxNodes) { treeTruncated = true; break; }
                             q.Enqueue(new KeyValuePair<AutomationElement, int>(c, kv.Value + 1));
                         }
                     }
-                    catch { }
+                    catch { treeTruncated = true; }
+                }
+                else try { if (kv.Key.FindFirst(TreeScope.Children, Condition.TrueCondition) != null) treeTruncated = true; } catch { treeTruncated = true; }
+            }
+            return Dict("root", ElemDict(rootEl), "flat", flat, "count", flat.Count, "truncated", treeTruncated || q.Count > 0);
+        }
+
+        // Observed native identities are private to this worker, bounded, and never reconstructed
+        // from model-supplied names. Rebinding is opt-in and requires complete unique evidence.
+        sealed class ObservedUiTarget
+        {
+            public string Token, Key, Witness, RuntimeId, Evidence, AutoId, Name, Role;
+            public IntPtr Hwnd;
+            public AutomationElement Element;
+            public long At;
+        }
+        static readonly Dictionary<string, ObservedUiTarget> UiTargets = new Dictionary<string, ObservedUiTarget>();
+        static readonly Dictionary<string, string> UiTargetKeys = new Dictionary<string, string>();
+        static readonly Queue<string> UiTargetOrder = new Queue<string>();
+        static string UiWindowWitness(IntPtr hwnd)
+        {
+            RECT rect;
+            if (!Native.IsWindow(hwnd) || !Native.GetWindowRect(hwnd, out rect)) throw new Exception("TARGET_STALE: window disappeared; no action sent");
+            uint pid = PidOf(hwnd);
+            long started = Process.GetProcessById((int)pid).StartTime.ToUniversalTime().Ticks;
+            return Json.Serialize(new object[] { hwnd.ToInt64(), pid, started, WinTitleOf(hwnd), ClassOf(hwnd), rect.Left, rect.Top, rect.Right, rect.Bottom });
+        }
+        static string UiText(string text) { return (text ?? "").Normalize(NormalizationForm.FormKC).Trim(); }
+        static object UiSemanticPart(AutomationElement element)
+        {
+            return new object[] { element.Current.ControlType.ProgrammaticName, UiText(element.Current.Name), element.Current.AutomationId, element.Current.ClassName };
+        }
+        static string UiTargetEvidence(AutomationElement element, IntPtr hwnd)
+        {
+            return UiTargetEvidence(element, AutomationElement.FromHandle(hwnd), new Dictionary<string, List<object>>(), null);
+        }
+        static string UiTargetEvidence(AutomationElement element, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item)
+        {
+            var ancestors = new List<object>();
+            AutomationElement current = TreeWalker.ControlViewWalker.GetParent(element);
+            string parentId = current == null ? "" : String.Join(".", current.GetRuntimeId());
+            if (parentId.Length == 0 || !cache.TryGetValue(parentId, out ancestors)) {
+                ancestors = new List<object>();
+                bool rooted = Automation.Compare(element, root);
+                for (int depth = 0; current != null && depth < 24; depth++) {
+                    ancestors.Add(UiSemanticPart(current));
+                    if (Automation.Compare(current, root)) { rooted = true; break; }
+                    current = TreeWalker.ControlViewWalker.GetParent(current);
+                }
+                if (!rooted) throw new Exception("TARGET_STALE: control is outside the observed window or ancestry is incomplete");
+                if (parentId.Length > 0) cache[parentId] = ancestors;
+            }
+            if (item == null) item = ElemDict(element);
+            var patterns = new List<string>();
+            object raw;
+            if (!item.TryGetValue("patterns", out raw)) throw new Exception("TARGET_STALE: native patterns unavailable");
+            foreach (string pattern in (List<string>)raw) patterns.Add(pattern);
+            patterns.Sort(StringComparer.Ordinal);
+            // AutomationId is a separate identity channel, so a unique semantic replacement can
+            // still be recognized if a provider regenerates IDs. Ancestor identities remain strict.
+            return Json.Serialize(new object[] { item["role"], UiText(element.Current.Name),
+                item["className"], item["isPassword"], patterns, ancestors });
+        }
+        static string RememberUiTarget(AutomationElement element, IntPtr hwnd, string witness, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item)
+        {
+            string runtimeId = GetS(item, "runtimeId", "");
+            if (runtimeId.Length == 0) throw new Exception("native control has no runtime identity");
+            string evidence = UiTargetEvidence(element, root, cache, item);
+            string autoId = GetS(item, "automationId", "");
+            string key = Json.Serialize(new object[] { witness, runtimeId, evidence, autoId });
+            string existing; ObservedUiTarget old;
+            if (UiTargetKeys.TryGetValue(key, out existing) && UiTargets.TryGetValue(existing, out old)) {
+                old.Element = element; old.At = NowMs(); return existing;
+            }
+            string token = "T" + Guid.NewGuid().ToString("N");
+            var target = new ObservedUiTarget { Token = token, Key = key, Hwnd = hwnd, Witness = witness, RuntimeId = runtimeId,
+                Evidence = evidence, AutoId = autoId, Name = element.Current.Name,
+                Role = GetS(item, "role", ""), Element = element, At = NowMs() };
+            UiTargets[token] = target; UiTargetKeys[key] = token; UiTargetOrder.Enqueue(token);
+            while (UiTargets.Count > 512) {
+                string expired = UiTargetOrder.Dequeue(); ObservedUiTarget entry;
+                if (UiTargets.TryGetValue(expired, out entry)) { UiTargets.Remove(expired); UiTargetKeys.Remove(entry.Key); }
+            }
+            return token;
+        }
+        static ObservedUiTarget GetUiTarget(string token)
+        {
+            ObservedUiTarget target;
+            if (!UiTargets.TryGetValue(token, out target) || NowMs() - target.At > 300000)
+                throw new Exception("TARGET_STALE: target expired or worker restarted; query again; no action sent");
+            if (target.Witness != UiWindowWitness(target.Hwnd))
+                throw new Exception("TARGET_STALE: window identity, title or bounds changed; query again; no action sent");
+            return target;
+        }
+        static AutomationElement ResolveUiTarget(ObservedUiTarget target, bool rebind, int depth, int budget, out string mode, out int seen)
+        {
+            mode = "runtime-id"; seen = 0;
+            try {
+                if (String.Join(".", target.Element.GetRuntimeId()) == target.RuntimeId &&
+                    target.Element.Current.AutomationId == target.AutoId && UiTargetEvidence(target.Element, target.Hwnd) == target.Evidence)
+                    return target.Element;
+            } catch { }
+            if (!rebind) throw new Exception("TARGET_STALE: observed control was replaced or changed; query again or explicitly request rebind; no action sent");
+            var start = AutomationElement.FromHandle(target.Hwnd);
+            bool truncated; int visited;
+            List<AutomationElement> candidates = new List<AutomationElement>();
+            if (!String.IsNullOrEmpty(target.AutoId)) {
+                candidates = FindUiMatches(start, null, target.AutoId, null, depth, budget, budget, out visited, out truncated);
+                seen += visited;
+                if (truncated) throw new Exception("INCOMPLETE_UIA_SEARCH: cannot prove unique target recovery; no action sent");
+                if (candidates.Count > 1) throw new Exception("AMBIGUOUS_UIA_TARGET: native identity matches multiple controls; no action sent");
+                if (candidates.Count == 1) {
+                    if (UiTargetEvidence(candidates[0], target.Hwnd) != target.Evidence)
+                        throw new Exception("TARGET_SEMANTICS_CHANGED: native ID now names a different control/context; no action sent");
+                    mode = "native-identifier";
                 }
             }
-            return Dict("root", ElemDict(rootEl), "flat", flat, "count", flat.Count);
+            if (candidates.Count == 0) {
+                if (String.IsNullOrWhiteSpace(target.Name)) throw new Exception("TARGET_STALE: target has no usable semantic name; no action sent");
+                var matches = FindUiMatches(start, target.Name, null, target.Role, depth, budget, budget, out visited, out truncated);
+                seen += visited;
+                if (truncated) throw new Exception("INCOMPLETE_UIA_SEARCH: cannot prove unique semantic recovery; no action sent");
+                foreach (AutomationElement element in matches)
+                    if (UiTargetEvidence(element, target.Hwnd) == target.Evidence) candidates.Add(element);
+                if (candidates.Count > 1) throw new Exception("AMBIGUOUS_UIA_TARGET: semantic recovery matches multiple controls; no action sent");
+                if (candidates.Count == 0) throw new Exception("TARGET_STALE: no control retains the observed identity/context; no action sent");
+                mode = "semantic";
+            }
+            if (target.Witness != UiWindowWitness(target.Hwnd)) throw new Exception("TARGET_STALE: window changed during recovery; no action sent");
+            return candidates[0];
         }
 
         // ---------- low-level UI action: drive a control through its accessibility pattern ----------
@@ -5512,7 +5651,12 @@ namespace DshComputerUse.Worker
         static Dictionary<string, object> UiaAct(Dictionary<string, object> a)
         {
             string action = GetS(a, "action", "invoke");
-            IntPtr root = FindHwnd(a);
+            string token = GetS(a, "target", null);
+            ObservedUiTarget observed = token == null ? null : GetUiTarget(token);
+            if (observed != null && (GetS(a, "nameContains", null) != null || GetS(a, "automationId", null) != null || GetS(a, "role", null) != null || a.ContainsKey("index")))
+                throw new Exception("TARGET_SELECTOR_CONFLICT: use target or selectors, not both; no action sent");
+            IntPtr root = observed == null ? FindHwnd(a) : observed.Hwnd;
+            if (observed != null && a.ContainsKey("hwnd") && FindHwnd(a) != root) throw new Exception("TARGET_STALE: target belongs to another window; no action sent");
             if (root != IntPtr.Zero) HostGuard(root, "uiaAct");
             AutomationElement start = root != IntPtr.Zero ? AutomationElement.FromHandle(root) : AutomationElement.RootElement;
             string name = GetS(a, "nameContains", null);
@@ -5523,9 +5667,10 @@ namespace DshComputerUse.Worker
             int maxNodes = Math.Max(20, Math.Min(4000, GetI(a, "maxNodes", 2000)));
             bool unique = GetB(a, "requireUnique", !a.ContainsKey("index"));
             List<object> skipped = new List<object>();
-            int seen; bool truncated;
-            var matches = FindUiMatches(start, name, autoId, role, depth, maxNodes,
-                unique ? 2 : index + 1, out seen, out truncated);
+            int seen = 0; bool truncated = false; string resolution = null;
+            var matches = observed == null ? FindUiMatches(start, name, autoId, role, depth, maxNodes,
+                unique ? 2 : index + 1, out seen, out truncated) : new List<AutomationElement> {
+                    ResolveUiTarget(observed, GetB(a, "allowRebind", false), depth, maxNodes, out resolution, out seen) };
             if (unique && matches.Count > 1)
                 throw new Exception("AMBIGUOUS_UIA_TARGET: multiple controls match; no action sent. Query computer_uia, then specify hwnd and an exact id.");
             if (unique && truncated)
@@ -5587,6 +5732,7 @@ namespace DshComputerUse.Worker
 
             Thread.Sleep(GetI(a, "settleMs", 120));
             Dictionary<string, object> res = Dict("action", action, "via", via, "element", ElemDict(found), "scanned", seen);
+            if (observed != null) res["resolution"] = Dict("target", token, "mode", resolution, "rebound", resolution != "runtime-id");
             if (skipped.Count > 0) res["skippedEarlierMatches"] = skipped;
             return res;
         }

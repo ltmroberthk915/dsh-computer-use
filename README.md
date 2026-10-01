@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-Windows desktop computer use for **DeepSeek Harness**: 18 `computer_*` tools that observe and drive
+Windows desktop computer use for **DeepSeek Harness**: 18 desktop tools plus an Agent activation entry that observe and drive
 native Windows applications through a C# worker compiled on first use by the compiler that already
 ships with Windows.
 
@@ -50,26 +50,27 @@ The driving tools stay locked until the session produces a receipt phrase that e
 `skills/computer-use/SKILL.md`. That is deliberate — it is the strongest honest version of "read the
 manual before driving", because no tool layer can see whether a model read a document.
 
-The plugin therefore **registers that skill with the host** through `ctx.skills.register()`, so the
-model can always read it. If your host does not mount the skills service, copy the directory so the
-file is discoverable, or the gate will refuse actuation with no readable manual to unlock it:
+The plugin registers the bundled skill through `ctx.skills.register()` when available. If that service is absent, `computer_use_activate` returns the same manual, its absolute source path and the scoped tool list. The receipt and all existing approval/brake checks still apply.
 
-```sh
-# only needed when the host has no skills service
-cp -r skills/computer-use "$DSH_HOME/skills/"
-```
+## On-demand controls in 1.1
+
+- **Per-Agent tools:** idle Agents see `computer_use_activate`, `computer_ctrl` and `computer_ask`. A successful computer-use skill load, receipt or activation exposes the 18 existing tools plus the activation entry to that Agent. Other Agents and children activate independently. Native calls and Node `run_code` are supported. Activation does not start control or release a human brake.
+- **Observed UIA targets:** a scoped name/id query returns an opaque target handle. Use it for pattern actions; opt-in `rebind:true` allows unique identity or semantic recovery after replacement in the same window. Changed context, ambiguity and incomplete scans refuse. Broad queries skip recovery handles unless `targets:true`; creating witnesses for a large list costs extra native work.
+- **Incremental observations:** pass the previous observation ID as `since` with the same query. Deltas preserve additions, changes, removals and ordering. Each Agent retains 64 complete snapshots; `snapshot` retrieves an exact historical result. Missing bases, changed scope, incomplete evidence or a larger delta fall back to full output.
+
+See [the detailed protocol](skills/computer-use/references/progressive-control.md) for cache limits and recovery boundaries. UIA snapshots preserve provider-returned fields within existing provider limits; historical retrieval is not fresh outcome verification.
 
 ## Tools
 
 | Group | Tools |
 |---|---|
+| Activate | `computer_use_activate` |
 | Observe | `computer_state` `computer_shot` `computer_marks` `computer_uia` |
 | Act | `computer_click` `computer_move` `computer_drag` `computer_scroll` `computer_select` `computer_key` `computer_type` `computer_uia_act` `computer_window` `computer_clip` |
 | Flow | `computer_wait` `computer_batch` |
 | Meta | `computer_ask` `computer_ctrl` |
 
-`computer_marks` returns numbered marks for the elements it found on screen, and `computer_shot`
-draws the same numbers onto the image. A mark is a snapshot ID: it is validated against window
+`computer_marks` returns numbered marks for the elements it found on screen; `computer_marks {shot:true}` also saves an annotated image. `computer_shot` returns a plain screenshot and, on image-capable routes, a native image attachment. A mark is a snapshot ID: it is validated against window
 identity and sampled pixels before any input is dispatched, so a stale mark is refused rather than
 clicked at the wrong place.
 
@@ -107,6 +108,7 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 | Key | Default | Meaning |
 |---|---:|---|
 | `automationMode` | `standard` | approval mode (above) |
+| `progressiveTools` | `true` | per-Agent activation; `false` keeps the original 18 global tools |
 | `dryRun` | `false` | simulate actuations, log only |
 | `maxActionsPerMinute` | `60` | core-level actuation rate limit |
 | `annotateMarks` | `true` | draw Set-of-Marks boxes on screenshots |

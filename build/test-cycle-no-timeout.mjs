@@ -9,6 +9,7 @@ import { ComputerUse } from '../lib/core/index.js'
 import { createCycleGate, agentKeyOf } from '../lib/cycle.js'
 import { registerTools } from '../lib/tools.js'
 import { recoveryProblem } from '../lib/recovery.js'
+import { installToolExposure, ACTIVATION_TOOL } from '../lib/exposure.js'
 
 const SOURCE_URL = new URL(process.argv[2] ? pathToFileURL(path.resolve(process.argv[2])).href : '../lib/index.js', import.meta.url)
 const source = fs.readFileSync(SOURCE_URL, 'utf8')
@@ -76,9 +77,11 @@ function harness(legacyTimeout) {
   // that the module may never learn where it lives would be a rule about the harness, not about the
   // product. Rewriting keeps `new URL(..., import.meta.url)` resolving exactly as it does in production.
   const prelude = source.replace(/^import .+$/gm, '').replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify(SOURCE_URL.href))
-  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'appendAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', prelude + '\nreturn apply;')(
-    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', () => {}, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath)
-  apply(ctx, { enabled: true, automationMode: 'standard', calmAfterMs: legacyTimeout, maxActionsPerMinute: 60 })
+  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'appendAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', prelude + '\nreturn apply;')(
+    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', () => {}, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL)
+  // This fixture tests lifecycle ordering in the supported legacy registration mode;
+  // actual scoped activation is tested separately against the host ToolRuntime.
+  apply(ctx, { enabled: true, progressiveTools: false, automationMode: 'standard', calmAfterMs: legacyTimeout, maxActionsPerMinute: 60 })
   const agent = { id: 'agentA', session: { id: 'A' }, status: 'running', inject() {}, steer: m => state.steers.push(m), cancel() {} }
   const exec = { name: 'computer_state', arguments: { windows: true }, session: 'A', agent }
   const pre = () => handlers.get('tools/pre-execute')(exec, () => ({ kind: 'allow' }))

@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-给 **DeepSeek Harness** 用的 Windows 桌面操控插件：18 个 `computer_*` 工具，通过一个 C# worker
+给 **DeepSeek Harness** 用的 Windows 桌面操控插件：18 个桌面工具加一个 Agent 激活入口，通过一个 C# worker
 观察并驱动原生 Windows 应用——worker 在首次使用时，由 Windows 自带的 C# 编译器现场编译。
 
 [English](README.md) | 中文
@@ -45,25 +45,27 @@ DSH Desktop 持有自己的 `desktop` profile，而 `dsh` CLI 刻意拒绝对它
 驱动类工具会被锁住，直到会话给出那句只存在于 `skills/computer-use/SKILL.md` 里的回执短语。
 这是刻意的——没有任何工具层能"看见"模型是否读过文档，这是"先读规程再动手"最诚实的一种实现。
 
-因此插件会通过 `ctx.skills.register()` **把这个 skill 注册给宿主**，让模型始终读得到。
-如果你的宿主没有挂载 skills 服务，就把它复制到可发现的位置，否则门禁会拒绝操作，
-而模型又没有可读的规程来解锁：
+插件在宿主提供 skills 服务时通过 `ctx.skills.register()` 注册随包规程。服务缺失时，`computer_use_activate` 也能返回同一份规程、源文件绝对路径及当前 Agent 的工具列表。回执门禁和既有审批、刹车检查仍然有效。
 
-```sh
-# 仅在宿主没有 skills 服务时需要
-cp -r skills/computer-use "$DSH_HOME/skills/"
-```
+## 1.1 的按需控制
+
+- **按 Agent 加载：**未激活时暴露 `computer_use_activate`、`computer_ctrl`、`computer_ask`。成功读取 computer-use skill、确认规程或调用激活入口后，该 Agent 获得原有 18 个工具，加入口共 19 个。其他 Agent 和子 Agent 独立启用，支持原生调用和 Node `run_code`。激活本身不启动控制，也不释放人为刹车。
+- **已观察的 UIA 目标：**指定窗口和 name/id 的聚焦查询默认生成 target 句柄。控件重建时，显式 `rebind:true` 才允许在同一窗口内进行唯一身份或语义匹配。上下文变化、歧义、扫描不完整时拒绝动作。宽查询需 `targets:true` 才生成恢复句柄，避免普通观察承担额外开销。
+- **增量观察：**重复相同查询并传入上一 observation 的 `since`，返回新增、变化、删除及顺序信息。每 Agent 保留最近 64 份完整快照，`snapshot` 可取回确切的历史结果。缺少基线、范围变化、证据不完整或增量更大时自动回退全量。
+
+保留的是提供器实际返回的完整字段，沿用原有提供器限制；历史快照不代替动作后的新验证。缓存上限和恢复边界见[详细协议](skills/computer-use/references/progressive-control.md)。
 
 ## 工具
 
 | 分组 | 工具 |
 |---|---|
+| 激活 | `computer_use_activate` |
 | 观察 | `computer_state` `computer_shot` `computer_marks` `computer_uia` |
 | 操作 | `computer_click` `computer_move` `computer_drag` `computer_scroll` `computer_select` `computer_key` `computer_type` `computer_uia_act` `computer_window` `computer_clip` |
 | 流程 | `computer_wait` `computer_batch` |
 | 元 | `computer_ask` `computer_ctrl` |
 
-`computer_marks` 返回屏幕上元素的编号列表，`computer_shot` 把同一批编号画到图上。mark 是一次**快照
+`computer_marks` 返回屏幕上元素的编号列表；`computer_marks {shot:true}` 额外保存对应的标注图。`computer_shot` 返回普通截图，在支持图片输入的模型路由上直接附带图片。mark 是一次**快照
 ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mark 会被拒绝，而不是点到错误的位置。
 
 ## 审批模式
@@ -94,6 +96,7 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 | 键 | 默认 | 含义 |
 |---|---:|---|
 | `automationMode` | `standard` | 审批模式（见上） |
+| `progressiveTools` | `true` | 按 Agent 激活；设为 `false` 可保留原有 18 个全局工具 |
 | `dryRun` | `false` | 只模拟操作并记录 |
 | `maxActionsPerMinute` | `60` | 核心层操作限速 |
 | `annotateMarks` | `true` | 在截图上绘制 Set-of-Marks 方框 |

@@ -254,7 +254,7 @@ async function ensureCycleBehaviour (indexSrc) {
 async function dispatchBehaviour (toolsSrc, tag) {
   const out = []
   const file = path.join(SANDBOX, `tools-${tag}.mjs`)
-  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output)\.js'/g,
+  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations)\.js'/g,
     (_, name) => `from ${JSON.stringify(pathToFileURL(path.join(LIBDIR, name + '.js')).href)}`))
   let mod
   try {
@@ -497,7 +497,7 @@ const MUTATIONS = [
     '    return gate.claim({ session: bus.driverSession, agent: exec && exec.agent })',
     'gate: the claim comes from the EXEC'],
   ['the opener is no longer wired into the dispatch path', INDEX,
-    ', defineTool, hooks, ensureCycle })', ', defineTool, hooks })',
+    ', defineTool, hooks, ensureCycle, register:', ', defineTool, hooks, register:',
     'wiring: the opener is handed to registerTools'],
   ['the opener is not awaited on the tool path (fire and forget)', TOOLS,
     'await ensureCycle(exec) } catch', 'ensureCycle(exec) } catch',

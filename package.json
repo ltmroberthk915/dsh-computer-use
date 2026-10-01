@@ -1,7 +1,7 @@
 {
   "name": "dsh-computer-use",
-  "version": "1.0.0",
-  "description": "Windows desktop computer use for DeepSeek Harness: 18 computer_* tools over a native C# worker (SendInput, UI Automation, BitBlt), with Set-of-Marks grounding, batched actions, four approval modes, a JSONL audit trail, a human brake announced into the session, and a bundled agent skill.",
+  "version": "1.1.0",
+  "description": "Windows desktop control for DeepSeek Harness with per-Agent tool loading, observed UIA target recovery, incremental observations with retained full snapshots, native screenshots, batching and human brakes.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -19,19 +19,33 @@
     "LICENSE"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1",
-    "@deepseek-ai/schemastery": "^3.0.0"
+    "@deepseek-ai/schemastery": "^3.0.0",
+    "@deepseek-ai/dsh-scope": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true },
-    "@deepseek-ai/dsh-llm": { "optional": true },
-    "@deepseek-ai/schemastery": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-scope": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=22"

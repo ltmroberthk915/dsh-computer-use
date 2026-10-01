@@ -9,16 +9,22 @@ Read this entry before driving. The skill gate requires this receipt once per se
 
 `computer_ctrl {action:"acknowledge", text:"A MINIMIZED window is not an occluded window"}`
 
+Desktop execution tools load for the current Agent after a successful `skill` load or this receipt. If they are not visible, call `computer_use_activate` to receive the manual and expose them. Activation does not open a control cycle or release a brake. Stop/exit and computer_ask remain available before activation.
+
+When taking an action, issue the actual available tool call. A target handle is a string argument to computer_uia_act; XML tags, JSON examples and prose do not execute it. In a run_code-only host, call the exposed tools through run_code.
+
 Observation and the safety direction (ask, stop, exit) are not gated by that receipt. A human brake still refuses observation. Read a linked reference only when its condition below applies; routine work needs this entry.
 
 ## Start, act, verify
 
 1. Identify the intended app with `computer_state {windows:true}`, reusing an already known window when valid. Activate its hwnd with `computer_window`; require `activated:true` before capturing or driving. Bind the intended record/field/document as well as the window. If minimized, restore then activate; an occlusion error needs inspecting what covers it.
 2. Use the cheapest sufficient observation: returned readback, a focused UIA query, a reusable mark map, then an image when visual evidence is needed. Do not read the same state twice merely to satisfy a checklist.
-3. Prefer `computer_uia {hwnd, role, name, id}` and `computer_uia_act` for controls exposing patterns. `name` is a substring; `id` is the exact AutomationId from a query. Scope with hwnd. Actions reject multiple matches or incomplete searches. Query again with a narrower target; do not pick the first same-name button. Tabs use action:"select"; fields can use setValue with a readback.
+3. Prefer `computer_uia {hwnd, role, name, id}` and `computer_uia_act` for controls exposing patterns. `name` is a substring; `id` is the exact AutomationId from a query. Scope with hwnd. Prefer a returned `target` handle for the selected control. If it was replaced, `rebind:true` permits recovery only when native identity or complete, unique semantic evidence still identifies it in the same window. Changed context, ambiguity and incomplete searches refuse. Use either target or name/id/role selectors; do not combine them. Query again with a narrower target; do not pick the first same-name button. Tabs use action:"select"; fields can use setValue with a readback.
 4. Otherwise use a currently observed mark or measured screen coordinate. A mark is a snapshot ID. It does not follow scrolling. Each mark action checks window identity, position and sampled pixels; STALE_MARK means no input was dispatched. Refresh with `computer_marks {refresh:true}`, then select the intended element by its new ID. Old IDs are retired. Refresh after known scrolling/navigation even if a sample misses the change. dx/dy offsets work in direct and batch clicks.
 5. Batch a coherent set of actions to a natural checkpoint, without a fixed step count. Actions run serially; failure, failed activation or cancellation stops subsequent steps. Reuse the returned evidence. `shot:"auto"` adds at most one image when needed; `shot:"never"` is suitable when text/readback already verifies the result.
 6. Verify the task outcome: field value, saved record/document, selected range, application status or image. A provider accepting input proves neither a save nor the business result. Report what was actually observed and any unresolved uncertainty, then finish.
+
+Repeated `computer_uia` or `computer_state` queries can pass `since` with the previous observation ID and the same query. A diff contains added/changed/removed elements and any order change; omitted elements retain their previous state. No base, expired base, changed scope, partial results or an uneconomical diff returns full. `snapshot` retrieves a retained complete historical observation without another capture; it is not fresh verification. Omit since/snapshot for a fresh full view after losing the baseline. See [progressive-control.md](references/progressive-control.md) for examples, retention and recovery boundaries.
 
 ## Screenshots and coordinates
 
