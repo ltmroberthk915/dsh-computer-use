@@ -1,0 +1,4 @@
+# Line endings are pinned to LF so a checkout is byte-identical on every platform. This matters here
+# beyond tidiness: the native worker's source is compiled under a cache key derived from its content
+# hash, and the guards read these files byte-for-byte.
+* text=auto eol=lf
