@@ -12,7 +12,7 @@ The human's own words are the spec here; this section is what they mean.
   cycle** — not a one-shot `worker.exe --op click` from a shell, not a deploy-time probe, not another
   session's leftover call.
 - **"Computer use 这个技能一旦启用, 立即挂打断监听和 computer ask 监听."** The moment the cycle is
-  live, the interrupt listeners (ESC, mouse wheel / mouse travel, typing takeover) are live with it —
+  live, the Ctrl+Esc emergency listener and physical-input cooperation listener are live with it —
   for the WHOLE cycle, not just for a driving op. **They die with the cycle**: no listener survives
   it ("Computer use 周期结束之后, 所有跟 computer use 相关的监听, 全部都要终结").
 - **A pause NEVER ends the cycle.** The cycle stays live while paused; only Ctrl+Alt+Q, or the turn
@@ -23,8 +23,8 @@ The human's own words are the spec here; this section is what they mean.
 | state | border | title / badge |
 |---|---|---|
 | cycle · thinking (an op is in flight) | pale blue, breathing | `AI 正在操控此电脑 · 监听中` |
-| cycle · acting (input going out) | deep saturated blue, steady | badge `监听中 · ESC 暂停 · Ctrl+Alt+Q 退出` |
-| **PAUSED** (ESC / wheel / typing takeover) | **red, steady** | `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` |
+| cycle · acting (input going out) | deep saturated blue, steady | badge `监听中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出` |
+| **PAUSED** (Ctrl+Esc) | **red, steady** | `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` |
 | **ASKING** (`computer_ask`) | **red, breathing at TWICE the cyan rate**, no countdown | `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` |
 | **EXITED** (Ctrl+Alt+Q) | **gone — nothing is listening** | ask-card in the chat, EXITED latch on disk |
 | no cycle | gone | `AI 已停止操控 · 未监听` |
@@ -33,9 +33,19 @@ The human's own words are the spec here; this section is what they mean.
 live cycle — `Panic.Engage` for the brake, `Panic.EngageAsk` for the ask — so a red box can never
 appear on a session that has nothing to stop.
 
+## Automatic cooperation
+
+Physical typing, wheel movement, mouse buttons and mouse movement immediately yield control. After 2 seconds of continued activity or holding a key/button, the state becomes waiting. After all keys/buttons are released and 3 seconds pass without another physical event, the state returns to idle. One brief touch yields for the same 3-second quiet interval but is not mislabeled sustained activity. No mouse distance, reversal count, wheel threshold or top-left position raises a manual brake.
+
+The native hook marks ownership before returning to Windows. A separate cleanup path releases only accepted plugin-owned downs; it preserves keys/buttons physically held by the user. Input loops, window refocus, UIA mutation and clipboard writes check ownership. UIA/COM actions already accepted by an application cannot be undone; their result remains unknown and needs a readback.
+
+The core waits for state events locally; it does not call the model or poll screenshots while waiting. The worker's native-call timeout remains short. Driver tools allow a local wait up to their one-hour Host deadline and obey cancellation immediately. On HUMAN_REOBSERVE, automatically read the current target and continue the task. No partial input is silently replayed, and a manual pause/exit is never cleared by this timer.
+
+The automatic handoff has a pale-yellow gradient with a 2.8-second smooth breathing period. It is click-through, does not activate a window, and has precedence over acting/thinking/capture cues; manual pause/question/exit states take precedence over it.
+
 ## Who may release what (the asymmetry is the point)
 
-- **ESC / mouse wheel / typing outside the host → PAUSE.** Actuation is then refused, and so is
+- **Ctrl+Esc → persistent manual PAUSE.** Actuation is then refused, and so is
   observation: every `computer_*` call except `computer_ctrl` and `computer_ask` is refused with a
   message naming the brake's reason and telling you to wrap up. Wrap up from what you already know
   rather than trying to look — leaving observation legal is what made "wrap up" optional, and the agent
@@ -116,7 +126,7 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 
 ## Emergency stop (the human's brake)
 
-- **ESC** PAUSES the machine: buttons/modifiers released, steady red border, and every further
+- **Ctrl+Esc** PAUSES the machine: buttons/modifiers released, steady red border, and every further
   actuation refused. **A HUMAN brake now refuses observation too** — every `computer_*` call except
   `computer_ctrl` and `computer_ask` comes back as a refusal that names the brake's reason and tells you
   to wrap up. That is deliberate: leaving observation legal is what let "wrap up" become optional, so the
@@ -131,10 +141,7 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 - **Ctrl+Alt+Q** ENDS the session: no border, nothing listening, the EXITED latch on disk, the turn
   cancelled, and every further actuation refused with `CYCLE-ENDED: …`. It stays over until a NEW
   turn opens a new cycle.
-- **Interrupting the turn is also a brake.** If the human stops the session (the stop button), the
-  plugin engages the brake itself — stopping the *model* is not stopping the *machine*, and any
-  automation already running would otherwise keep driving. An aborted turn in a computer-use
-  session therefore leaves the machine stopped until a human re-arms it.
+- **Cancelling the owning Host turn cancels its input and automatic wait.** The cancellation channel releases only plugin-owned downs, ends this turn, and does not write a persistent STOP. A pre-existing Ctrl+Esc pause remains authoritative.
 - **The brake is a fact about the MACHINE, not about one process.** The engaged state is persisted
   to `%LOCALAPPDATA%\dsh-computer-use\STOP`, and *every* worker — the resident one, a one-shot
   `worker.exe --op …` started from a shell, one started later — adopts it before doing anything.
@@ -156,8 +163,9 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 |---|---|
 | **cyan, breathing (2.5 s), ~52 px — the OUTER ring** | the agent is engaged/thinking; it has not touched the machine yet |
 | **deep saturated blue, steady, ~37 px — INSIDE the cyan ring** | the agent is actuating right now |
+| pale-yellow gentle gradient (2.8 s) | physical input owns the desktop; continue after 3 s quiet |
 | gold-orange three-beat flash (2 quick pulses → burst → short fade) | a screenshot was just taken |
-| red, steady + title `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` | PAUSED: an actuation was blocked (ESC / wheel / typing takeover) until the human re-arms |
+| red, steady + title `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` | PAUSED: an actuation was blocked (Ctrl+Esc) until the human re-arms |
 | red, breathing at 2× the cyan rate + title `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` | ASKING: `computer_ask` is waiting for the answer on the chat card — with **no clock at all**; the worker holds the brake and the card holds the wait |
 | **nothing** | idle — cut instantly when the turn ends, never lingering |
 

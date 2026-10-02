@@ -37,7 +37,7 @@ for (const kind of ['activate-failed', 'throw', 'cancel', 'stop', 'read', 'readb
 
 // Both public dispatch paths honor all wait modes; no worker is instantiated.
 const definitions = new Map(), waits = []
-registerTools({ ctx: { tools: { register: d => definitions.set(d.name, d) } }, defineTool: d => d,
+registerTools({ config: {}, ctx: { tools: { register: d => definitions.set(d.name, d) } }, defineTool: d => d,
   cu: { waitForIdle: async () => waits.push('idle'), waitStable: async () => waits.push('stable'), waitChange: async () => waits.push('change') } })
 for (const mode of ['idle', 'stable', 'change']) {
   await definitions.get('computer_wait').execute({ mode })

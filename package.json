@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-use",
-  "version": "1.1.0",
+  "version": "1.2.0-rc.2",
   "description": "Windows desktop control for DeepSeek Harness with per-Agent tool loading, observed UIA target recovery, incremental observations with retained full snapshots, native screenshots, batching and human brakes.",
   "type": "module",
   "main": "lib/index.js",

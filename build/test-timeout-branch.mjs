@@ -209,13 +209,13 @@ add('the dispatch door is wired in tools.js, not just declared',
     if (typeof t !== 'string') return 'the runner did not hand this rule a text'
     if (!/hooks\.onDispatch\(exec\)/.test(t)) return 'tools.js never calls hooks.onDispatch — the situation would never be written'
     const call = t.indexOf('hooks.onDispatch(exec)')
-    const inner = t.indexOf('const out = await inner(args, exec)')
+    const inner = t.indexOf('return inner(args, exec)')
     if (inner < 0 || call > inner) return 'tools.js calls onDispatch AFTER the tool body — it would mark calls that did not happen yet'
     if (!/if \(hooks && hooks\.onDispatch\)/.test(t)) return 'tools.js calls onDispatch without checking that hooks itself exists — registerTools is legal without one, and that threw into a dispatch'
     return null
   },
   [{ name: 'tools.js stops calling the hook', target: 'tools', find: 'hooks.onDispatch(exec)', with: 'void 0' },
-    { name: 'the hook is called after the tool body', target: 'tools', find: /if \(hooks && hooks\.onDispatch\)[^\n]*\n        const out = await inner\(args, exec\)/, with: 'const out = await inner(args, exec)\n        if (hooks && hooks.onDispatch) { try { hooks.onDispatch(exec) } catch { } }' }],
+    { name: 'the hook is called after the tool body', target: 'tools', find: /if \(hooks && hooks\.onDispatch\)[^\n]*\n          return inner\(args, exec\)/, with: 'return inner(args, exec)\n          if (hooks && hooks.onDispatch) { try { hooks.onDispatch(exec) } catch { } }' }],
   'tools')
 
 // ---- 3d. THE STAGNATION SIGNATURE, AND THE OBSERVATION-ONLY CASE (2026-09-16) --------------------------

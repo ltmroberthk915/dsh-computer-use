@@ -161,16 +161,16 @@ const CHECKS = [
     brks: [[/static volatile bool _armed = false;/, 'static volatile bool _armed = true;']],
   },
   {
-    name: 'MonitorHuman returns immediately while the monitors are NOT armed',
+    name: 'physical ownership is enabled only during an armed live cycle',
     file: 'worker',
-    re: /if \(!_armed\) \{ _monHave = false; return; \}/,
-    brks: [[/if \(!_armed\) \{ _monHave = false; return; \}/, 'if (false) { _monHave = false; return; }']],
+    re: /Handoff\.Enable\(_armed && CycleLit && !_exited, now\);/,
+    brks: [[/Handoff\.Enable\(_armed && CycleLit && !_exited, now\);/g, 'Handoff.Enable(true, now);']],
   },
   {
-    name: 'the keyboard mirror is gated on the armed monitors',
+    name: 'the keyboard hook records physical ownership immediately',
     file: 'worker',
-    re: /else if \(_armed && Program\.HostConfigured\(\)/,
-    brks: [[/else if \(_armed && Program\.HostConfigured\(\)/, 'else if (Program.HostConfigured()']],
+    re: /RecordHumanInput\(\(int\)k\.vkCode, down, up\);/,
+    brks: [[/RecordHumanInput\(\(int\)k\.vkCode, down, up\);/, '']],
   },
   {
     name: 'calm() ends the cycle AND disarms the monitors',
@@ -203,52 +203,27 @@ const CHECKS = [
     ],
   },
   {
-    name: 'a mouse swing must be big (HumanLegPx >= 80 physical px)',
+    name: 'ordinary mouse input yields and never engages a persistent brake',
     file: 'worker',
-    re: /const int HumanLegPx = (\d+);/,
     fn: (s) => {
-      const m = /const int HumanLegPx = (\d+);/.exec(s)
-      if (!m) return 'HumanLegPx — pattern not found'
-      return Number(m[1]) >= 80 ? null : `HumanLegPx = ${m[1]} px — at 175% scaling that is hand tremor, not a swing`
+      const body = sliceRange(s, 'static IntPtr MouseHookCallback(', CS_END);
+      if (!body || !body.text.includes('RecordHumanInput(key, down, up);')) return 'physical mouse events must reach handoff';
+      if (/\bEngage\(/.test(body.text)) return 'ordinary mouse input must not latch a STOP';
+      if (/HumanLegPx|WheelNotches|MOVE_BUDGET/.test(s)) return 'removed travel/wheel thresholds are live again';
+      return null;
     },
-    brks: [[/const int HumanLegPx = \d+;/, 'const int HumanLegPx = 24;']],
+    brks: [[/if \(activity\) RecordHumanInput\(key, down, up\);/, 'if (activity) { RecordHumanInput(key, down, up); Engage("mouse"); }']],
   },
   {
-    // THE WHEEL MUST NOT BRAKE ON ONE NOTCH (2026-09-15).
-    //
-    // The wheel monitor used to brake on ANY `delta != 0`, i.e. a single 120-notch click stopped the
-    // machine. The human must be able to scroll to read, to work and to talk to the agent, so the
-    // signal could not separate "reading a page" from "get off my machine" — the exact defect the
-    // 604 px distance rule was switched OFF for ("a signal that cannot separate those two cases must
-    // not drive a brake", said of HumanTravelEnabled just above these constants). Measured cost: every
-    // attempt to use the machine braked the session; the human reported "无端触发 computer use 中止".
-    name: 'the wheel needs SEVERAL notches to brake (WheelNotches >= 4 in a short window)',
+    name: 'only physical exact Ctrl+Esc requests manual keyboard pause',
     file: 'worker',
     fn: (s) => {
-      const n = /const int WheelNotches = (\d+);/.exec(s)
-      const w = /const int WheelWindowMs = (\d+);/.exec(s)
-      if (!n) return 'WheelNotches is gone — a single notch brakes the session again'
-      if (!w) return 'WheelWindowMs is gone — the notch count has no window, so it accumulates forever and ordinary reading eventually brakes'
-      if (Number(n[1]) < 4) return `WheelNotches = ${n[1]} — ordinary scrolling reaches that, so the wheel is a false-positive machine again`
-      if (Number(w[1]) > 3000) return `WheelWindowMs = ${w[1]} — too long a window makes the count accumulate across separate scroll gestures`
-      // The count must be RESET when the window expires, or `_wheelN` grows without bound and a long
-      // reading session trips the brake no matter how high the bar is.
-      if (!/_wheelN = 0; _wheelT0 = now;/.test(s)) return 'the wheel counter is never reset on window expiry — a long scroll session accumulates and brakes anyway'
-      // ...and the brake must be conditioned on the count, not on a bare delta.
-      if (/if \(delta != 0\)\s*\n\s*Engage\(/.test(s)) return 'the wheel brakes on a bare delta again — one notch is not a takeover'
-      // ...AND THE CONDITION ITSELF MUST EXIST. Without this clause, replacing the test with `if
-      // (true)` walks straight through every other assertion here (they check the constants' VALUES
-      // and the reset, not that the count is what gates the brake) — measured: that mutation was the
-      // one this guard could not catch on its first run. A guard that pins a threshold but not its use
-      // pins nothing.
-      if (!/if \(_wheelN >= WheelNotches\)/.test(s)) return 'the wheel no longer brakes on the NOTCH COUNT — the threshold constants are decoration and the brake fires on whatever the surrounding condition happens to be'
-      return null
+      const body = sliceRange(s, 'public static string ControlHotkey(', CS_END);
+      if (!body || !body.text.includes('if (!down || !human) return "";')) return 'injected input must not trigger manual controls';
+      if (!body.text.includes('vk == Native.VK_ESCAPE && ctrl && !alt && !shift && !win && live')) return 'pause must require Ctrl+Esc in a live cycle';
+      return null;
     },
-    brks: [
-      { file: 'worker', find: /const int WheelNotches = \d+;/, with: 'const int WheelNotches = 1;' },
-      { file: 'worker', find: /if \(_wheelN >= WheelNotches\)/, with: 'if (true)' },
-      { file: 'worker', find: /_wheelN = 0; _wheelT0 = now;/, with: '_wheelT0 = now;' },
-    ],
+    brks: [[/Native\.VK_ESCAPE && ctrl && !alt && !shift && !win && live/, 'Native.VK_ESCAPE && live']],
   },
 
   // ------------------------------------------------------------------ R1: no red without a cycle
@@ -310,13 +285,13 @@ const CHECKS = [
     name: 'the indicator NAMES the state: 监听中 only while listening, 未监听 once the cycle is over',
     file: 'worker',
     fn: (s) => {
-      if (!/PaintBadge\(g, "监听中 · ESC 暂停 · Ctrl\+Alt\+Q 退出"/.test(s)) return 'the live badge no longer says 监听中'
+      if (!/PaintBadge\(g, "监听中 · Ctrl\+Esc 暂停 · Ctrl\+Alt\+Q 退出"/.test(s)) return 'the live badge no longer says 监听中'
       if (!/PaintBadge\(g, "已暂停 · Ctrl\+Alt\+R 继续 · Ctrl\+Alt\+Q 退出"/.test(s)) return 'the pause badge no longer names both keys (Ctrl+Alt+R 继续 / Ctrl+Alt+Q 退出)'
       if (!/"AI 已停止操控 · 未监听"/.test(s)) return 'the idle title no longer says 未监听 — a dead cycle would read like a live one'
       return null
     },
     brks: [
-      { find: /监听中 · ESC 暂停 · Ctrl\+Alt\+Q 退出/, with: '运行中 · ESC 暂停 · Ctrl+Alt+Q 退出' },
+      { find: /监听中 · Ctrl\+Esc 暂停 · Ctrl\+Alt\+Q 退出/, with: '运行中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出' },
       { find: /"AI 已停止操控 · 未监听"/, with: '"AI 已停止操控"' },
     ],
   },
@@ -671,7 +646,7 @@ const CHECKS = [
       if (!/bool any = false;/.test(b.text)) return 'AddModifier() has no "did any specific side report down" flag'
       if (!/if \(!any && generic != 0 && down\(generic\)\)/.test(b.text)) return 'the generic VK is not a fallback-only release (it would double-release a named side)'
       if (!/static bool IsExtendedVk\(ushort vk\) \{ return vk == 0x5B \|\| vk == 0x5C \|\| vk == 0xA3 \|\| vk == 0xA5; \}/.test(s)) return 'IsExtendedVk() must be both Windows keys (0x5B/0x5C) plus right Ctrl/Alt (0xA3/0xA5) — right Shift is not an extended key'
-      if (!/KEYEVENTF_KEYUP \| \(IsExtendedVk\(vk\) \? Native\.KEYEVENTF_EXTENDEDKEY : 0\)/.test(s)) return 'the synthesised release does not carry KEYEVENTF_EXTENDEDKEY for the extended keys'
+      if (!/Panic\.IsExtendedVk\(vk\) \? Native\.KEYEVENTF_EXTENDEDKEY : 0/.test(s)) return 'the synthesised release does not carry KEYEVENTF_EXTENDEDKEY for the extended keys'
       return null
     },
     brks: [
@@ -679,7 +654,7 @@ const CHECKS = [
       { scope: 'static void AddModifier(', end: CS_END, find: /if \(!any && generic != 0 && down\(generic\)\)/, with: 'if (generic != 0 && down(generic))' },
       { find: /return vk == 0x5B \|\| vk == 0x5C \|\| vk == 0xA3 \|\| vk == 0xA5;/, with: 'return vk == 0x5C || vk == 0xA3 || vk == 0xA5;' },
       { find: /return vk == 0x5B \|\| vk == 0x5C \|\| vk == 0xA3 \|\| vk == 0xA5;/, with: 'return vk == 0x5B || vk == 0x5C || vk == 0xA3 || vk == 0xA5 || vk == 0xA1;' },
-      { find: /KEYEVENTF_KEYUP \| \(IsExtendedVk\(vk\) \? Native\.KEYEVENTF_EXTENDEDKEY : 0\)/, with: 'KEYEVENTF_KEYUP' },
+      { find: /Panic\.IsExtendedVk\(vk\) \? Native\.KEYEVENTF_EXTENDEDKEY : 0/, with: '0' },
     ],
   },
   {

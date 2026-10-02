@@ -182,17 +182,18 @@ Every action needs ONE cheap text signal that proves it worked — pick it first
   actually need to *look*.
 - **Let text decide when text can.** Window titles, UIA names, `focus.match`, the clipboard and
   `computer_uia` answer most "did it work?" questions with zero pixels.
-- **Timing first.** `computer_shot` waits for stability and returns `settled:false` if the screen
-  never settled — re-shoot rather than diagnosing a half-rendered frame. `computer_wait
-  {mode:"stable"}` before a shot on a slow page; `{mode:"change"}` right after a click — **no
-  change means the click missed**.
+- **Check readiness without assuming failure.** `computer_shot` can return `settled:false`
+  because of unrelated animation or a caret. For a pixel wait, use `computer_wait
+  {mode:"stable",hwnd}` on the observed target window; use UIA readback when its own pixels
+  keep animating. `{mode:"change",hwnd}` reports sampled pixel change, not whether a click
+  succeeded. Inspect state before repeating an action. Do not stack repeated full timeouts.
 - **Crop to the decision**, and crop **1:1** when you must hit a small icon: a scaled crop is a
   guessing game, a 1:1 crop is a measurement.
 - **Never shoot twice for the same fact**, and never re-derive a coordinate you already have.
 
 ### After ONE miss, change channel — do not guess again
 
-A click that produced no change means the pixel is wrong. The escalation order is fixed:
+A click that produced no sampled change has an unverified result. Inspect state, then choose another channel if needed:
 
 `1:1 crop (measure, don't guess) → computer_uia {at} (who owns it?) → uia_act (drive it by name) →
 keyboard → re-anchor from a fresh text read → new screenshot`

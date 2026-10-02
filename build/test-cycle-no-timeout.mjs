@@ -140,14 +140,22 @@ for (const legacy of [600000, 1, 0]) {
   h.event('exit'); h.advance(366 * 86400000); h.event('resume'); await settle()
   assert.equal(h.gate.state(), 'ended'); assert.equal(wakes(h), 0)
 }
-// Host abort -> idle while native panic is still pending: preserve the cycle synchronously.
+// Host cancellation ends its cycle without creating a persistent brake.
 {
   const h = harness(0); await h.run()
-  let release; h.state.deferPanic = new Promise(r => { release = r })
+  let cancellations = 0; h.cu.cancelInputs = () => { cancellations++ }
   h.handlers.get('session/event')('A', { type: 'turn/end', data: { reason: { kind: 'aborted' } } })
   h.handlers.get('agent/status')({ agent: h.agent, status: 'idle' })
-  assert.equal(h.gate.state(), 'paused'); assert.equal(h.state.calls.includes('calm'), false)
-  release(); await settle(); assert.equal(h.cu.stopped, true)
+  assert.equal(h.gate.state(), 'ended'); assert.equal(cancellations, 1)
+  await settle(); assert.equal(h.cu.stopped, false)
+}
+// Host cancellation must not clear a physical Ctrl+Esc pause that already exists.
+{
+  const h = harness(0); await h.run(); h.event('panic')
+  let cancellations = 0; h.cu.cancelInputs = () => { cancellations++ }
+  h.handlers.get('session/event')('A', { type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+  await settle(); assert.equal(cancellations, 1)
+  assert.equal(h.gate.state(), 'paused'); assert.equal(h.cu.stopped, true)
 }
 // Real tool + plugin + core hooks: owner-only recovery, approval blocking and in-flight invalidation.
 for (const scenario of ['success', 'approval', 'late-approval', 'human-stop', 'Q', 'stale-token', 'foreign-owner', 'new-cycle']) {

@@ -96,8 +96,8 @@ const CHECKS = [
     // ending could set _stoppedMode again a moment after the teardown had cleared it.
     name: 'ask is its own visual state (want=5 above stopped=4) and an EXIT outranks both',
     file: 'worker',
-    re: /if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(flashOn \? 2 : committed\)\);/,
-    brk: [/if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(flashOn \? 2 : committed\)\);/,
+    re: /if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(flashOn \? 2 : committed\)\)\);/,
+    brk: [/if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(flashOn \? 2 : committed\)\)\);/,
       'if (Panic.Exited) return 0;\n            return _stoppedMode ? 4 : (flashOn ? 2 : committed);'],
   },
   {
@@ -321,24 +321,19 @@ const CHECKS = [
 
   // ---------------------------------------------------------------- C. the wheel trigger
   {
-    name: 'the wheel is a takeover trigger, gated on our own input AND on the agent driving',
+    name: 'physical wheel input yields without a persistent pause or self-trigger',
     file: 'worker',
     fn: (s) => {
-      const m = /static IntPtr MouseHookCallback\([\s\S]*?\n        \}/.exec(s)
-      if (!m) return 'MouseHookCallback not found'
-      const body = m[0]
-      if (!/WM_MOUSEWHEEL_/.test(body)) return 'the mouse hook does not look for WM_MOUSEWHEEL'
-      if (!/m\.dwExtraInfo != OwnMagic/.test(body)) return 'our own synthetic wheel is not excluded — the agent can brake itself'
-      // The gate must be the CODE, not a comment ABOUT the gate: "(_armed)" is mentioned in this
-      // method's own doc comment, so a bare /_armed/ was satisfied by prose after the real gate was
-      // deleted (same defect class as the R1 self-test miss in test-monitor-lifetime).
-      if (!/m\.dwExtraInfo != OwnMagic && _armed|_armed && m\.dwExtraInfo != OwnMagic/.test(body)) {
-        return 'the wheel brakes even when the agent is not driving (monitor lifetime) — the `dwExtraInfo && _armed` gate is gone'
-      }
-      if (!/delta/.test(body)) return 'the wheel delta is not carried into the STOP file (no evidence for the next "why?")'
-      return null
+      const m = /static IntPtr MouseHookCallback\([\s\S]*?\n        \}/.exec(s);
+      if (!m) return 'MouseHookCallback not found';
+      const body = m[0];
+      if (!/case 0x20A: case 0x20E:/.test(body)) return 'vertical and horizontal wheel must be observed';
+      if (!body.includes('PhysicalEvent(m.dwExtraInfo, m.flags, 3)')) return 'injected wheel must not impersonate physical input';
+      if (!body.includes('RecordHumanInput(key, down, up);')) return 'wheel input must reach human ownership';
+      if (/\bEngage\(/.test(body)) return 'wheel input must not write a STOP record';
+      return null;
     },
-    brk: [/m\.dwExtraInfo != OwnMagic/, 'm.dwExtraInfo == OwnMagic'],
+    brk: [/PhysicalEvent\(m\.dwExtraInfo, m\.flags, 3\)/, 'true'],
   },
   {
     name: 'the mouse hook is actually installed',

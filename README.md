@@ -52,6 +52,12 @@ manual before driving", because no tool layer can see whether a model read a doc
 
 The plugin registers the bundled skill through `ctx.skills.register()` when available. If that service is absent, `computer_use_activate` returns the same manual, its absolute source path and the scoped tool list. The receipt and all existing approval/brake checks still apply.
 
+## Shared input in 1.2.0-rc.2
+
+This pre-release introduces immediate human takeover, automatic waiting after 2 seconds of continued input, and continuation after 3 quiet seconds. Waiting happens locally without model polling. Interrupted writes require a fresh readback and are never blindly replayed. Host cancellation releases accepted automation-owned input without creating a new persistent pause. Existing DSH Pet/main-window and original-topmost handling is retained.
+
+The configured GLM 5.3 Max, GLM 5.3 Flash and DeepSeek Flash routes passed a controlled continuation-protocol test. Native input and physical hotkeys were verified separately; this is not a general desktop or vision benchmark. See [release verification](docs/RELEASE-1.2.0-rc.2.md) for scope.
+
 ## On-demand controls in 1.1
 
 - **Per-Agent tools:** idle Agents see `computer_use_activate`, `computer_ctrl` and `computer_ask`. A successful computer-use skill load, receipt or activation exposes the 18 existing tools plus the activation entry to that Agent. Other Agents and children activate independently. Native calls and Node `run_code` are supported. Activation does not start control or release a human brake.
@@ -90,10 +96,8 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 
 ## Safety model
 
-- **Physical kill switch** — move the pointer into the top-left corner of the screen; the worker
-  latches and refuses every later injection, and releases held buttons or a drag in progress.
-- **Pause** — `ESC`, a mouse-wheel turn, or your own typing on the desktop pauses the machine. A
-  human pause is released with `Ctrl+Alt+R`.
+- **Shared input** — physical typing, scrolling, mouse movement and mouse buttons immediately yield control. Continued input or a held key/button for 2 seconds enters automatic waiting. After all keys/buttons are released and 3 seconds pass without physical input, the agent takes a fresh observation and continues the authorized task. A brief touch also waits for the 3-second quiet interval. A gentle pale-yellow edge gradient shows human ownership.
+- **Manual pause** — only physical `Ctrl+Esc` raises a persistent input brake; `Ctrl+Alt+R` resumes. Ordinary Esc, typing, scrolling, pointer distance/frequency and the screen corner do not create this pause. Explicit question/diagnostic holds remain separate.
 - **Exit** — `Ctrl+Alt+Q` ends the session: the overlay goes away, its listeners are torn down, and
   further actuation is refused until a later turn opens a new one.
 - **The brake is a fact about the machine, not one process** — the engaged state is persisted, and

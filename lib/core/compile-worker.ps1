@@ -1,6 +1,6 @@
 param(
     # RESOLVED FROM THIS SCRIPT'S OWN LOCATION, NOT FROM A MACHINE-SPECIFIC PATH (2026-09-16).
-    # It used to default to `<repo>\lib\core\worker.cs`, which is
+    # It used to default to `D:\BuyKey\dsh-computer-use\packages\computer-use-core\src\worker.cs`, which is
     # correct on exactly one computer — and `compileWorkerSync()` in index.js calls this script WITHOUT
     # `-Path`, so on any other machine the plugin's compile-on-demand path pointed at a file that is not
     # there. That is a silent portability failure: the plugin only reaches it when no cached worker exists,

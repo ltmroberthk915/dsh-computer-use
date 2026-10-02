@@ -28,6 +28,7 @@ const captured = []
 const cuStub = new Proxy({}, {
   get: (_t, prop) => {
     if (prop === 'then') return undefined
+    if (prop === 'withInputContext') return (_ctx, fn) => fn()
     if (prop === 'ask') return async (opts = {}) => ({ answered: false, keepPause: false, reason: 'stub', viaOnAsk: await opts.onAsk({ askId: 1, hostRaised: false, caretPlaced: false }) })
     return async () => ({ stub: String(prop) })
   },
@@ -69,7 +70,7 @@ for (const def of captured) {
   if (!ok) bad++
   const detail = err ? `threw: ${err}`
     : unknown ? 'NOT in the batch handler map'
-      : step.ok ? 'reached its handler'
+      : !step ? 'handler returned no batch step' : step.ok ? 'reached its handler'
         : `reached its handler (${String(step.error).slice(0, 48)})`
   console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${def.name.padEnd(20)} ${detail}`)
   if (def.name === 'computer_ask') {

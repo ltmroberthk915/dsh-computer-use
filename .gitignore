@@ -9,3 +9,7 @@ build/iso-*
 # The plugin's own runtime output, when a profile is pointed at this directory.
 shots/
 audit.jsonl
+
+# Local verification evidence and isolated fixtures are not release source.
+build/handoff-evidence/
+build/coactive-evidence/

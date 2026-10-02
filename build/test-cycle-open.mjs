@@ -254,7 +254,7 @@ async function ensureCycleBehaviour (indexSrc) {
 async function dispatchBehaviour (toolsSrc, tag) {
   const out = []
   const file = path.join(SANDBOX, `tools-${tag}.mjs`)
-  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations)\.js'/g,
+  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback)\.js'/g,
     (_, name) => `from ${JSON.stringify(pathToFileURL(path.join(LIBDIR, name + '.js')).href)}`))
   let mod
   try {
@@ -273,6 +273,7 @@ async function dispatchBehaviour (toolsSrc, tag) {
   }, {
     get: (t, p) => {
       if (p === 'then') return undefined
+      if (p === 'withInputContext') return (_ctx, fn) => fn()
       if (Object.prototype.hasOwnProperty.call(t, p)) return t[p]
       return async () => { order.push('worker:' + String(p)); return {} }
     },
@@ -395,7 +396,7 @@ const TEXT_CHECKS = [
   ['dispatch: tools.js awaits the opener BEFORE `inner()` (i.e. before the worker op)',
     (s) => {
       const a = s[TOOLS].indexOf('await ensureCycle(exec)')
-      const i = s[TOOLS].indexOf('const out = await inner(args, exec)')
+      const i = s[TOOLS].indexOf('return inner(args, exec)')
       return a >= 0 && i >= 0 && a < i
     }],
   ['dispatch: a VOIDED opening is refused, not dispatched (and a cancelled call never enters)',
@@ -436,14 +437,14 @@ const TEXT_CHECKS = [
       if (!/gate\.mark\('open'/.test(b)) return false
       return !/cu\.resume\(/.test(b) && !/mark\('open', \{ why: 'human/.test(b)   // never impersonates a human resume
     }],
-  ['host stop button: the brake is engaged WITHOUT calming the cycle away first',
+  ['host stop button: cancel input and preserve any explicit manual pause',
     (s) => {
       // NB: anchor on the interrupt branch's own log text — the self-abort branch above logs
       // "NOT re-engaging the brake" and legitimately calms (that cycle IS over).
       const i = s[INDEX].indexOf('in a computer-use session')
       if (i < 0) return false
-      const win = s[INDEX].slice(i, i + 400)
-      return win.includes('cu.panic(') && !win.includes('cu.calm(')
+      const win = s[INDEX].slice(i, i + 550)
+      return win.includes('cu.cancelInputs?.()') && win.includes('if (!cu.stopped)') && !win.includes('cu.panic(')
     }],
   ['exit notice: the worker\'s record is quoted VERBATIM (never re-worded by the plugin)',
     (s) => /const record = \(e && e\.why\)/.test(s[INDEX]) && /\$\{record\}/.test(s[INDEX])],

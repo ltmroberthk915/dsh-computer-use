@@ -1,5 +1,11 @@
 # Maintenance and storage
 
+## Evidence for a regression result
+
+Record the exact model/provider, loaded plugin version, test time and tool calls for each run. Count tools actually reached, including batch substeps; skipped steps and protection refusals are not functional passes. Do not merge an earlier model/build's results into a new run's coverage. A tool receipt proves dispatch/return; verify the intended effect with a readback. Opposite scroll commands do not prove restoration at a scroll boundary.
+
+For vision, use a fresh image whose answer is absent from text, filenames and UIA; check both the image block and the model's answer. A model saying it cannot see is not a transport trace. For marks/stability, distinguish changed pixels from changed geometry and control the suspected animation before assigning a cause. `lastDiffPct` describes the final sample pair, not the whole wait. Read current virtual-screen bounds before diagnosing multi-monitor or off-screen coordinates.
+
 ## Driving the worker from a shell (debugging, calibration)
 
 `worker.exe --op <op> '<json-args>'` runs one op with no stdin — the fastest way to test the input

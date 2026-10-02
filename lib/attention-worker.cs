@@ -27,6 +27,7 @@ class AttentionWorker
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder title, int length);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int n);
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
@@ -85,6 +86,8 @@ class AttentionWorker
             uint p=Pid(h);
             if(GetWindow(h,4)!=IntPtr.Zero || GetWindowTextLength(h)==0 || (GetWindowLong(h,-20)&0x80)!=0) return true;
             if(wanted!=0 && p!=wanted) return true;
+            var title=new StringBuilder(512); GetWindowText(h,title,title.Capacity);
+            if(title.ToString()=="DSH Pet") return true; // legacy independent pet, never the main window
             if(!String.Equals(PathOf(p),exe,StringComparison.OrdinalIgnoreCase)) return true;
             candidates.Add(h); return true;
         },IntPtr.Zero);

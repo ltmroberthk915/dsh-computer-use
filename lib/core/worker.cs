@@ -12,11 +12,12 @@
 //
 // Safety model: the worker is a faithful actuator. Policy (approvals,
 // blacklists, masking) lives in the DSH plugin / MCP gate layers. Worker-side
-// guards: top-left-corner failsafe (park the physical mouse there to veto any
-// actuation) and a human-takeover probe during drags.
+// guards: exact physical Ctrl+Esc for manual pause, event-driven human ownership,
+// and accepted-input cleanup. Physical activity yields until three seconds quiet.
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -31,6 +32,77 @@ using System.Windows.Forms; // Clipboard (watch out: bare Point stays our own st
 
 namespace DshComputerUse.Worker
 {
+    // Monotonic, event-driven ownership. A brief touch yields immediately; two seconds
+    // of continued input/holding enters waiting. Only three seconds with no held input
+    // and no physical event returns control. Ordinary input never creates a STOP file.
+    public sealed class HumanInputState
+    {
+        public const int SustainedMs = 2000, IdleMs = 3000;
+        readonly object sync = new object();
+        readonly HashSet<int> held = new HashSet<int>();
+        bool enabled, seen;
+        string phase = "idle", lastKind = "none";
+        long first, last, revision, burst;
+        public string Phase { get { lock (sync) { return phase; } } }
+        public long Revision { get { lock (sync) { return revision; } } }
+        public bool Active { get { lock (sync) { return phase != "idle"; } } }
+        public string LastKind { get { lock (sync) { return lastKind; } } }
+        public bool Held(int vk)
+        {
+            lock (sync)
+            {
+                if (held.Contains(vk)) return true;
+                if (vk == 0x10) return held.Contains(0xA0) || held.Contains(0xA1);
+                if (vk == 0x11) return held.Contains(0xA2) || held.Contains(0xA3);
+                if (vk == 0x12) return held.Contains(0xA4) || held.Contains(0xA5);
+                if (vk == 0xA0 || vk == 0xA1) return held.Contains(0x10);
+                if (vk == 0xA2 || vk == 0xA3) return held.Contains(0x11);
+                if (vk == 0xA4 || vk == 0xA5) return held.Contains(0x12);
+                return false;
+            }
+        }
+        public void Enable(bool on, long now)
+        {
+            lock (sync)
+            {
+                if (enabled == on) return;
+                enabled = on;
+                if (!on) { phase = "idle"; return; }
+                if (held.Count > 0 || (seen && now - last < IdleMs)) Start(now);
+            }
+        }
+        void Start(long now) { phase = "yielding"; first = now; if (!seen) last = now; burst++; }
+        public void Record(int key, bool down, bool up, long now)
+        {
+            lock (sync)
+            {
+                bool continued = held.Count > 0 || (seen && now - last < IdleMs);
+                lastKind = key == 0 ? "pointer-or-wheel" : key <= 6 ? "button" : "keyboard";
+                if (key != 0) { if (down) held.Add(key); if (up) held.Remove(key); }
+                seen = true; last = now; revision++;
+                if (!enabled) return;
+                if (phase == "idle" || !continued) Start(now);
+                if (now - first >= SustainedMs) phase = "waiting";
+            }
+        }
+        public void Tick(long now)
+        {
+            lock (sync)
+            {
+                if (!enabled || phase == "idle") return;
+                if (held.Count == 0 && now - last >= IdleMs) { phase = "idle"; return; }
+                if (held.Count > 0 && now - first >= SustainedMs) phase = "waiting";
+            }
+        }
+        public object Snapshot(long now)
+        {
+            lock (sync) return Program.Dict("phase", phase, "active", phase != "idle",
+                "revision", revision, "burst", burst, "heldCount", held.Count, "lastKind", lastKind,
+                "quietRemainingMs", phase == "idle" ? 0 : held.Count > 0 ? IdleMs : Math.Max(0, IdleMs - (now - last)),
+                "sustainedMs", SustainedMs, "idleMs", IdleMs);
+        }
+    }
+
     // A temporary pause is an explicit, single-use claim. No clock grants permission.
     public sealed class RecoveryPermit
     {
@@ -451,6 +523,7 @@ namespace DshComputerUse.Worker
         // clear it on explicit lifecycle transitions; approval waits and thinking may take as
         // long as needed. A bool also avoids TickCount wraparound changing a long-lived cycle.
         static volatile bool _thinking = false;
+        public static void HumanYield() { EnsureStarted(); }
         public static bool ThinkingActive { get { return _enabled && _thinking; } }
 
         /// Mark "the agent is engaged" until an explicit Off/Kill. The holdMs argument remains
@@ -494,7 +567,7 @@ namespace DshComputerUse.Worker
         public static int DeriveWant(bool flashOn, int committed)
         {
             if (Panic.Exited) return 0;
-            return _askMode ? 5 : (_stoppedMode ? 4 : (flashOn ? 2 : committed));
+            return _askMode ? 5 : (_stoppedMode ? 4 : (Panic.HumanActive ? 6 : (flashOn ? 2 : committed)));
         }
         /// The title states the same fact as the light, derived the same way (an ended session must
         /// not advertise "已暂停 · Ctrl+Alt+R 继续" in the window list).
@@ -502,7 +575,7 @@ namespace DshComputerUse.Worker
         {
             if (Panic.Exited) return "AI 已停止操控 · 未监听";
             return _askMode ? "AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）"
-                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : label);
+                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : Panic.HumanActive ? "已让出键鼠 · 等待人操作 · 静默 3 秒后继续" : label);
         }
         static volatile string _shownTitle = null;
         // What the indicator is ACTUALLY rendering right now, readable from outside via `probe`.
@@ -694,7 +767,7 @@ namespace DshComputerUse.Worker
                 }
                 // want: 0 idle | 1 acting (deep blue) | 3 thinking (pale blue) | 2 flash (yellow)
                 //       4 emergency-stopped (RED, steady — the session is dead until re-armed)
-                int needBitmap = want == 2 ? 2 : (want == 0 ? curBitmap : (want == 1 ? 3 : (want == 4 || want == 5 ? 4 : 1)));
+                int needBitmap = want == 6 ? 5 : want == 2 ? 2 : (want == 0 ? curBitmap : (want == 1 ? 3 : (want == 4 || want == 5 ? 4 : 1)));
                 // A REPAINT MUST REACH THE SCREEN EVEN WHEN ALPHA DOES NOT MOVE.
                 //
                 // The present below used to be gated on `diff != 0` alone, while the flash snaps
@@ -706,6 +779,7 @@ namespace DshComputerUse.Worker
                 // brake was visible was luck. Present when EITHER the bitmap or the alpha changed.
                 bool repaint = false;
                 if (needBitmap == 2 && paintedFlash != _flashStart) { PaintFlash(bits, vw, vh); paintedFlash = _flashStart; curBitmap = 2; alpha = 204; repaint = true; /* snap ON at 80%: a flash is an event, not a fade */ }
+                else if (needBitmap == 5 && curBitmap != 5) { PaintHumanYield(bits, vw, vh); curBitmap = 5; repaint = true; }
                 else if (needBitmap == 4 && curBitmap != 4) { PaintStop(bits, vw, vh); curBitmap = 4; repaint = true; }
                 else if (needBitmap == 3 && curBitmap != 3) { PaintBlue(bits, vw, vh, true); curBitmap = 3; repaint = true; }
                 else if (needBitmap == 1 && curBitmap != 1) { PaintBlue(bits, vw, vh, false); curBitmap = 1; repaint = true; }
@@ -726,6 +800,11 @@ namespace DshComputerUse.Worker
                 }
                 else if (want == 1) target = FULL;
                 else if (want == 4) target = FULL;         // steady red, no breathing
+                else if (want == 6)
+                {
+                    target = HumanYieldAlpha(Environment.TickCount);
+                    breathFrame = true;
+                }
                 else if (want == 5)
                 {
                     // ASK: red like a stop, but at TWICE the cyan breath rate (1250 ms vs 2500 ms)
@@ -847,9 +926,27 @@ namespace DshComputerUse.Worker
         /// Semi-transparent badge in the top-left corner. The human must be able to SEE that a
         /// brake exists (and whether it is currently on) — a brake nobody can see feels exactly
         /// like no brake at all.
+        public static int HumanYieldAlpha(int tick)
+        { return 48 + (int)Math.Round(30 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }
+        static void PaintHumanYield(IntPtr bits, int w, int h)
+        {
+            WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
+                int band = Math.Max(20, Math.Min(40, Math.Min(w, h) / 30));
+                for (int i = 0; i < 48; i++)
+                {
+                    float inset = (float)i * band / 48;
+                    int alpha = (int)(175 * Math.Pow(1 - i / 48.0, 1.8));
+                    using (var pen = new Pen(Color.FromArgb(alpha, 255, 231, 151), band / 48f + 1.2f))
+                    using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
+                    { AddRound(shape, inset, inset, w - 2 * inset, h - 2 * inset, Math.Max(1, band + 8 - inset)); g.DrawPath(pen, shape); }
+                }
+                PaintBadge(g, "已让出键鼠 · 静默 3 秒后继续 · Ctrl+Esc 暂停", 175, false);
+            });
+        }
+
         static void PaintEscBadge(System.Drawing.Graphics g, int opacity)
         {
-            PaintBadge(g, "监听中 · ESC 暂停 · Ctrl+Alt+Q 退出", opacity, false);
+            PaintBadge(g, "监听中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出", opacity, false);
         }
 
         static void PaintBadge(System.Drawing.Graphics g, string txt, int opacity, bool red)
@@ -977,14 +1074,8 @@ namespace DshComputerUse.Worker
     }
 
     // ---------- emergency stop ----------
-    // Two brakes, both zero-latency and both the human's alone:
-    //   * ESC           — any Escape the HUMAN presses while the agent is working aborts it
-    //   * Ctrl+Alt+Q    — a deliberate, collision-free panic combo
-    // A low-level keyboard hook (WH_KEYBOARD_LL) sees every keystroke system-wide and can
-    // tell whose it is: every event the agent injects carries OUR_MAGIC in dwExtraInfo, so
-    // the agent's own Escape (used constantly to close menus) never trips the brake.
-    // Once engaged, EVERY actuation is refused until `resume` — observations still work,
-    // so the agent can report what happened instead of silently dying.
+    // Ctrl+Esc pauses; Ctrl+Alt+R clears that pause; Ctrl+Alt+Q ends the cycle.
+    // Other physical input uses automatic handoff and never writes STOP.
     static class Panic
     {
         public static readonly IntPtr OwnMagic = new IntPtr(0x44534831); // 'DSH1'
@@ -1012,6 +1103,7 @@ namespace DshComputerUse.Worker
         // never touched. The low-level hook is the ONE witness that sees dwExtraInfo and can say
         // whose key it was — so the chord is judged on ITS record, and the async state must agree.
         static volatile bool _humanCtrl = false, _humanAlt = false;
+        static readonly HashSet<uint> HumanModifiers = new HashSet<uint>();
         public static bool HumanCtrlDown { get { return _humanCtrl; } }
         public static bool HumanAltDown { get { return _humanAlt; } }
 
@@ -1029,14 +1121,28 @@ namespace DshComputerUse.Worker
             bool human = !ours && !injected;
             if (human && (down || up))
             {
-                if (IsCtrlVk(vkCode)) _humanCtrl = down;
-                else if (IsAltVk(vkCode)) _humanAlt = down;
+                lock (HumanModifiers)
+                {
+                    if (IsCtrlVk(vkCode) || IsAltVk(vkCode))
+                    { if (down) HumanModifiers.Add(vkCode); if (up) HumanModifiers.Remove(vkCode); }
+                    _humanCtrl = HumanModifiers.Any(IsCtrlVk);
+                    _humanAlt = HumanModifiers.Any(IsAltVk);
+                }
             }
             return human;
         }
 
         /// Zero the track (test seam only: a fixture must be able to start from a known state).
-        public static void ResetHumanTrack() { _humanCtrl = false; _humanAlt = false; }
+        public static void ResetHumanTrack()
+        { lock (HumanModifiers) { HumanModifiers.Clear(); _humanCtrl = false; _humanAlt = false; } }
+        static void ReconcileModifiers(bool ctrl, bool alt)
+        {
+            lock (HumanModifiers)
+            {
+                if (!ctrl) { HumanModifiers.RemoveWhere(IsCtrlVk); _humanCtrl = false; }
+                if (!alt) { HumanModifiers.RemoveWhere(IsAltVk); _humanAlt = false; }
+            }
+        }
 
         /// Are ANOTHER program's injected keys the human's? NO — never, and this is not configurable.
         /// `flags & LLKHF_INJECTED` means some process called SendInput on its own behalf; the answer
@@ -1627,59 +1733,71 @@ namespace DshComputerUse.Worker
             catch { /* the brake must never take the worker down */ }
         }
 
-        /// The WHEEL half of "the human's hand is on the machine".
-        ///
-        /// Gated exactly like the keyboard mirror: only while the agent is DRIVING (_armed), never
-        /// for our own input (OwnMagic), and a no-op once already stopped (Engage is idempotent).
-        /// The delta goes into the STOP file, so the next "why did it brake?" question has a number
-        /// for an answer instead of a story — the same lesson the mouse-swing amplitude taught.
+        // Hook callbacks only record ownership and enqueue control work. Serial execution
+        // preserves Ctrl+Esc / resume / exit ordering without blocking the OS hook on I/O.
+        static int _pendingPauses;
+        public static bool PauseRequested { get { return Volatile.Read(ref _pendingPauses) > 0; } }
+        static readonly ConcurrentQueue<Action> ControlQueue = new ConcurrentQueue<Action>();
+        static int _controlWorkQueued;
+        internal static void QueueControl(Action action)
+        {
+            ControlQueue.Enqueue(action);
+            if (Interlocked.CompareExchange(ref _controlWorkQueued, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate {
+                do {
+                    Action next;
+                    while (ControlQueue.TryDequeue(out next)) { try { next(); } catch { } }
+                    Interlocked.Exchange(ref _controlWorkQueued, 0);
+                } while (!ControlQueue.IsEmpty && Interlocked.CompareExchange(ref _controlWorkQueued, 1, 0) == 0);
+            });
+        }
+        public static string ControlHotkey(uint vk, bool down, bool human, bool ctrl, bool alt, bool shift, bool win, bool live)
+        {
+            if (!down || !human) return "";
+            if (vk == Native.VK_ESCAPE && ctrl && !alt && !shift && !win && live) return "pause";
+            if (ctrl && alt && vk == Native.VK_Q) return "exit";
+            if (ctrl && alt && vk == Native.VK_R) return "resume";
+            return "";
+        }
+        static bool _suppressPauseEsc;
+        static bool _havePhysicalPoint;
+        static POINT _physicalPoint;
+        public static bool PhysicalEvent(IntPtr extra, uint flags, uint injectedMask)
+        { return extra != OwnMagic && (flags & injectedMask) == 0; }
+
         static IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             try
             {
                 if (nCode >= 0)
                 {
-                    Native.MSLLHOOKSTRUCT observed = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
-                    if (observed.dwExtraInfo != OwnMagic) Interlocked.Increment(ref _externalInput);
-                }
-                if (nCode >= 0 && wParam.ToInt32() == Native.WM_MOUSEWHEEL_)
-                {
-                    Native.MSLLHOOKSTRUCT m = (Native.MSLLHOOKSTRUCT)
-                        Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
-                    if (m.dwExtraInfo != OwnMagic && _armed)
+                    var m = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
+                    if (m.dwExtraInfo != OwnMagic) Interlocked.Increment(ref _externalInput);
+                    if (PhysicalEvent(m.dwExtraInfo, m.flags, 3))
                     {
-                        int delta = unchecked((short)((m.mouseData >> 16) & 0xFFFF));
-                        // ONE NOTCH IS NOT A TAKEOVER (2026-09-15). This used to brake on ANY
-                        // `delta != 0`, i.e. a single 120-notch click stopped the machine — and the
-                        // human MUST be able to scroll to read, to work, and to talk to the agent at
-                        // all. Measured consequence: every attempt to use the machine braked the
-                        // session, and the human reported it as "无端触发 computer use 中止" and
-                        // "滚轮儿触发嘟嘟响".
-                        //
-                        // That is the same defect the comment above records for the 604 px distance
-                        // rule, which was switched OFF for it: "a signal that cannot separate those
-                        // two cases must not drive a brake". The wheel is now held to the same bar
-                        // the deliberate SHAKE gesture meets — several notches inside a short window —
-                        // so ordinary scrolling cannot reach it while "stop, machine, now" still can.
-                        if (delta != 0)
+                        int message = wParam.ToInt32(), key = 0;
+                        bool down = false, up = false, activity = true;
+                        switch (message)
                         {
-                            int now = Environment.TickCount;
-                            if (unchecked(now - _wheelT0) > WheelWindowMs) { _wheelN = 0; _wheelT0 = now; }
-                            _wheelN++;
-                            if (_wheelN >= WheelNotches)
-                            {
-                                _wheelN = 0;
-                                Engage("human scrolled the wheel hard (" + WheelNotches + " notches within " +
-                                       WheelWindowMs + "ms, last delta " + delta + ") — the machine is yours",
-                                       false, "mousehook",
-                                       "notches=" + WheelNotches + " windowMs=" + WheelWindowMs +
-                                       " delta=" + delta + " extra=0x" + m.dwExtraInfo.ToInt64().ToString("X"));
-                            }
+                            case 0x200:
+                                activity = !_havePhysicalPoint || m.pt.X != _physicalPoint.X || m.pt.Y != _physicalPoint.Y;
+                                _physicalPoint = m.pt; _havePhysicalPoint = true; break;
+                            case 0x201: key = 1; down = true; break;
+                            case 0x202: key = 1; up = true; break;
+                            case 0x204: key = 2; down = true; break;
+                            case 0x205: key = 2; up = true; break;
+                            case 0x207: key = 4; down = true; break;
+                            case 0x208: key = 4; up = true; break;
+                            case 0x20B: key = ((m.mouseData >> 16) & 0xFFFF) == 1 ? 5 : 6; down = true; break;
+                            case 0x20C: key = ((m.mouseData >> 16) & 0xFFFF) == 1 ? 5 : 6; up = true; break;
+                            case 0x20A: case 0x20E: activity = unchecked((short)(m.mouseData >> 16)) != 0; break;
+                            default: activity = false; break;
                         }
+                        if (activity) RecordHumanInput(key, down, up);
                     }
                 }
             }
-            catch { /* the brake must never take the worker down */ }
+            catch { }
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
@@ -1687,59 +1805,43 @@ namespace DshComputerUse.Worker
         {
             try
             {
-                int m = wParam.ToInt32();
                 if (nCode >= 0)
                 {
-                    Native.KBDLLHOOKSTRUCT k = (Native.KBDLLHOOKSTRUCT)
-                        Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
+                    int m = wParam.ToInt32();
+                    var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
                     if (k.dwExtraInfo != OwnMagic) Interlocked.Increment(ref _externalInput);
                     bool down = m == Native.WM_KEYDOWN_ || m == Native.WM_SYSKEYDOWN_;
                     bool up = m == Native.WM_KEYUP_ || m == Native.WM_SYSKEYUP_;
-                    // The hook reports the LEFT/RIGHT-specific codes (0xA2 left Ctrl, 0xA4 left Alt),
-                    // so the track accepts every variant and a key-up of EITHER variant clears it —
-                    // a generic/specific mismatch must never leave a phantom "the human still holds
-                    // Ctrl" behind, because that phantom is exactly what turns a bare Q press into a
-                    // panic chord nobody pressed.
-                    // WHOSE KEY IS THIS? (D, 2026-09-13.) `dwExtraInfo != OwnMagic` only excludes OUR
-                    // OWN injections — every other program's SendInput (a remote-control session, a
-                    // macro tool, AutoHotkey) still looked exactly like a human hand, and so could
-                    // set the modifier track, press ESC into a brake and "type at the keyboard" into
-                    // the human-presence brake. KBDLLHOOKSTRUCT.flags bit 4 is the OS's own
-                    // LLKHF_INJECTED marker and the only field that answers the question, so the
-                    // classification lives in ONE function (ClassifyAndTrackKey) that the hook and the
-                    // test fixture both call: a fixture must never re-implement the rule it measures.
                     bool human = ClassifyAndTrackKey(k.vkCode, down, up, k.dwExtraInfo, k.flags);
-                    if (down && human)
+                    if (human && (down || up))
                     {
-                        // The async state is only asked to CONFIRM. What makes a chord the human's
-                        // is their own keydown, which no injected key and no AltGr emulation can fake.
+                        RecordHumanInput((int)k.vkCode, down, up);
+                        if (k.vkCode == Native.VK_ESCAPE && _suppressPauseEsc)
+                        { if (up) _suppressPauseEsc = false; return new IntPtr(1); }
                         bool ctrl = _humanCtrl && (Native.GetAsyncKeyState(Native.VK_CONTROL) & 0x8000) != 0;
                         bool alt = _humanAlt && (Native.GetAsyncKeyState(Native.VK_MENU) & 0x8000) != 0;
-                        if (k.vkCode == Native.VK_ESCAPE)
-                            Engage("human hit ESC", false, "hook", ChordEvidence(k, ctrl, alt));
-                        // Ctrl+Alt+Q = EXIT (彻底退出): the session is over, the host is told to stop
-                        // the agent immediately. It is NOT a second stop: pressing it while the red
-                        // "已终止" box shows must get the human OUT, not leave them stuck.
-                        else if (ctrl && alt && k.vkCode == Native.VK_Q)
-                            Exit("Ctrl+Alt+Q chord detected", "hook", ChordEvidence(k, ctrl, alt));
-                        else if (ctrl && alt && k.vkCode == Native.VK_R) Clear();   // human re-arms
-                        else if (_armed && Program.HostConfigured() && !IsBareModifier(k.vkCode) &&
-                                 !Program.IsHostWindow(Native.GetForegroundWindow()))
+                        string hotkey = ControlHotkey(k.vkCode, down, human, ctrl, alt,
+                            Handoff.Held(0x10), Handoff.Held(0x5B) || Handoff.Held(0x5C), CycleLit && !_exited);
+                        if (hotkey == "pause")
                         {
-                            // (guarded by Engage's own _exited check: after Ctrl+Alt+Q this round is
-                            // over and ordinary typing must NOT light anything up again)
-                            // A REAL keystroke aimed anywhere but the host means the human is working:
-                            // yield the machine, and yield VISIBLY. Typing in the DSH chat is exempt —
-                            // that is the human talking to the agent, not taking the machine away from
-                            // it, and braking on every chat message would force an R press per message
-                            // (human request 2026-09-12: "有键盘输入就进红框" + this exemption).
-                            //
-                            // Gated on HostConfigured(): without knowing which window is the host we
-                            // cannot tell "talking to the agent" from "working", and a monitor that
-                            // brakes on every chat message is worse than no monitor at all.
-                            Engage("human is typing at the keyboard (vk 0x" + k.vkCode.ToString("X2") + ") — the machine is yours",
-                                   false, "hook", ChordEvidence(k, ctrl, alt));
+                            _suppressPauseEsc = true;
+                            Interlocked.Increment(ref _pendingPauses);
+                            // The hook marks ownership immediately; do not perform SendInput or
+                            // filesystem work on this OS hook thread.
+                            string evidence = ChordEvidence(k, ctrl, alt);
+                            QueueControl(delegate {
+                                try { Engage("Ctrl+Esc chord detected", false, "hook", evidence); }
+                                finally { Interlocked.Decrement(ref _pendingPauses); }
+                            });
+                            return new IntPtr(1); // Ctrl+Esc must not also open the Windows Start menu.
                         }
+                        if (hotkey == "exit")
+                        {
+                            string evidence = ChordEvidence(k, ctrl, alt);
+                            QueueControl(delegate { Exit("Ctrl+Alt+Q chord detected", "hook", evidence); });
+                        }
+                        else if (hotkey == "resume")
+                            QueueControl(delegate { Clear(); });
                     }
                 }
             }
@@ -1747,13 +1849,6 @@ namespace DshComputerUse.Worker
             return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
         }
 
-        /// **退出（彻底退出）** — the third semantic, distinct from the brake.
-        ///
-        /// ESC aborts the current operation (the machine stays stopped until Ctrl+Alt+R), but
-        /// Ctrl+Alt+Q ENDS THE SESSION: the overlay goes away, nothing lingers stopped, and the host
-        /// is told to stop the agent's turn immediately — the human's "stop streaming, we are done".
-        /// Pressing it while the red 已终止 box is showing must get the human OUT; being stuck there
-        /// with a hint in the corner is what made this key look broken.
         public static void Exit(string why) { Exit(why, "unknown", ""); }
 
         /// `why` is a MEASUREMENT sentence, not a verdict about the human: the detectors say what
@@ -1863,8 +1958,7 @@ namespace DshComputerUse.Worker
                     // and reported.
                     bool asyncCtrl = (Native.GetAsyncKeyState(Native.VK_CONTROL) & 0x8000) != 0;
                     bool asyncAlt = (Native.GetAsyncKeyState(Native.VK_MENU) & 0x8000) != 0;
-                    if (_humanCtrl && !asyncCtrl) _humanCtrl = false;   // the key is up: clear the track
-                    if (_humanAlt && !asyncAlt) _humanAlt = false;
+                    ReconcileModifiers(asyncCtrl, asyncAlt);
                     bool q = (Native.GetAsyncKeyState(Native.VK_Q) & 1) != 0;
                     bool r = (Native.GetAsyncKeyState(Native.VK_R) & 1) != 0;
                     bool agentQuiet = _agentActAt == 0 || unchecked(Environment.TickCount - _agentActAt) > 400;
@@ -1874,19 +1968,20 @@ namespace DshComputerUse.Worker
                         // R FIRST: Ctrl+Alt+R is the human's explicit re-arm, and a stale Q bit must
                         // never beat it — pressing the key that brings computer use BACK used to be
                         // able to END it instead.
-                        if (r && !prevR) Clear();
+                        if (r && !prevR) QueueControl(delegate { Clear(); });
                         else if (q && !prevQ)
                         {
                             Native.KBDLLHOOKSTRUCT kk = new Native.KBDLLHOOKSTRUCT();
                             kk.vkCode = Native.VK_Q;
-                            Exit("Ctrl+Alt+Q chord detected", "poll",
+                            string evidence =
                                  "q-latch + hook-tracked modifiers + measured async key state " +
                                  "(no keydown was seen by the hook); " +
-                                 ChordEvidence(kk, asyncCtrl, asyncAlt));
+                                 ChordEvidence(kk, asyncCtrl, asyncAlt);
+                            QueueControl(delegate { Exit("Ctrl+Alt+Q chord detected", "poll", evidence); });
                         }
                     }
                     prevQ = q; prevR = r;
-                    MonitorHuman();      // the mouse half of "the human's hand is on the machine"
+                    MonitorHuman();
                 }
                 catch { /* the brake must never take the worker down */ }
             }
@@ -1894,239 +1989,64 @@ namespace DshComputerUse.Worker
 
         // ---------- human-presence monitor: a hand on the mouse ----------
         //
-        // A hand on the mouse means "this machine is mine right now", and the only correct answer is
-        // to YIELD — visibly, with the brake — not to silently refuse one action and keep going.
-        // Human request 2026-09-12: the takeover logic already existed (MOVE_BUDGET / "human
-        // takeover" used to throw), it just refused the single action instead of stopping.
-        //
-        // Triggers, any one is enough (thresholds +20% after live testing, 2026-09-12):
-        //   * spontaneous cursor travel > 1/5 of the screen diagonal  (2560x1600 -> ~604 px)
-        //   * >= 4 direction reversals within 2 s (a deliberate back-and-forth), legs >= 24 px
-        //   * the keyboard mirror lives in HookCallback: any real keystroke aimed anywhere but the
-        //     host window.
-        //
-        // The DSH host window is EXEMPT for the keyboard, but NOT for the mouse: a hand that moves
-        // the pointer is a hand on the machine, wherever the pointer happens to be. Yielding there
-        // costs one R press; failing to yield would silently ignore the human's "stop" gesture.
-        //
-        // Our OWN pointer travel is excluded by construction, not by guessing: every input op goes
-        // through FailsafeCheck(), which calls AgentActed() — that re-baselines the monitor and
-        // silences it for AgentSuppressMs, so a click, a jump or a drag can never read as a human.
-        // RAW DISTANCE IS OFF (2026-09-12, after live testing). It cannot tell "the human is using
-        // their own computer" from "the human is fighting the agent for the pointer": ordinary use
-        // (switching windows, clicking, taking a screenshot) exceeds 604 px constantly, so the rule
-        // fired on the human's normal work and produced an endless "move mouse -> red box -> press Q
-        // -> move mouse -> red box" loop. A signal that cannot separate those two cases must not
-        // drive a brake. What remains is the DELIBERATE gesture (the shake, below) plus the keyboard
-        // mirror, both of which are unambiguous. Flip this to true to get the distance rule back.
-        const bool HumanTravelEnabled = false;
-
-        // The human monitors are live whenever the session is armed. Ctrl+Alt+R is the ONLY way to
-        // arm them: it means "the agent may drive again". Ctrl+Alt+Q is final until then.
-        // (An "only while the agent is recently active" gate was tried and reverted — the human's
-        // model is simpler and correct: R restores monitoring, Q ends it.)
-
-        static bool AgentRecentlyActive()
-        {
-            return _agentActAt != 0 && unchecked(Environment.TickCount - _agentActAt) < 3600000;
-        }
-
-        // A SWING MUST BE BIG. 24 physical px was the old bar and it made this rule a false-positive
-        // machine: this panel runs at 175% scaling, so 24 px is only ~14 LOGICAL px — the tremor of a
-        // hand merely RESTING on the mouse reaches it several times a second. The human got a red
-        // border while TYPING in the chat (STOP written 21:09:25.893 by this very rule, with no agent
-        // op for the preceding 47 s). A deliberate "stop" shake swings 150-400 px per leg, so the bar
-        // is now a real fraction of that: ordinary use cannot reach it, a real shake still can.
-        const int HumanLegPx = 100;         // shorter than this is hand tremor, not a swing
-        const int HumanReversals = 4;       // swings back and forth ... (was 3, +20%)
-        const int HumanWindowMs = 2000;     // ... inside this window = a deliberate shake
-        const int AgentSuppressMs = 300;    // quiet right after our own SendInput
-        const int HumanStillMs = 1500;      // hand off the mouse this long => forget old travel
-        // THE WHEEL'S OWN BAR (2026-09-15). The wheel used to brake on a SINGLE notch, which made it
-        // a false-positive machine of exactly the kind the 604 px rule was switched off for: the human
-        // cannot scroll without stopping the agent, and scrolling is how they read and work. It now
-        // needs the same kind of deliberate effort the shake does.
-        const int WheelNotches = 5;         // notches ... (a real "get off my machine" flick is 8-15)
-        const int WheelWindowMs = 1500;     // ... inside this window = a deliberate flick, not reading
-        static int _wheelN = 0, _wheelT0 = 0;
-
-        static int _agentActAt = 0;
-        static bool _monHave = false;
-        static int _monX = 0, _monY = 0;
-        static int _legPX = 0, _legPY = 0, _legSign = 0;
-        static bool _legAxis = true;        // which axis the last leg ran along (x = true)
-        static int _travel = 0, _lastMoveAt = 0, _travelThresh = 0;
-        static int _revN = 0, _revT0 = 0, _revMax = 0;
-
-        /// The monitors are live ONLY while the agent is actually driving this machine.
-        ///
-        /// They used to be live whenever the session was ARMED — from Ctrl+Alt+R until ESC or
-        /// Ctrl+Alt+Q — which is a far longer lifetime than "the agent is working". So the red
-        /// border arrived while the human was doing nothing but TYPING IN THE CHAT (2026-09-12:
-        /// STOP written 21:09:25.893 blaming a mouse shake, 47 s after the agent's last op). The
-        /// human nailed the spec themselves: "你的监测器本应该随着调用电脑操控插件的结束一起停掉".
-        /// The indicator already followed the turn — the plugin cuts it with calm(); the monitors
-        /// did not. Now they do: the first driving op of a turn arms them, and the plugin's calm()
-        /// (turn end, exit cleanup, idle watchdog) disarms them. Ctrl+Alt+R still means "you may
-        /// drive again"; it no longer means "watch my mouse forever".
+        // Physical activity yields visibly. Automatic handoff is independent of the
+        // durable manual brake and never creates a STOP record.
+        static int _agentActAt;
         static volatile bool _armed = false;
-
-        /// **Is an agent CYCLE live?** Set by the agent's first op of a turn, cleared when the
-        /// plugin says the turn is over (calm) or the human ends the session (Ctrl+Alt+Q).
-        ///
-        /// This is the state the human's rule is written against (2026-09-12): "红框亮起之前必须
-        /// 先亮起一次青色或蓝色框；红框被终结，意味着这个调用周期死亡，不能复生。" The red border
-        /// is a SIGNAL about a cycle — with no cycle there is nothing to signal, and a red border is
-        /// a lie. It is deliberately NOT the same as _armed: a turn that only OBSERVES still lights
-        /// the cyan border, so it is a live cycle that a human may legitimately stop.
-        public static volatile bool CycleLit = false;
+        public static volatile bool CycleLit;
         public static bool Armed { get { return _armed; } }
-        // Read-only views used by the `probe` op: the state machine has to be OBSERVABLE from
-        // outside, otherwise "verifying" it means trusting prose — and this project has been burned
-        // by exactly that more than once.
-        public static bool Exited { get { return _exited; } }   // (Stopped already exists below)
-
-        static void ResetMonitorRun()
-        {
-            _monHave = false; _travel = 0; _legSign = 0; _revN = 0; _revMax = 0; _legAxis = true;
-        }
-
-        public static void Arm() { _armed = true; ResetMonitorRun(); }
-
-        public static void Disarm() { _armed = false; ResetMonitorRun(); }
-
-        /// The agent is about to send input: re-baseline, so its own jump is never read as a human.
-        public static void AgentActed()
-        {
-            _agentActAt = Environment.TickCount;
-            _monHave = false;
-            _travel = 0; _legSign = 0; _revN = 0; _legAxis = true;
-            // NOTE: deliberately does NOT clear _exited. This runs for internal cleanup sends too
-            // (releasing a stuck button goes through MouseInput), so clearing it here silently
-            // cancelled Ctrl+Alt+Q and let the monitors light the red box again — the exact bug the
-            // human reported ("我按住 Ctrl+Alt+Q 仍然还会亮"). Only Ctrl+Alt+R re-arms.
-        }
-
-        static int HumanTravelThreshold()
-        {
-            if (_travelThresh > 0) return _travelThresh;
-            try
-            {
-                int w = Native.GetSystemMetrics(0), h = Native.GetSystemMetrics(1);
-                double d = Math.Sqrt((double)w * (double)w + (double)h * (double)h);
-                // diagonal / 5 = exactly 20% more than the original diagonal / 6
-                // (2560x1600: 503 px -> 604 px), at the human's request after live testing.
-                _travelThresh = Math.Max(240, (int)Math.Round(d / 5.0));
-            }
-            catch { _travelThresh = 500; }
-            return _travelThresh;
-        }
-
-        /// Text for the takeover message, derived from the SAME computation that enforces it — so
-        /// the explanation can never disagree with the rule. (A stale "more than 1/6" survived the
-        /// threshold change to 1/5 and was caught by the human in live testing: the number was right,
-        /// the explanation was wrong. Never restate a constant in prose.)
-        static string HumanTravelNote()
-        {
-            return HumanTravelThreshold() + "px = 1/5 of the screen diagonal";
-        }
-
-        /// Modifiers alone are not "the human is working" — holding Shift must not brake the session.
-        ///
-        /// THE VK CODES MATTER (bug proven 2026-09-13 by the human's own log):
-        /// a WH_KEYBOARD_LL hook hands you the LEFT/RIGHT-specific codes, NOT the generic ones —
-        /// left Ctrl arrives as 0xA2 and left Alt as 0xA4. Matching only VK_CONTROL / VK_MENU
-        /// therefore classified every Ctrl and every Alt press as "the human is typing", and the
-        /// resume hotkey IS Ctrl+Alt+R (Ctrl 0xA2 + Alt 0xA4 + R): each press emitted stop-then-
-        /// resume, the plugin aborted the turn on the stop, an aborted turn re-armed the brake, so
-        /// R could never win — the human saw "press Ctrl+Alt+R -> the red frame fades in, forever",
-        /// and the session died on every attempt. Keep BOTH sets: the generic codes still arrive
-        /// from other sources (GetAsyncKeyState, SendInput, injected keys).
+        public static bool Exited { get { return _exited; } }
+        static readonly Stopwatch HumanClock = Stopwatch.StartNew();
+        static readonly HumanInputState Handoff = new HumanInputState();
+        static readonly object HandoffPublishLock = new object();
+        static string _publishedHandoff = "idle";
+        static int _handoffWorkQueued;
+        public static bool HumanActive { get { return Handoff.Active; } }
+        public static long HumanRevision { get { return Handoff.Revision; } }
+        public static bool HumanHolds(int vk) { return Handoff.Held(vk); }
+        public static object CooperationState() { return Handoff.Snapshot(HumanClock.ElapsedMilliseconds); }
+        static void ResetMonitorRun() { /* Manual recovery must not erase physical input history. */ }
+        public static void Arm() { _armed = true; Handoff.Enable(CycleLit && !_exited, HumanClock.ElapsedMilliseconds); }
+        public static void Disarm() { _armed = false; Handoff.Enable(false, HumanClock.ElapsedMilliseconds); PublishHandoff(); }
+        public static void AgentActed() { _agentActAt = Environment.TickCount; }
         static bool IsBareModifier(uint vk)
         {
             return vk == Native.VK_SHIFT || vk == Native.VK_CONTROL || vk == Native.VK_MENU ||
-                   vk == 0xA0 || vk == 0xA1 ||      // left / right Shift
-                   vk == 0xA2 || vk == 0xA3 ||      // left / right Ctrl   <- what the hook really sends
-                   vk == 0xA4 || vk == 0xA5 ||      // left / right Alt    <- and this
-                   vk == 0x5B || vk == 0x5C;        // left / right Windows key
+                   vk == 0xA0 || vk == 0xA1 || vk == 0xA2 || vk == 0xA3 ||
+                   vk == 0xA4 || vk == 0xA5 || vk == 0x5B || vk == 0x5C;
         }
-
+        public static void RecordHumanInput(int key, bool down, bool up)
+        {
+            long now = HumanClock.ElapsedMilliseconds;
+            bool was = Handoff.Active;
+            Handoff.Enable(_armed && CycleLit && !_exited, now);
+            Handoff.Record(key, down, up, now);
+            if (!was && Handoff.Active && Interlocked.CompareExchange(ref _handoffWorkQueued, 1, 0) == 0)
+                ThreadPool.QueueUserWorkItem(delegate {
+                    try { Program.ReleaseOwnedInputs(); PublishHandoff(); }
+                    finally { Interlocked.Exchange(ref _handoffWorkQueued, 0); }
+                });
+        }
+        static void PublishHandoff()
+        {
+            lock (HandoffPublishLock)
+            {
+                string phase = Handoff.Phase;
+                if (phase == _publishedHandoff) return;
+                _publishedHandoff = phase;
+                if (phase != "idle") Glow.HumanYield();
+                Program.AuditRecord("HUMAN-HANDOFF", "phase=" + phase + "; revision=" + HumanRevision + "; kind=" + Handoff.LastKind);
+                Notify("handoff", phase);
+            }
+        }
         static void MonitorHuman()
         {
-            int now = Environment.TickCount;
-            SyncExitedFromFile();                                          // adopted across restarts
-            if (_exited) { _monHave = false; return; }                     // Q ended this session
-            if (!_armed) { _monHave = false; return; }                     // the agent is not driving
-            if (_engaged || _stopped) { _monHave = false; return; }        // already stopped
-            if (_agentActAt != 0 && unchecked(now - _agentActAt) < AgentSuppressMs) { _monHave = false; return; }
-
-            POINT c;
-            if (!Native.GetCursorPos(out c)) return;
-            if (!_monHave)
-            {
-                _monHave = true;
-                _monX = c.X; _monY = c.Y; _legPX = c.X; _legPY = c.Y; _lastMoveAt = now;
-                return;
-            }
-
-            int dx = c.X - _monX, dy = c.Y - _monY;
-            _monX = c.X; _monY = c.Y;
-            int step = Math.Abs(dx) + Math.Abs(dy);
-
-            if (step > 0)
-            {
-                _travel += step;
-                _lastMoveAt = now;
-
-                int lx = c.X - _legPX, ly = c.Y - _legPY;
-                if (Math.Abs(lx) + Math.Abs(ly) >= HumanLegPx)
-                {
-                    bool xAxis = Math.Abs(lx) >= Math.Abs(ly);
-                    int sign = xAxis ? Math.Sign(lx) : Math.Sign(ly);
-                    if (sign != 0)
-                    {
-                        // A REVERSAL IS: two consecutive legs, SAME axis, OPPOSITE directions.
-                        // This used to count bare sign flips, which fired on ANY movement: a curved
-                        // or slightly wavy drag flips the dominant axis between x and y several
-                        // times per second, so "4 reversals in 2 s" was reached by simply MOVING the
-                        // mouse (reported 2026-09-12: "我一旦动鼠标，它就开始亮红框"). A deliberate
-                        // shake is left-right (or up-down) on ONE axis — that is what this requires.
-                        if (_legSign != 0 && sign == -_legSign && _legAxis == xAxis)
-                        {
-                            if (_revN == 0) { _revT0 = now; _revMax = 0; }
-                            _revN++;
-                            int amp = Math.Abs(lx) + Math.Abs(ly);
-                            if (amp > _revMax) _revMax = amp;   // evidence: carried into the STOP file
-                        }
-                        _legSign = sign; _legAxis = xAxis;
-                    }
-                    _legPX = c.X; _legPY = c.Y;
-                }
-            }
-            else if (unchecked(now - _lastMoveAt) > HumanStillMs)
-            {
-                // The hand left the mouse: old travel must not accumulate into a false takeover.
-                _travel = 0; _legSign = 0; _revN = 0; _revMax = 0; _legAxis = true;
-                _legPX = c.X; _legPY = c.Y;
-                return;
-            }
-
-            // Expiry RESETS the run. It used to leave _revN = 1 ("keep the last reversal alive"),
-            // which quietly turned "4 swings in 2 s" into "5 swings in ~4 s" — one free reversal,
-            // forever, for a hand that never leaves the mouse. A shake whose swings do not fit
-            // inside the window is not a shake.
-            if (_revN > 0 && unchecked(now - _revT0) > HumanWindowMs) { _revN = 0; _revMax = 0; _revT0 = now; }
-
-            if (_revN >= HumanReversals)
-                Engage("human is shaking the mouse (" + _revN + " direction reversals, biggest swing " +
-                       _revMax + "px, within " + HumanWindowMs + "ms) — the machine is yours",
-                       false, "monitor",
-                       "reversals=" + _revN + " legMaxPx=" + _revMax + " windowMs=" + HumanWindowMs +
-                       " legMinPx=" + HumanLegPx + " travelPx=" + _travel);
-            else if (HumanTravelEnabled && _travel > HumanTravelThreshold())
-                Engage("human moved the mouse " + _travel + "px (past " + HumanTravelNote() +
-                       ") — the machine is yours",
-                       false, "monitor", "travelPx=" + _travel + " thresholdPx=" + HumanTravelThreshold());
+            SyncExitedFromFile();
+            long now = HumanClock.ElapsedMilliseconds;
+            Handoff.Enable(_armed && CycleLit && !_exited, now);
+            Handoff.Tick(now);
+            if (Handoff.Active) Program.ReleaseOwnedInputs();
+            PublishHandoff();
         }
 
         static RecoveryPermit _temporary;
@@ -2539,7 +2459,7 @@ namespace DshComputerUse.Worker
                 try { Glow.Stopped(false); } catch { }
                 // Re-arming re-baselines the human monitor: the travel that tripped the brake must not
                 // still be sitting in the accumulator, or the very next poll would brake again.
-                _monHave = false; _agentActAt = 0; _travel = 0; _legSign = 0; _revN = 0; _legAxis = true;
+                _agentActAt = 0;
             }
             if (was) Notify("resume", "");
         }
@@ -2600,7 +2520,7 @@ namespace DshComputerUse.Worker
         /// SCOPE: this only decides what prefix the synthesised RELEASE carries; the end-to-end effect
         /// on a physically held key is not measured in this round (no key is injected while the machine
         /// is paused for the physical-R acceptance).
-        static bool IsExtendedVk(ushort vk) { return vk == 0x5B || vk == 0x5C || vk == 0xA3 || vk == 0xA5; }
+        internal static bool IsExtendedVk(ushort vk) { return vk == 0x5B || vk == 0x5C || vk == 0xA3 || vk == 0xA5; }
 
         /// The same plan for the machine's CURRENT state (read-only: sends nothing).
         public static List<string> StuckPlanForLive() { return StuckPlan(KeyIsDown); }
@@ -2616,32 +2536,8 @@ namespace DshComputerUse.Worker
         /// stuck combo — is still released, which is the whole reason this function exists.
         static void ReleaseStuck()
         {
-            try
-            {
-                int cb = Marshal.SizeOf(typeof(INPUT));
-                List<string> plan = StuckPlan(KeyIsDown);
-                foreach (string what in plan)
-                {
-                    uint sent = 0;
-                    if (what == "LEFTUP") { try { sent = Native.SendInput(1, new INPUT[] { MouseInput(Native.MOUSEEVENTF_LEFTUP) }, cb); } catch { } }
-                    else if (what == "RIGHTUP") { try { sent = Native.SendInput(1, new INPUT[] { MouseInput(Native.MOUSEEVENTF_RIGHTUP) }, cb); } catch { } }
-                    else if (what == "MIDDLEUP") { try { sent = Native.SendInput(1, new INPUT[] { MouseInput(Native.MOUSEEVENTF_MIDDLEUP) }, cb); } catch { } }
-                    else
-                    {
-                        ushort vk = Convert.ToUInt16(what.Substring(3), 16);
-                        INPUT k = new INPUT(); k.type = Native.INPUT_KEYBOARD; k.u.ki.wVk = vk;
-                        k.u.ki.dwFlags = Native.KEYEVENTF_KEYUP | (IsExtendedVk(vk) ? Native.KEYEVENTF_EXTENDEDKEY : 0);
-                        k.u.ki.dwExtraInfo = OwnMagic;
-                        AgentActed();                // our own key-up must not read as human input
-                        try { sent = Native.SendInput(1, new INPUT[] { k }, cb); } catch { }
-                    }
-                    // COUNT WHAT THE OS TOOK, not what we decided to send.
-                    _stuckInserted += sent;
-                }
-            }
-            catch { }
+            try { _stuckInserted += Program.ReleaseOwnedInputs(); } catch { }
         }
-
         static INPUT MouseInput(uint flags)
         {
             INPUT i = new INPUT(); i.type = Native.INPUT_MOUSE; i.u.mi.dwFlags = flags;
@@ -2679,6 +2575,246 @@ namespace DshComputerUse.Worker
         }
     }
 
+    // These scopes are exercised with injected devices; native adapters stay at the boundary.
+    public static class KeyboardChord
+    {
+        public static void Run(IList<ushort> keys, Action<ushort, bool> send,
+            Action<ushort> release, Func<ushort, bool> isDown, Action hold)
+        {
+            foreach (ushort key in keys)
+                if (isDown(key))
+                {
+                    var refusal = new Exception("KEY_ALREADY_DOWN: a requested key is already held; no chord input sent.");
+                    refusal.Data["code"] = "KEY_ALREADY_DOWN";
+                    refusal.Data["outcome"] = "not-dispatched";
+                    throw refusal;
+                }
+            var pressed = new List<ushort>();
+            try
+            {
+                foreach (ushort key in keys) { send(key, false); pressed.Add(key); }
+                hold();
+                while (pressed.Count > 0)
+                {
+                    int last = pressed.Count - 1;
+                    send(pressed[last], true);
+                    pressed.RemoveAt(last);
+                }
+            }
+            catch (Exception original)
+            {
+                var failed = new List<string>();
+                for (int i = pressed.Count - 1; i >= 0; i--)
+                    try { release(pressed[i]); }
+                    catch { failed.Add("0x" + pressed[i].ToString("X2")); }
+                if (failed.Count > 0)
+                {
+                    var error = new Exception(original.Message + "; KEY_CLEANUP_FAILED: could not release " +
+                        string.Join(",", failed.ToArray()) + ". Check the keyboard state before continuing.", original);
+                    error.Data["keyCleanup"] = "failed";
+                    throw error;
+                }
+                original.Data["keyCleanup"] = "completed";
+                throw;
+            }
+        }
+    }
+
+    public sealed class ClipboardBytes
+    {
+        public uint Format;
+        public byte[] Bytes;
+        public ClipboardBytes(uint format, byte[] bytes) { Format = format; Bytes = bytes; }
+    }
+
+    public interface IClipboardSession : IDisposable
+    {
+        uint Sequence { get; }
+        List<ClipboardBytes> Snapshot();
+        void Replace(List<ClipboardBytes> formats);
+    }
+
+    public interface IClipboardAccess
+    {
+        IClipboardSession Open();
+    }
+
+    // Comparison and restoration use the SAME exclusive clipboard lock, not a check-then-write.
+    public sealed class ClipboardLease
+    {
+        readonly IClipboardAccess access;
+        readonly List<ClipboardBytes> previous;
+        readonly uint written;
+        bool finished;
+        ClipboardLease(IClipboardAccess access, List<ClipboardBytes> previous, uint written)
+        { this.access = access; this.previous = previous; this.written = written; }
+        public static ClipboardLease Begin(IClipboardAccess access, string text)
+        {
+            using (var session = access.Open())
+            {
+                if (session.Sequence == 0) throw new Exception("Clipboard sequence unavailable; clipboard was not changed.");
+                var previous = session.Snapshot(); // refuse unsupported formats BEFORE clearing anything
+                try
+                {
+                    session.Replace(new List<ClipboardBytes> {
+                        new ClipboardBytes(13, Encoding.Unicode.GetBytes(text + "\0")) });
+                }
+                catch (Exception writeError)
+                {
+                    try { session.Replace(previous); }
+                    catch { throw new Exception("CLIPBOARD_WRITE_AND_RESTORE_FAILED: inspect clipboard before retrying.", writeError); }
+                    throw;
+                }
+                uint written = session.Sequence;
+                if (written == 0)
+                {
+                    session.Replace(previous);
+                    throw new Exception("Clipboard sequence unavailable after write; previous bytes restored.");
+                }
+                return new ClipboardLease(access, previous, written);
+            }
+        }
+        public bool StillOwned()
+        {
+            using (var session = access.Open()) { return !finished && session.Sequence != 0 && session.Sequence == written; }
+        }
+        public string Restore()
+        {
+            if (finished) return "already-finished";
+            using (var session = access.Open())
+            {
+                if (session.Sequence == 0) throw new Exception("Clipboard sequence unavailable; restoration skipped.");
+                if (session.Sequence != written) { finished = true; return "skipped-changed"; }
+                session.Replace(previous);
+                finished = true;
+                return "restored";
+            }
+        }
+    }
+
+    // Copy only explicitly supported HGLOBAL formats. Unknown/private or GDI formats are refused
+    // without mutation; callers can use Unicode input instead of losing an opaque clipboard item.
+    public sealed class NativeClipboardAccess : IClipboardAccess, IDisposable
+    {
+        readonly NativeWindow window = new NativeWindow();
+        public NativeClipboardAccess()
+        {
+            window.CreateHandle(new CreateParams { Caption = "DSH clipboard lease", Parent = new IntPtr(-3) });
+        }
+        public void Dispose() { window.DestroyHandle(); }
+        public IClipboardSession Open() { return new Session(window.Handle); }
+        [DllImport("user32.dll", SetLastError = true)] static extern bool OpenClipboard(IntPtr owner);
+        [DllImport("user32.dll")] static extern bool CloseClipboard();
+        [DllImport("user32.dll", SetLastError = true)] static extern bool EmptyClipboard();
+        [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll", SetLastError = true)] static extern uint EnumClipboardFormats(uint format);
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetClipboardData(uint format);
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetClipboardData(uint format, IntPtr data);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClipboardFormatName(uint format, StringBuilder name, int count);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GlobalLock(IntPtr memory);
+        [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
+        [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
+        [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr memory);
+        [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
+        static Exception Unavailable(string reason)
+        {
+            var error = new Exception("CLIPBOARD_PRESERVATION_UNAVAILABLE: " + reason +
+                "; clipboard unchanged. Use mode:unicode if suitable for the target editor.");
+            error.Data["code"] = "CLIPBOARD_PRESERVATION_UNAVAILABLE";
+            error.Data["outcome"] = "not-dispatched";
+            return error;
+        }
+        public static bool Supported(uint format, string name)
+        {
+            if (format == 1 || format == 7 || format == 8 || format == 13 || format == 15 || format == 16 || format == 17) return true;
+            if (format < 0xC000) return false;
+            return name == "HTML Format" || name == "Rich Text Format" || name == "Rich Text Format Without Objects" ||
+                name == "PNG" || name == "CSV" || name == "text/html" || name == "text/plain";
+        }
+        sealed class Session : IClipboardSession
+        {
+            bool opened;
+            public Session(IntPtr owner)
+            {
+                for (int attempt = 0; attempt < 8; attempt++)
+                {
+                    if (OpenClipboard(owner)) { opened = true; return; }
+                    Thread.Sleep(10);
+                }
+                throw new Exception("Clipboard busy; exclusive access unavailable.");
+            }
+            public uint Sequence { get { return GetClipboardSequenceNumber(); } }
+            public void Dispose() { if (opened) { CloseClipboard(); opened = false; } }
+            public List<ClipboardBytes> Snapshot()
+            {
+                var formats = new List<uint>();
+                uint format = 0;
+                while (true)
+                {
+                    SetLastError(0);
+                    format = EnumClipboardFormats(format);
+                    if (format == 0)
+                    {
+                        if (Marshal.GetLastWin32Error() != 0) throw Unavailable("format enumeration failed");
+                        break;
+                    }
+                    var name = new StringBuilder(256);
+                    if (format >= 0xC000) GetClipboardFormatName(format, name, name.Capacity);
+                    if (!Supported(format, name.ToString())) throw Unavailable("unsupported format " + format);
+                    formats.Add(format);
+                    if (formats.Count > 64) throw Unavailable("too many formats");
+                }
+                var result = new List<ClipboardBytes>();
+                long total = 0;
+                foreach (uint id in formats)
+                {
+                    IntPtr handle = GetClipboardData(id);
+                    if (handle == IntPtr.Zero) throw Unavailable("data unavailable for format " + id);
+                    ulong size = GlobalSize(handle).ToUInt64();
+                    if (size == 0 || size > 32 * 1024 * 1024 || total + (long)size > 32 * 1024 * 1024)
+                        throw Unavailable("clipboard snapshot exceeds supported size");
+                    total += (long)size;
+                    IntPtr data = GlobalLock(handle);
+                    if (data == IntPtr.Zero) throw Unavailable("clipboard data could not be locked");
+                    try
+                    {
+                        var bytes = new byte[(int)size]; Marshal.Copy(data, bytes, 0, bytes.Length);
+                        result.Add(new ClipboardBytes(id, bytes));
+                    }
+                    finally { GlobalUnlock(handle); }
+                }
+                return result;
+            }
+            public void Replace(List<ClipboardBytes> formats)
+            {
+                // Allocate and copy everything before EmptyClipboard so allocation failure is harmless.
+                var handles = new List<IntPtr>();
+                try
+                {
+                    foreach (var format in formats)
+                    {
+                        IntPtr handle = GlobalAlloc(0x0002, new UIntPtr((uint)format.Bytes.Length));
+                        if (handle == IntPtr.Zero) throw new Exception("Clipboard allocation failed.");
+                        handles.Add(handle);
+                        IntPtr data = GlobalLock(handle);
+                        if (data == IntPtr.Zero) throw new Exception("Clipboard allocation lock failed.");
+                        try { Marshal.Copy(format.Bytes, 0, data, format.Bytes.Length); }
+                        finally { GlobalUnlock(handle); }
+                    }
+                    if (!EmptyClipboard()) throw new Exception("Clipboard clear failed.");
+                    for (int i = 0; i < formats.Count; i++)
+                    {
+                        if (SetClipboardData(formats[i].Format, handles[i]) == IntPtr.Zero)
+                            throw new Exception("Clipboard write failed for format " + formats[i].Format);
+                        handles[i] = IntPtr.Zero; // ownership transferred to Windows
+                    }
+                }
+                finally { foreach (IntPtr handle in handles) if (handle != IntPtr.Zero) GlobalFree(handle); }
+            }
+        }
+    }
+
     static class Program
     {
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -2686,18 +2822,9 @@ namespace DshComputerUse.Worker
         static readonly object OutLock = new object();   // responses AND unsolicited events share stdout
         static readonly DateTime Epoch = new DateTime(1970, 1, 1);
 
-        // ---- human co-driving policy (user-specified) ----
-        // Physical mouse interference is tolerated up to MOVE_BUDGET times;
-        // the 3rd detection aborts. Every observation op resets the budget
-        // (fresh allowance per action group). The top-left corner failsafe
-        // stays zero-tolerance — it is the emergency brake, not part of the budget.
-        const int MOVE_BUDGET = 2;
-        static int _humanMoves = 0;
-        static POINT _lastEnd;
-        static bool _haveLastEnd = false;
-        // which DPI-awareness call actually took effect — reported by selftest/calibrate,
-        // because it decides whether screenshots, UIA rects, GetCursorPos and SendInput
-        // absolute coordinates all live in the SAME physical-pixel space (they must).
+        // Position correction is diagnostic only. Physical input immediately yields;
+        // no distance, reversal, wheel-count or screen-corner rule latches a pause.
+        static int _positionCorrections;
         static string _dpiNote = "unset";
         static readonly HashSet<string> ObsOps = new HashSet<string>
         {
@@ -2708,36 +2835,125 @@ namespace DshComputerUse.Worker
 
         static int Dist(POINT p, int x, int y) { return Math.Abs(p.X - x) + Math.Abs(p.Y - y); }
 
-        static void CountSpontaneousMove()
-        {
-            if (!_haveLastEnd) return;
-            POINT c; Native.GetCursorPos(out c);
-            if (Dist(c, _lastEnd.X, _lastEnd.Y) > 40) _humanMoves++;
-        }
-
-        static void CheckBudget()
-        {
-            if (_humanMoves > MOVE_BUDGET)
-                throw new Exception("human takeover: " + _humanMoves + " physical mouse events detected (budget " + MOVE_BUDGET + "); actuation refused. Park the cursor in the top-left corner anytime for a hard stop.");
-        }
-
-        static void RememberEnd()
-        {
-            Native.GetCursorPos(out _lastEnd);
-            _haveLastEnd = true;
-        }
-
-        // ---------- local actuation audit ----------
-        // Answers "who moved my pointer, and when?" for EVERY path — plugin calls, one-shot
-        // CLI runs, retries, calibration. The plugin layer keeps its own audit.jsonl, but
-        // one-shot worker invocations (build scripts, debugging, calibration) previously left
-        // NO trace, which is exactly what made the 2026-09-12 "the mouse is flying all over my
-        // screen" incident hard to attribute. One line per actuation; `text` args are redacted.
         static readonly HashSet<string> ActOps = new HashSet<string>
         {
             "move", "click", "drag", "scroll", "key", "type", "clipWrite",
             "activate", "windowOp", "calibrate", "selectRange", "uiaAct"
         };
+        static readonly object InputLock = new object();
+        static readonly Dictionary<string, INPUT> OwnedUps = new Dictionary<string, INPUT>();
+        static readonly ConcurrentDictionary<int, bool> CancelledRequests = new ConcurrentDictionary<int, bool>();
+        static long _cancelGeneration;
+        static long _operationCancelGeneration, _operationHumanRevision;
+        static volatile bool _operationLive, _operationDispatched;
+        static volatile int _activeRequestId, _lastCompletedRequestId;
+        // The seam is internal to the compiled program; no tool can replace it.
+        internal static Func<INPUT[], uint> InputSender = delegate(INPUT[] inputs) {
+            return Native.SendInput((uint)inputs.Length, inputs, InputCbSize);
+        };
+
+        static Exception InputInterrupted(string code, string message)
+        {
+            var error = new Exception(code + ": " + message);
+            error.Data["code"] = code;
+            error.Data["outcome"] = _operationDispatched ? "unknown" : "not-dispatched";
+            return error;
+        }
+        public static void CheckHumanInput()
+        {
+            if (Panic.PauseRequested)
+                throw InputInterrupted("ABORTED", "Ctrl+Esc requested a manual pause; wait for manual recovery.");
+            if (_operationLive && _operationCancelGeneration != Interlocked.Read(ref _cancelGeneration))
+                throw InputInterrupted("INPUT_CANCELLED", "the owning tool was cancelled; no further input will be sent.");
+            if (Panic.HumanActive || (_operationLive && _operationHumanRevision != Panic.HumanRevision))
+                throw InputInterrupted("HUMAN_YIELD", "Physical input owns the desktop. Wait for three quiet seconds, then inspect the current target before continuing; never replay a partial write.");
+        }
+        static void MarkMutation()
+        {
+            Panic.Check("actuation"); CheckHumanInput(); _operationDispatched = true;
+        }
+        public static bool CancelInput(int requestId)
+        {
+            if (requestId <= 0 || requestId <= _lastCompletedRequestId) return false;
+            CancelledRequests[requestId] = true;
+            if (_activeRequestId == requestId)
+            { Interlocked.Increment(ref _cancelGeneration); ReleaseOwnedInputs(); }
+            return true;
+        }
+        static string InputKey(INPUT input, out bool up, out INPUT release, out int physical)
+        {
+            release = input; up = false; physical = 0;
+            if (input.type == Native.INPUT_KEYBOARD)
+            {
+                up = (input.u.ki.dwFlags & Native.KEYEVENTF_KEYUP) != 0;
+                release.u.ki.dwFlags |= Native.KEYEVENTF_KEYUP;
+                if ((input.u.ki.dwFlags & Native.KEYEVENTF_UNICODE) != 0) return "unicode:" + input.u.ki.wScan;
+                physical = input.u.ki.wVk; return "key:" + physical;
+            }
+            if (input.type != Native.INPUT_MOUSE) return null;
+            uint f = input.u.mi.dwFlags, downFlag = 0, upFlag = 0;
+            if ((f & (Native.MOUSEEVENTF_LEFTDOWN | Native.MOUSEEVENTF_LEFTUP)) != 0)
+            { physical = 1; downFlag = Native.MOUSEEVENTF_LEFTDOWN; upFlag = Native.MOUSEEVENTF_LEFTUP; }
+            else if ((f & (Native.MOUSEEVENTF_RIGHTDOWN | Native.MOUSEEVENTF_RIGHTUP)) != 0)
+            { physical = 2; downFlag = Native.MOUSEEVENTF_RIGHTDOWN; upFlag = Native.MOUSEEVENTF_RIGHTUP; }
+            else if ((f & (Native.MOUSEEVENTF_MIDDLEDOWN | Native.MOUSEEVENTF_MIDDLEUP)) != 0)
+            { physical = 4; downFlag = Native.MOUSEEVENTF_MIDDLEDOWN; upFlag = Native.MOUSEEVENTF_MIDDLEUP; }
+            if (downFlag == 0) return null;
+            up = (f & upFlag) != 0;
+            release.u.mi.dwFlags = upFlag; release.u.mi.dx = release.u.mi.dy = 0;
+            return "mouse:" + physical;
+        }
+        static uint SendTrackedInput(INPUT[] inputs)
+        {
+            lock (InputLock)
+            {
+                CheckHumanInput();
+                // Never acquire Panic.SyncLock while owning InputLock: adopting a
+                // cross-process STOP may hold SyncLock while releasing owned input.
+                if (Panic.Engaged || Panic.Stopped || Panic.Exited)
+                    throw InputInterrupted("ABORTED", "manual pause or exit owns the desktop; no further input will be sent.");
+                if (inputs.Length == 1)
+                {
+                    bool isUp; INPUT release; int physical;
+                    string key = InputKey(inputs[0], out isUp, out release, out physical);
+                    if (isUp && key != null && !OwnedUps.ContainsKey(key)) return 1;
+                }
+                uint sent = InputSender(inputs);
+                if (sent > 0) _operationDispatched = true;
+                for (int i = 0; i < Math.Min(sent, inputs.Length); i++)
+                {
+                    bool isUp; INPUT release; int physical;
+                    string key = InputKey(inputs[i], out isUp, out release, out physical);
+                    if (key == null) continue;
+                    if (isUp) OwnedUps.Remove(key); else OwnedUps[key] = release;
+                }
+                return sent;
+            }
+        }
+        static uint ReleaseOwnedKey(string key)
+        {
+            INPUT input;
+            if (!OwnedUps.TryGetValue(key, out input)) return 0;
+            bool up; INPUT release; int physical;
+            InputKey(input, out up, out release, out physical);
+            // A physical down transfers this key/button to the user. Releasing it here
+            // would terminate the user's own drag/chord. Their physical up will release it.
+            if (physical != 0 && Panic.HumanHolds(physical)) { OwnedUps.Remove(key); return 0; }
+            uint sent = InputSender(new INPUT[] { release });
+            if (sent == 1) OwnedUps.Remove(key);
+            return sent;
+        }
+        public static uint ReleaseOwnedInputs()
+        {
+            lock (InputLock)
+            {
+                uint sent = 0;
+                foreach (string key in OwnedUps.Keys.Reverse().ToArray())
+                    try { sent += ReleaseOwnedKey(key); } catch { }
+                return sent;
+            }
+        }
+
         static readonly string AuditPath = ResolveAuditPath();
 
         static string ResolveAuditPath()
@@ -2896,6 +3112,7 @@ namespace DshComputerUse.Worker
                         "event", kind,
                         "why", why,
                         "pauseId", Panic.TemporaryPauseId,
+                        "cooperation", Panic.CooperationState(),
                         "ts", NowMs(),
                         "hint", hint)));
                 }
@@ -2918,7 +3135,7 @@ namespace DshComputerUse.Worker
                 string oneshot = "{\"op\":" + Json.Serialize(args[1]) + ",\"args\":" + (args.Length >= 3 ? args[2] : "{}") + "}";
                 Dictionary<string, object> resp;
                 try { resp = Handle(oneshot); }
-                catch (Exception ex) { resp = Err(ex.Message); }
+                catch (Exception ex) { resp = Err(ex); }
                 AuditActuation(oneshot, resp);
                 WriteLine(Json.Serialize(resp));
                 return 0;
@@ -2933,17 +3150,41 @@ namespace DshComputerUse.Worker
                 "stopped", Panic.Stopped,
                 "exited", Panic.Exited,
                 "why", Panic.Why,
+                "cooperation", Panic.CooperationState(),
                 "virtualScreen", VirtualScreenDict(),
                 "monitors", Native.GetSystemMetrics(Native.SM_CMONITORS));
             WriteLine(Json.Serialize(hello));
-            string line;
-            while ((line = Console.ReadLine()) != null)
+            var requests = new BlockingCollection<string>();
+            var reader = new Thread(delegate() {
+                try {
+                    string incoming;
+                    while ((incoming = Console.ReadLine()) != null)
+                    {
+                        try {
+                            var parser = new JavaScriptSerializer();
+                            var request = parser.Deserialize<Dictionary<string, object>>(incoming);
+                            if (GetS(request, "op", "") == "cancelInput")
+                            {
+                                object argsValue;
+                                var cancelArgs = request.TryGetValue("args", out argsValue) ? argsValue as Dictionary<string, object> : null;
+                                bool cancelled = cancelArgs != null && CancelInput(GetI(cancelArgs, "requestId", 0));
+                                WriteLine(parser.Serialize(Dict("id", GetI(request, "id", 0), "ok", true,
+                                    "data", Dict("cancelled", cancelled))));
+                                continue;
+                            }
+                        } catch { /* Main loop reports malformed requests in the normal format. */ }
+                        requests.Add(incoming);
+                    }
+                } finally { requests.CompleteAdding(); }
+            });
+            reader.IsBackground = true; reader.Name = "dsh-input-reader"; reader.Start();
+            foreach (string line in requests.GetConsumingEnumerable())
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 int id = ++_reqId;
                 Dictionary<string, object> resp;
                 try { resp = Handle(line); }
-                catch (Exception ex) { resp = Err(ex.Message); }
+                catch (Exception ex) { resp = Err(ex); }
                 // Echo the CALLER's id when it supplied one.
                 //
                 // 2026-09-12: the old code always answered with our OWN counter (_reqId), while
@@ -2975,16 +3216,35 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Handle(string line)
         {
-            string pauseId = Panic.TemporaryPauseId;
-            Dictionary<string, object> result = HandleCore(line);
-            if (!string.IsNullOrEmpty(pauseId) && GetB(result, "ok", false))
+            var request = Json.Deserialize<Dictionary<string, object>>(line);
+            string op = GetS(request, "op", "");
+            bool input = ActOps.Contains(op) || op == "shiftClick" || op == "selftest";
+            int requestId = GetI(request, "id", 0);
+            bool ignored;
+            _activeRequestId = requestId;
+            _operationHumanRevision = Panic.HumanRevision;
+            _operationCancelGeneration = Interlocked.Read(ref _cancelGeneration);
+            _operationDispatched = false; _operationLive = input;
+            try
             {
-                var request = Json.Deserialize<Dictionary<string, object>>(line);
-                string op = GetS(request, "op", "");
-                if (op == "windows" || op == "uia" || op == "uiaFromPoint" || op == "uiaFocused" || op == "capture")
+                if (CancelledRequests.TryRemove(requestId, out ignored))
+                    throw InputInterrupted("INPUT_CANCELLED", "cancelled before dispatch.");
+                if (input) CheckHumanInput();
+                string pauseId = Panic.TemporaryPauseId;
+                Dictionary<string, object> result = HandleCore(line);
+                if (input) CheckHumanInput();
+                if (!string.IsNullOrEmpty(pauseId) && GetB(result, "ok", false) &&
+                    (op == "windows" || op == "uia" || op == "uiaFromPoint" || op == "uiaFocused" || op == "capture"))
                     Panic.ObserveTemporary(pauseId);
+                return result;
             }
-            return result;
+            finally
+            {
+                if (input) ReleaseOwnedInputs();
+                _operationLive = false; _activeRequestId = 0;
+                _lastCompletedRequestId = Math.Max(_lastCompletedRequestId, requestId);
+                CancelledRequests.TryRemove(requestId, out ignored);
+            }
         }
 
         static Dictionary<string, object> HandleCore(string line)
@@ -2995,34 +3255,6 @@ namespace DshComputerUse.Worker
             object o; object av;
             string op = req.TryGetValue("op", out o) ? o as string : null;
             Dictionary<string, object> a = (req.TryGetValue("args", out av) && av is Dictionary<string, object>) ? (Dictionary<string, object>)av : new Dictionary<string, object>();
-            if (op != null && ObsOps.Contains(op)) _humanMoves = 0; // fresh move budget per observation
-
-            // Any computer-use op means the agent is engaged with this machine — even a pure
-            // observation such as reading a screenshot. That is the faint-blue "thinking"
-            // state; an actual actuation later overrides it with the bright blue.
-            // thinkMs = 0 (the default) LATCHES it: lit from the first op of a turn until the
-            // plugin cuts it at turn end, so a pause mid-turn no longer looks like "stopped".
-            // NOTE "calm" is excluded on purpose: the PLUGIN sends calm() by itself (turn end, exit
-            // handling, idle watchdog) — housekeeping, NOT "the human asked for computer use".
-            // Including it undid Ctrl+Alt+Q milliseconds after it was pressed: exit -> plugin calm
-            // -> EXITED cleared -> monitors live -> the human moves the mouse -> red box. That single
-            // omitted word produced the whole all-day loop (found 2026-09-12).
-            // The INDICATOR lights for any agent op — looking at the screen is working too.
-            // ("resume" and "calm" stay out: the PLUGIN sends those by itself as housekeeping.)
-            // "panic" is excluded WITH the plugin's other housekeeping calls, and the reason is
-            // R1 itself: the dispatcher runs BEFORE the op, so a panic that lit the cycle would then
-            // sail through Engage()'s `if (!CycleLit) return;` — the one op R1 exists to refuse would
-            // be the op that satisfied it. (Caught while designing the R1 branch tests.)
-            // THE CYCLE OPENS HERE AND NOWHERE ELSE — gate: the `__cycle` flag the plugin's own JS
-            // layer stamps on every call it makes on the agent's behalf. A one-shot `worker.exe
-            // --op click` from a shell script, the deploy-time health probe, another session's
-            // leftover call: none of them carry it, so none of them can open a cycle.
-            //
-            // Before this, the cycle was opened by "whatever op happened to DRIVE the machine" —
-            // a property of the OP, not of the TURN, which is the wrong axis and the reason a
-            // stray probe could relight a dead session. The human's model (2026-09-13): "真正要
-            // 解耦的是 computer use 的周期和会话周期" — so the cycle is opened at the TURN
-            // boundary (the plugin sends `resume` there) and merely *lit* by the ops inside it.
             bool cycleOp = GetB(a, "__cycle", false) && op != null &&
                 op != "abort" && op != "ping" && op != "echoargs" &&
                 op != "indicator" && op != "calm" && op != "panic" && op != "resume" && op != "recover" &&
@@ -3059,7 +3291,7 @@ namespace DshComputerUse.Worker
                 case "beginAsk": return Ok(BeginAskOp(a));
                 case "endAsk": return Ok(EndAskOp(a));
                 case "exit": return Ok(ExitOp(a));
-                case "ping": return Ok(Dict("pong", true));
+                case "ping": return Ok(Dict("pong", true, "cooperation", Panic.CooperationState()));
                 // TEST SEAM (D, 2026-09-13). A fixture may not re-implement the rule it measures, so
                 // this op drives the PRODUCTION transition (Panic.ClassifyAndTrackKey — the same
                 // function the low-level hook calls) with explicit evidence: ours / injected / vk.
@@ -3473,11 +3705,12 @@ namespace DshComputerUse.Worker
             // THE ONE GATE EVERY REAL INJECTION PASSES: mark the injection in flight, re-anchor the
             // ACTING light on it, and clear the mark in a finally so the blue can never outlive the
             // input it is describing.
+            CheckHumanInput();
             Glow.InputBegin();
             try
             {
                 Glow.KeepActing();
-                uint sent = Native.SendInput((uint)arr.Length, arr, InputCbSize);
+                uint sent = SendTrackedInput(arr);
                 if (sent != (uint)arr.Length)
                 {
                     int err = Marshal.GetLastWin32Error();
@@ -3512,7 +3745,7 @@ namespace DshComputerUse.Worker
             // the pointer ends up over (x,y), and that window is this op's victim
             HostGuardPoint(x, y, "move");
             AgentActing(a, "move");
-            CountSpontaneousMove(); CheckBudget();
+            CheckHumanInput();
             int dur = GetI(a, "moveDurationMs", 250);
             AnimatedMove(x, y, dur);
             Thread.Sleep(GetI(a, "settleMs", 30));
@@ -3520,13 +3753,13 @@ namespace DshComputerUse.Worker
             if (Dist(p, x, y) > 40)
             {
                 // drift after arrival: tolerate, re-assert absolutely
-                _humanMoves++; CheckBudget();
+                _positionCorrections++; CheckHumanInput();
                 AnimatedMove(x, y, dur);
                 Thread.Sleep(30);
                 Native.GetCursorPos(out p);
             }
-            RememberEnd();
-            return Dict("x", p.X, "y", p.Y, "humanMoves", _humanMoves);
+            CheckHumanInput();
+            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections);
         }
 
         static Dictionary<string, object> Click(Dictionary<string, object> a)
@@ -3535,7 +3768,7 @@ namespace DshComputerUse.Worker
             int clicks = Math.Max(1, Math.Min(3, GetI(a, "clicks", 1)));
             int gap = GetI(a, "intervalMs", 60);
             AgentActing(a, "click");
-            CountSpontaneousMove(); CheckBudget();
+            CheckHumanInput();
             // If the caller NAMED the window it wants to click in, put that window in front
             // first: a click on a covered pixel is delivered to whatever is on top of it (the
             // classic "the click went to the approval card instead" failure).
@@ -3653,7 +3886,7 @@ namespace DshComputerUse.Worker
                 POINT p; Native.GetCursorPos(out p);
                 if (Dist(p, tx, ty) > 40)
                 {
-                    _humanMoves++; CheckBudget();
+                    _positionCorrections++; CheckHumanInput();
                     AnimatedMove(tx, ty, dur);
                     Thread.Sleep(40);
                 }
@@ -3697,8 +3930,8 @@ namespace DshComputerUse.Worker
             }
             POINT fp; Native.GetCursorPos(out fp);
             Dictionary<string, object> clickFocus = FocusReport(a, false);
-            RememberEnd();
-            Dictionary<string, object> clickOut = Dict("x", fp.X, "y", fp.Y, "humanMoves", _humanMoves, "focus", clickFocus);
+            CheckHumanInput();
+            Dictionary<string, object> clickOut = Dict("x", fp.X, "y", fp.Y, "positionCorrections", _positionCorrections, "focus", clickFocus);
             if (_lastRefocus != null) clickOut["refocused"] = _lastRefocus;
             if (coveredBy != null) clickOut["coveredBy"] = coveredBy;
             if (under != IntPtr.Zero)
@@ -3726,7 +3959,7 @@ namespace DshComputerUse.Worker
             int steps = Math.Max(2, GetI(a, "steps", 25));
             int durMs = Math.Max(50, GetI(a, "durationMs", 350));
             AgentActing(a, "drag");
-            CountSpontaneousMove(); CheckBudget();
+            CheckHumanInput();
             AnimatedMove(fx, fy, GetI(a, "moveDurationMs", 250));
             Thread.Sleep(80);
             SendMouse(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
@@ -3734,7 +3967,7 @@ namespace DshComputerUse.Worker
             POINT probe0; Native.GetCursorPos(out probe0);
             if (Dist(probe0, fx, fy) > 24)
             {
-                _humanMoves++; CheckBudget();
+                _positionCorrections++; CheckHumanInput();
                 AnimatedMove(fx, fy, 150); // tolerate and re-anchor instead of aborting
             }
             Stopwatch sw = Stopwatch.StartNew();
@@ -3748,7 +3981,7 @@ namespace DshComputerUse.Worker
                 POINT cur; Native.GetCursorPos(out cur);
                 if (Dist(cur, ix, iy) > 24)
                 {
-                    _humanMoves++; CheckBudget();
+                    _positionCorrections++; CheckHumanInput();
                     int rx, ry; ToAbs(ix, iy, out rx, out ry); // re-anchor, keep dragging
                     SendMouse(Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, rx, ry, 0);
                 }
@@ -3757,8 +3990,8 @@ namespace DshComputerUse.Worker
             Thread.Sleep(60);
             SendMouse(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0);
             POINT p; Native.GetCursorPos(out p);
-            RememberEnd();
-            return Dict("x", p.X, "y", p.Y, "humanMoves", _humanMoves);
+            CheckHumanInput();
+            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections);
         }
 
         static Dictionary<string, object> Scroll(Dictionary<string, object> a)
@@ -3782,15 +4015,7 @@ namespace DshComputerUse.Worker
             return PtDict(p.X, p.Y);
         }
 
-        // ---------- agent-acting cue + human-quiet gate ----------
-        // Two guarantees the user asked for, applied to every actuation:
-        //   1. the blue border glow lights up BEFORE anything moves, so the human can see
-        //      the agent taking the pointer;
-        //   2. the FIRST action of a sequence waits until the physical pointer has been
-        //      still for quietMs (default 1000 ms). If the human keeps moving it, the
-        //      actuation is withheld (and says so) instead of fighting the hand.
-        // Observations (screenshots/UIA) never light the glow and never wait.
-        static long _lastSeqMs = 0;
+        // Physical ownership is checked before focus or input, for every action.
 
         /// The sticky target IS the window the agent is working in, so an input op must not be
         /// delivered to whatever happens to be in front. Windows' foreground lock makes this the
@@ -3812,7 +4037,8 @@ namespace DshComputerUse.Worker
 
         static void AgentActing(Dictionary<string, object> a, string op)
         {
-            Panic.Check(op);          // the human's brake wins over anything the agent wants
+            Panic.Check(op);
+            CheckHumanInput();
             // Re-assert the target window before any op whose input goes to the FOREGROUND. Not for
             // `activate`/`windowOp` (they are deliberately changing windows) nor for ops that drive
             // nothing (clipWrite / calibrate / indicator).
@@ -3831,27 +4057,6 @@ namespace DshComputerUse.Worker
             // "input, right now, plus a short tail"; cyan is what a reading agent looks like.
             int hold = GetI(a, "indicatorMs", 1200);
             Glow.Touch(hold);
-            int quietMs = GetI(a, "quietMs", 1000);
-            long now = NowMs();
-            if (quietMs <= 0 || now - _lastSeqMs < 1500) { _lastSeqMs = now; return; }
-            POINT p0; Native.GetCursorPos(out p0);
-            long stillSince = NowMs();
-            long deadline = stillSince + quietMs + 4000;
-            while (NowMs() - stillSince < quietMs)
-            {
-                if (NowMs() > deadline)
-                {
-                    _lastSeqMs = NowMs();
-                    Glow.Off();
-                    throw new Exception("quiet gate: the pointer kept moving for " +
-                        (quietMs + 4000) + "ms — " + op + " withheld so the agent never fights your hand");
-                }
-                Thread.Sleep(40);
-                Glow.Touch(hold);
-                POINT p1; Native.GetCursorPos(out p1);
-                if (Dist(p1, p0.X, p0.Y) > 3) { p0 = p1; stillSince = NowMs(); }
-            }
-            _lastSeqMs = NowMs();
         }
 
         static Dictionary<string, object> Indicator(Dictionary<string, object> a)
@@ -3895,7 +4100,7 @@ namespace DshComputerUse.Worker
             if (scrollClicks != 0) HostGuardPoint(scrollAtX, scrollAtY, "selectRange");
 
             AgentActing(a, "selectRange");
-            CountSpontaneousMove(); CheckBudget();
+            CheckHumanInput();
 
             // 1) anchor
             AnimatedMove(fx, fy, dur);
@@ -3926,7 +4131,7 @@ namespace DshComputerUse.Worker
             Thread.Sleep(40);
             SendKey(0x10, true);             // VK_SHIFT up
             Thread.Sleep(settle);
-            RememberEnd();
+            CheckHumanInput();
             return Dict("anchor", PtDict(fx, fy), "focus", PtDict(tx, ty),
                         "fromClicks", fromClicks, "toClicks", toClicks, "scrollClicks", scrollClicks);
         }
@@ -3942,7 +4147,7 @@ namespace DshComputerUse.Worker
             HostGuardPoint(x, y, "shiftClick");
             int clicks = Math.Max(1, Math.Min(3, GetI(a, "clicks", 1)));
             AgentActing(a, "shiftClick");
-            CountSpontaneousMove(); CheckBudget();
+            CheckHumanInput();
             AnimatedMove(x, y, Math.Max(60, GetI(a, "moveDurationMs", 200)));
             Thread.Sleep(GetI(a, "settleMs", 90));
             SendKey(0x10, false);            // VK_SHIFT down
@@ -3951,7 +4156,7 @@ namespace DshComputerUse.Worker
             Thread.Sleep(40);
             SendKey(0x10, true);             // VK_SHIFT up
             Thread.Sleep(GetI(a, "settleMs", 90));
-            RememberEnd();
+            CheckHumanInput();
             return Dict("x", x, "y", y, "clicks", clicks);
         }
 
@@ -3991,7 +4196,7 @@ namespace DshComputerUse.Worker
             if (dib == IntPtr.Zero) { Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen); return null; }
             IntPtr old = Native.SelectObject(mem, dib);
             Native.BitBlt(mem, 0, 0, vw, vh, screen, vx, vy, 0x00CC0020 | 0x40000000);
-            int n = (vw / step) * (vh / step);
+            int n = ((vw - 1) / step + 1) * ((vh - 1) / step + 1);
             byte[] sig = new byte[n];
             int k = 0;
             for (int y = 0; y < vh; y += step)
@@ -4042,8 +4247,7 @@ namespace DshComputerUse.Worker
             if (dib == IntPtr.Zero) { Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen); return null; }
             IntPtr old = Native.SelectObject(mem, dib);
             Native.BitBlt(mem, 0, 0, rw, rh, screen, rx, ry, 0x00CC0020 | 0x40000000);
-            int n = (rw / step) * (rh / step);
-            if (n <= 0) n = 1;
+            int n = ((rw - 1) / step + 1) * ((rh - 1) / step + 1);
             byte[] sig = new byte[n];
             int k = 0;
             for (int y = 0; y < rh && k < n; y += step)
@@ -4109,8 +4313,15 @@ namespace DshComputerUse.Worker
         static bool SettleWait(int capMs, int stableMs, int pollMs, int step, double diffPct,
                                out int waitedMs, out double lastDiff, out int estimateMs)
         {
+            return SettleSampleWait(capMs, stableMs, pollMs, diffPct, delegate { return FrameSignature(step); },
+                                    out waitedMs, out lastDiff, out estimateMs);
+        }
+
+        static bool SettleSampleWait(int capMs, int stableMs, int pollMs, double diffPct, Func<byte[]> sample,
+                                     out int waitedMs, out double lastDiff, out int estimateMs)
+        {
             long t0 = NowMs();
-            byte[] prev = FrameSignature(step);
+            byte[] prev = sample();
             long stableSince = NowMs();
             lastDiff = 100.0;
             estimateMs = 0;
@@ -4118,7 +4329,7 @@ namespace DshComputerUse.Worker
             while (NowMs() - t0 < capMs)
             {
                 Thread.Sleep(pollMs);
-                byte[] cur = FrameSignature(step);
+                byte[] cur = sample();
                 double d = SigDiffPct(prev, cur, 8);
                 prev = cur;
                 lastDiff = d;
@@ -4147,6 +4358,34 @@ namespace DshComputerUse.Worker
             return false;
         }
 
+        // Explicit window scope excludes unrelated desktop animation without loosening the
+        // change threshold. A moved/minimized/replaced window invalidates the observation.
+        static Func<byte[]> WaitSampler(Dictionary<string, object> a, int step, out object scope)
+        {
+            if (!a.ContainsKey("hwnd") || GetI(a, "hwnd", 0) == 0)
+            {
+                scope = Dict("kind", "virtual-desktop");
+                return delegate { return FrameSignature(step); };
+            }
+            IntPtr h = new IntPtr(GetI(a, "hwnd", 0));
+            if (!Native.IsWindow(h) || Native.IsIconic(h))
+                throw new Exception("WAIT_TARGET_UNAVAILABLE: window is closed or minimized; restore/requery first");
+            RECT original; Native.GetWindowRect(h, out original);
+            uint pid = PidOf(h);
+            Rectangle virtualRect = SystemInformation.VirtualScreen;
+            Rectangle visible = Rectangle.Intersect(virtualRect, Rectangle.FromLTRB(original.Left, original.Top, original.Right, original.Bottom));
+            if (visible.Width <= 16 || visible.Height <= 16)
+                throw new Exception("WAIT_TARGET_UNAVAILABLE: window has no usable visible screen region");
+            scope = Dict("kind", "window", "hwnd", h.ToInt64(), "region", Dict("x", visible.X, "y", visible.Y, "width", visible.Width, "height", visible.Height));
+            return delegate {
+                RECT current;
+                if (!Native.IsWindow(h) || Native.IsIconic(h) || PidOf(h) != pid || !Native.GetWindowRect(h, out current) ||
+                    current.Left != original.Left || current.Top != original.Top || current.Right != original.Right || current.Bottom != original.Bottom)
+                    throw new Exception("WAIT_TARGET_CHANGED: window identity or bounds changed during sampling; requery before waiting again");
+                return FrameSignatureRect(visible.X, visible.Y, visible.Width, visible.Height, step);
+            };
+        }
+
         static Dictionary<string, object> WaitStable(Dictionary<string, object> a)
         {
             int capMs = Math.Max(400, GetI(a, "timeoutMs", 8000));
@@ -4155,11 +4394,12 @@ namespace DshComputerUse.Worker
             int step = Math.Max(4, Math.Min(64, GetI(a, "step", 8)));
             double diffPct = GetD(a, "diffPct", 0.30);
             int waited, estimate; double lastDiff;
-            bool ok = SettleWait(capMs, stableMs, pollMs, step, diffPct, out waited, out lastDiff, out estimate);
+            object scope; Func<byte[]> sample = WaitSampler(a, step, out scope);
+            bool ok = SettleSampleWait(capMs, stableMs, pollMs, diffPct, sample, out waited, out lastDiff, out estimate);
             return Dict("stable", ok, "waitedMs", waited, "lastDiffPct", Math.Round(lastDiff, 3),
-                        "estimateMs", estimate,
-                        "note", ok ? "screen settled — safe to capture"
-                                   : "cap reached; the screen never went quiet. Capturing anyway would risk a partial render — either re-shoot or wait ~" + estimate + "ms more");
+                        "estimateMs", estimate, "scope", scope,
+                        "note", ok ? "sampled pixels settled; this does not verify task completion"
+                                   : "cap reached; sampled pixels did not settle. lastDiffPct is only the final pair. Inspect target state; persistent animation may require UIA readback instead of another pixel wait.");
         }
 
         static Dictionary<string, object> WaitChange(Dictionary<string, object> a)
@@ -4168,20 +4408,21 @@ namespace DshComputerUse.Worker
             int pollMs = Math.Max(100, GetI(a, "pollMs", 220));
             int step = Math.Max(4, Math.Min(64, GetI(a, "step", 8)));
             double diffPct = GetD(a, "diffPct", 0.30);
-            byte[] first = FrameSignature(step);
+            object scope; Func<byte[]> sample = WaitSampler(a, step, out scope);
+            byte[] first = sample();
             long t0 = NowMs();
             int samples = 0;
             while (NowMs() - t0 < timeoutMs)
             {
                 Thread.Sleep(pollMs);
-                byte[] cur = FrameSignature(step);
+                byte[] cur = sample();
                 samples++;
                 double d = SigDiffPct(first, cur, 8);
                 if (d > diffPct)
-                    return Dict("changed", true, "afterMs", NowMs() - t0, "diffPct", Math.Round(d, 3), "samples", samples);
+                    return Dict("changed", true, "afterMs", NowMs() - t0, "diffPct", Math.Round(d, 3), "samples", samples, "scope", scope);
             }
-            return Dict("changed", false, "afterMs", NowMs() - t0, "samples", samples,
-                        "note", "nothing changed — the click probably missed, or the page is already settled");
+            return Dict("changed", false, "afterMs", NowMs() - t0, "samples", samples, "scope", scope,
+                        "note", "no sampled pixel change exceeded the threshold; inspect task state before retrying a write");
         }
 
         // ---------- calibration / self-test ----------
@@ -4200,7 +4441,9 @@ namespace DshComputerUse.Worker
             probe.type = Native.INPUT_MOUSE;
             probe.u.mi.dx = ax; probe.u.mi.dy = ay;
             probe.u.mi.dwFlags = Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK;
-            uint sent = Native.SendInput(1, new INPUT[] { probe }, InputCbSize);
+            CheckHumanInput();
+            probe.u.mi.dwExtraInfo = Panic.OwnMagic;
+            uint sent = SendTrackedInput(new INPUT[] { probe });
             // GetLastError is only meaningful when the call FAILED: a successful SendInput
             // leaves whatever code the thread carried before, which we saw reported as a
             // bogus "win32Error 1008" next to inputInjection:"ok". Report 0 on success.
@@ -4279,18 +4522,12 @@ namespace DshComputerUse.Worker
             foreach (int[] t in targets)
             {
                 // if the user has taken the mouse, stop at once and do NOT drag it back
-                CountSpontaneousMove();
-                if (_humanMoves > MOVE_BUDGET)
-                {
-                    humanAbort = true;
-                    probes.Add(Dict("aborted", true, "reason", "human takeover detected; pointer released where the user left it"));
-                    break;
-                }
+                CheckHumanInput();
                 AnimatedMove(t[0], t[1], dur);
                 Thread.Sleep(70);
                 // Record where we put it, otherwise CountSpontaneousMove() has no reference
                 // point and the human-takeover abort below can never fire (it would be dead code).
-                RememberEnd();
+                CheckHumanInput();
                 POINT p; Native.GetCursorPos(out p);
                 int e = Dist(p, t[0], t[1]);
                 if (e > maxErr) maxErr = e;
@@ -4310,9 +4547,9 @@ namespace DshComputerUse.Worker
                 object reg; if (shot.TryGetValue("region", out reg)) { rx = GetI((Dictionary<string, object>)reg, "x", rx); ry = GetI((Dictionary<string, object>)reg, "y", ry); }
             }
             catch (Exception ex) { mime = "error: " + ex.Message; }
-            RememberEnd();
+            CheckHumanInput();
             // Never drag the pointer back while the user is holding the mouse.
-            if (restore && !humanAbort) { AnimatedMove(origin.X, origin.Y, 180); Thread.Sleep(40); RememberEnd(); }
+            if (restore && !humanAbort) { AnimatedMove(origin.X, origin.Y, 180); Thread.Sleep(40); CheckHumanInput(); }
 
             return Dict(
                 "mode", mode,
@@ -4373,9 +4610,35 @@ namespace DshComputerUse.Worker
             INPUT inp = new INPUT();
             inp.type = Native.INPUT_KEYBOARD;
             inp.u.ki.wVk = vk; inp.u.ki.wScan = 0;
-            inp.u.ki.dwFlags = up ? Native.KEYEVENTF_KEYUP : 0;
+            inp.u.ki.dwFlags = (up ? Native.KEYEVENTF_KEYUP : 0) |
+                (Panic.IsExtendedVk(vk) ? Native.KEYEVENTF_EXTENDEDKEY : 0);
             inp.u.ki.dwExtraInfo = Panic.OwnMagic;   // the hook must know this one is ours
             SendInputChecked(new INPUT[] { inp });
+        }
+
+        // Cleanup must bypass the stopped-input gate, but may send ONLY the scope's accepted downs.
+        static void ReleaseKeyForCleanup(ushort vk)
+        {
+            lock (InputLock)
+            {
+                string key = "key:" + vk;
+                bool owned = OwnedUps.ContainsKey(key);
+                ReleaseOwnedKey(key);
+                if (owned && OwnedUps.ContainsKey(key)) throw new Exception("Cleanup SendInput did not release the owned key.");
+            }
+        }
+        static void WaitForKeyHold(int milliseconds)
+        {
+            var timer = Stopwatch.StartNew();
+            while (true)
+            {
+                if (Panic.Exited || Panic.Engaged || Panic.Stopped)
+                    throw new Exception("INTERRUPTED: keyboard chord stopped; releasing its accepted key downs.");
+                CheckHumanInput();
+                long remaining = milliseconds - timer.ElapsedMilliseconds;
+                if (remaining <= 0) return;
+                Thread.Sleep((int)Math.Min(10, remaining));
+            }
         }
 
         static Dictionary<string, object> Key(Dictionary<string, object> a)
@@ -4398,10 +4661,10 @@ namespace DshComputerUse.Worker
             // happened to be in front when the call arrived.
             HostGuardForeground("key");
             List<ushort> vks = new List<ushort>();
-            foreach (string k in keys) vks.Add(VkOf(k));
-            foreach (ushort vk in vks) SendKey(vk, false);
-            Thread.Sleep(Math.Max(20, GetI(a, "holdMs", 60)));
-            for (int i = vks.Count - 1; i >= 0; i--) SendKey(vks[i], true);
+            foreach (string k in keys) { ushort vk = VkOf(k); if (!vks.Contains(vk)) vks.Add(vk); }
+            KeyboardChord.Run(vks, SendKey, ReleaseKeyForCleanup,
+                delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
+                delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); });
             Thread.Sleep(30);
             Dictionary<string, object> keyOut = Dict("combo", combo, "focus", focus);
             if (_lastRefocus != null) keyOut["refocused"] = _lastRefocus;
@@ -4421,6 +4684,7 @@ namespace DshComputerUse.Worker
             // ...and whether whatever owns the focus can hold text at all. Typing into a control
             // with no editable pattern is silently discarded, or interpreted as shortcuts.
             string typeWarn = null;
+            bool nonEditableButton = false;
             try
             {
                 AutomationElement fe = AutomationElement.FocusedElement;
@@ -4430,20 +4694,59 @@ namespace DshComputerUse.Worker
                     try { if (fe.Current.ControlType != null) ctl = fe.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { }
                     typeWarn = "the focused element (\"" + Short(fe.Current.Name, 30) + "\", " + ctl +
                         ") exposes no editable pattern — the text may be discarded or read as shortcuts. Click the text field first.";
+                    // Observed with Notepad's Add tab InvokePattern: activation succeeded, but
+                    // focus stayed on the button and all characters were discarded. Refuse this
+                    // known role before SendInput or clipboard writes. Unknown/custom editors
+                    // retain the warning path, since absent UIA patterns alone prove nothing.
+                    nonEditableButton = fe.Current.ControlType == ControlType.Button;
                 }
             }
             catch { }
+            if (nonEditableButton)
+                throw NotDispatched("TYPE_FOCUS_NOT_EDITABLE",
+                    "TYPE_FOCUS_NOT_EDITABLE: " + typeWarn +
+                    " Use computer_uia_act focus on the observed editor, then retry; no text input sent.");
             string mode = GetS(a, "mode", "unicode");
             if (mode == "paste")
             {
-                string prev = null;
                 bool keep = GetB(a, "restoreClipboard", false);
-                if (keep && Clipboard.ContainsText()) prev = Clipboard.GetText();
-                Clipboard.SetDataObject(text, true);
-                Thread.Sleep(60);
-                Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
-                if (keep && prev != null) { Thread.Sleep(150); Clipboard.SetDataObject(prev, true); }
-                Dictionary<string, object> pr = Dict("mode", "paste", "chars", text.Length, "focus", focus);
+                string restore = "not-requested";
+                if (keep)
+                {
+                    using (var access = new NativeClipboardAccess())
+                    {
+                        CheckHumanInput();
+                        ClipboardLease lease = ClipboardLease.Begin(access, text);
+                        Exception inputError = null;
+                        try
+                        {
+                            Thread.Sleep(60);
+                            if (!lease.StillOwned())
+                                throw NotDispatched("CLIPBOARD_CHANGED", "CLIPBOARD_CHANGED: clipboard changed before paste; no paste keystrokes sent.");
+                            Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
+                        }
+                        catch (Exception error) { inputError = error; throw; }
+                        finally
+                        {
+                            // Preserve the original dispatch result even when optional restoration fails.
+                            Thread.Sleep(150);
+                            try { restore = lease.Restore(); }
+                            catch { restore = "restore-failed"; }
+                            if (inputError != null) inputError.Data["clipboardRestore"] = restore;
+                        }
+                    }
+                }
+                else
+                {
+                    MarkMutation();
+                    Clipboard.SetDataObject(text, true);
+                    Thread.Sleep(60);
+                    Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
+                }
+                Dictionary<string, object> pr = Dict("mode", "paste", "chars", text.Length, "focus", focus,
+                    "clipboardRestore", restore);
+                if (restore == "skipped-changed" || restore == "restore-failed")
+                    pr["clipboardWarning"] = "Clipboard changed or could not be restored. Verify the target value before repeating input.";
                 if (typeWarn != null) pr["warning"] = typeWarn;
                 if (_lastRefocus != null) pr["refocused"] = _lastRefocus;
                 return pr;
@@ -4467,8 +4770,7 @@ namespace DshComputerUse.Worker
                 up.type = Native.INPUT_KEYBOARD;
                 up.u.ki.wScan = ch; up.u.ki.dwFlags = Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP;
                 up.u.ki.dwExtraInfo = Panic.OwnMagic;
-                SendInputChecked(new INPUT[] { down });
-                SendInputChecked(new INPUT[] { up });
+                SendInputChecked(new INPUT[] { down, up });
                 Thread.Sleep(charDelay);
             }
             Dictionary<string, object> tr = Dict("mode", "unicode", "chars", text.Length, "focus", focus);
@@ -4490,6 +4792,7 @@ namespace DshComputerUse.Worker
             // Changing the clipboard IS changing the machine: deep steady blue, like any other
             // actuation — even though no pointer or key is involved.
             AgentActing(a, "clipWrite");
+            MarkMutation();
             Clipboard.SetDataObject(text, true);
             return Dict("written", true, "chars", text.Length);
         }
@@ -4589,7 +4892,7 @@ namespace DshComputerUse.Worker
                 SetSticky(h);
                 _kickoffFocus.Confirm(h.ToInt64(), PidOf(h));
             }
-            RememberEnd();
+            CheckHumanInput();
             return Dict("activated", how != "failed", "activatedVia", how,
                         "hwnd", h.ToInt64(),
                         "hint", how == "failed"
@@ -4813,9 +5116,10 @@ namespace DshComputerUse.Worker
                         // measured hostRaised:false/caretPlaced:false with DSH minimized, while the
                         // same call succeeded with DSH on screen. A minimized window is still the host;
                         // restoring it is the CALLER's job (see AskOp), not a reason to hide it.
-                        if (!IsHostWindow(h)) return true;
+                        if (!IsHostWindow(h) || (Native.GetWindowLong(h, -20) & 0x80) != 0) return true;
                         StringBuilder sb = new StringBuilder(512);
                         if (Native.GetWindowText(h, sb, 512) == 0) return true;
+                        if (sb.ToString() == "DSH Pet") return true; // legacy pet windows without TOOLWINDOW
                         Dictionary<string, object> wd = WinDict(h);
                         Dictionary<string, object> rr = (Dictionary<string, object>)wd["rect"];
                         long area = Convert.ToInt64(rr["width"]) * Convert.ToInt64(rr["height"]);
@@ -5231,9 +5535,25 @@ namespace DshComputerUse.Worker
         static string RefocusWindow(IntPtr h, bool clickFallback)
         {
             if (h == IntPtr.Zero || !Native.IsWindow(h)) return null;
+            bool wasTopmost = (Native.GetWindowLong(h, -20) & 8) != 0;
+            try { return RefocusWindowCore(h, clickFallback, wasTopmost); }
+            finally
+            {
+                // Activation must not demote an existing floating pet, even if
+                // an earlier foreground method returned or threw before fallback.
+                if (wasTopmost && Native.IsWindow(h) && (Native.GetWindowLong(h, -20) & 8) == 0)
+                    Native.SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
+            }
+        }
+
+        static string RefocusWindowCore(IntPtr h, bool clickFallback, bool wasTopmost)
+        {
+            CheckHumanInput();
+            if (h == IntPtr.Zero || !Native.IsWindow(h)) return null;
             if (!Native.IsWindowVisible(h)) Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
             if (Native.IsIconic(h)) Native.ShowWindow(h, Native.SW_RESTORE);
             Thread.Sleep(40);
+            CheckHumanInput();
             if (IsForeground(h)) return "already-foreground";
 
             // 1. Become the owner of the LAST INPUT event. Windows releases the foreground lock for
@@ -5244,6 +5564,8 @@ namespace DshComputerUse.Worker
             //    not reach the window it was told to work in.)
             try { SendKey(Native.VK_MENU, false); Thread.Sleep(30); SendKey(Native.VK_MENU, true); Thread.Sleep(30); } catch { }
 
+            CheckHumanInput();
+
             IntPtr fg = Native.GetForegroundWindow();
             uint fgPid;
             uint fgThread = Native.GetWindowThreadProcessId(fg, out fgPid);
@@ -5252,28 +5574,40 @@ namespace DshComputerUse.Worker
             try
             {
                 if (fgThread != myThread) attached = Native.AttachThreadInput(fgThread, myThread, true);
+                CheckHumanInput();
                 Native.SetForegroundWindow(h);
             }
             finally { if (attached) Native.AttachThreadInput(fgThread, myThread, false); }
             Thread.Sleep(80);
             if (IsForeground(h)) return "SetForegroundWindow(last-input)";
 
+            CheckHumanInput();
             Native.SwitchToThisWindow(h, true);
             Thread.Sleep(80);
             if (IsForeground(h)) return "SwitchToThisWindow";
 
-            // 2. Brief topmost toggle: raise ours above whatever is in front, take the foreground,
-            //    then drop the topmost flag so the desktop is left as it was found.
+            // 2. Temporarily promote normal windows, preserving pre-existing
+            //    topmost windows (pets/tool overlays) on success and failure.
             try
             {
-                Native.SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // TOPMOST, no move/size
-                Thread.Sleep(70);
-                Native.SetForegroundWindow(h);
-                Thread.Sleep(70);
-                Native.SetWindowPos(h, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // NOTOPMOST
+                try
+                {
+                    CheckHumanInput();
+                    Native.SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+                    Thread.Sleep(70);
+                    CheckHumanInput();
+                    Native.SetForegroundWindow(h);
+                    Thread.Sleep(70);
+                }
+                finally
+                {
+                    if (Native.IsWindow(h)) Native.SetWindowPos(h, new IntPtr(wasTopmost ? -1 : -2), 0, 0, 0, 0,
+                        0x0001 | 0x0002 | 0x0010 | 0x0200); // restore without focus or owner-z changes
+                }
                 Thread.Sleep(60);
             }
             catch { }
+            CheckHumanInput();
             if (IsForeground(h)) return "topmost-toggle";
 
             if (!clickFallback) return null;
@@ -5353,6 +5687,7 @@ namespace DshComputerUse.Worker
             HostGuard(h, "windowOp");
             string op = GetS(a, "op", "minimize");
             AgentActing(a, "windowOp");
+            MarkMutation();
             switch (op)
             {
                 case "minimize": Native.ShowWindow(h, Native.SW_MINIMIZE); break;
@@ -5556,9 +5891,9 @@ namespace DshComputerUse.Worker
         {
             ObservedUiTarget target;
             if (!UiTargets.TryGetValue(token, out target) || NowMs() - target.At > 300000)
-                throw new Exception("TARGET_STALE: target expired or worker restarted; query again; no action sent");
+                throw NotDispatched("TARGET_STALE", "TARGET_STALE: target expired or worker restarted; query again; no action sent");
             if (target.Witness != UiWindowWitness(target.Hwnd))
-                throw new Exception("TARGET_STALE: window identity, title or bounds changed; query again; no action sent");
+                throw NotDispatched("TARGET_STALE", "TARGET_STALE: window identity, title or bounds changed; query again; no action sent");
             return target;
         }
         static AutomationElement ResolveUiTarget(ObservedUiTarget target, bool rebind, int depth, int budget, out string mode, out int seen)
@@ -5692,37 +6027,39 @@ namespace DshComputerUse.Worker
             try { foundPid = found.Current.ProcessId; } catch { }
             HostGuardPid(foundPid, "uiaAct");
             Panic.Check("uiaAct");
+            CheckHumanInput();
             Glow.Touch(GetI(a, "indicatorMs", 1200));   // same reason: see AgentActing
 
             object pat = null;
             string via = null;
+            MarkMutation();
             switch (action)
             {
                 case "invoke":
-                    if (found.TryGetCurrentPattern(InvokePattern.Pattern, out pat)) { ((InvokePattern)pat).Invoke(); via = "InvokePattern"; }
+                    if (found.TryGetCurrentPattern(InvokePattern.Pattern, out pat)) { MarkMutation(); ((InvokePattern)pat).Invoke(); via = "InvokePattern"; }
                     break;
                 case "select":
-                    if (found.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pat)) { ((SelectionItemPattern)pat).Select(); via = "SelectionItemPattern"; }
+                    if (found.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pat)) { MarkMutation(); ((SelectionItemPattern)pat).Select(); via = "SelectionItemPattern"; }
                     break;
                 case "expand":
-                    if (found.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pat)) { ((ExpandCollapsePattern)pat).Expand(); via = "ExpandCollapsePattern.Expand"; }
+                    if (found.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pat)) { MarkMutation(); ((ExpandCollapsePattern)pat).Expand(); via = "ExpandCollapsePattern.Expand"; }
                     break;
                 case "collapse":
-                    if (found.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pat)) { ((ExpandCollapsePattern)pat).Collapse(); via = "ExpandCollapsePattern.Collapse"; }
+                    if (found.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pat)) { MarkMutation(); ((ExpandCollapsePattern)pat).Collapse(); via = "ExpandCollapsePattern.Collapse"; }
                     break;
                 case "toggle":
-                    if (found.TryGetCurrentPattern(TogglePattern.Pattern, out pat)) { ((TogglePattern)pat).Toggle(); via = "TogglePattern"; }
+                    if (found.TryGetCurrentPattern(TogglePattern.Pattern, out pat)) { MarkMutation(); ((TogglePattern)pat).Toggle(); via = "TogglePattern"; }
                     break;
                 case "setValue":
                     {
                         string val = GetS(a, "value", "");
-                        if (found.TryGetCurrentPattern(ValuePattern.Pattern, out pat)) { ((ValuePattern)pat).SetValue(val); via = "ValuePattern"; }
+                        if (found.TryGetCurrentPattern(ValuePattern.Pattern, out pat)) { MarkMutation(); ((ValuePattern)pat).SetValue(val); via = "ValuePattern"; }
                         break;
                     }
                 case "focus":
-                    found.SetFocus(); via = "SetFocus"; break;
+                    MarkMutation(); found.SetFocus(); via = "SetFocus"; break;
                 case "scrollIntoView":
-                    if (found.TryGetCurrentPattern(ScrollItemPattern.Pattern, out pat)) { ((ScrollItemPattern)pat).ScrollIntoView(); via = "ScrollItemPattern"; }
+                    if (found.TryGetCurrentPattern(ScrollItemPattern.Pattern, out pat)) { MarkMutation(); ((ScrollItemPattern)pat).ScrollIntoView(); via = "ScrollItemPattern"; }
                     break;
                 default:
                     throw new Exception("action must be invoke|select|expand|collapse|toggle|setValue|focus|scrollIntoView");
@@ -5959,14 +6296,10 @@ namespace DshComputerUse.Worker
         // ---------- helpers ----------
         static void FailsafeCheck(Dictionary<string, object> a)
         {
-            // Every input op passes through here first, which makes this the exact choke point for
-            // telling "our own pointer travel" apart from "a human is moving the mouse" — see
-            // Panic.MonitorHuman(). Stamping here means the monitor never has to guess.
+            // Compatibility entry point: no coordinate/frequency/quietMs override can
+            // disable the event-driven handoff. Plain Esc and the screen corner are ordinary UI.
+            CheckHumanInput();
             Panic.AgentActed();
-            if (a != null && a.ContainsKey("noFailsafe")) return;
-            POINT p; Native.GetCursorPos(out p);
-            if (p.X <= 4 && p.Y <= 4)
-                throw new Exception("FAILSAFE: cursor parked in top-left corner; actuation refused");
         }
 
         public static Dictionary<string, object> Dict(params object[] kv)
@@ -6012,6 +6345,29 @@ namespace DshComputerUse.Worker
             Dictionary<string, object> r = Dict("ok", true);
             if (data != null) r["data"] = data;
             return r;
+        }
+        static Exception NotDispatched(string code, string message)
+        {
+            var error = new Exception(message);
+            error.Data["code"] = code;
+            error.Data["outcome"] = "not-dispatched";
+            return error;
+        }
+        static Dictionary<string, object> Err(Exception error)
+        {
+            var result = Err(error.Message);
+            if (error.Data["code"] != null)
+            {
+                result["code"] = (string)error.Data["code"];
+                result["outcome"] = error.Data["outcome"] ?? "unknown";
+            }
+            foreach (string key in new string[] { "keyCleanup", "clipboardRestore" })
+                if (error.Data[key] != null)
+                {
+                    result[key] = error.Data[key];
+                    result["error"] = (string)result["error"] + "; " + key + "=" + error.Data[key];
+                }
+            return result;
         }
         static Dictionary<string, object> Err(string msg) { return Dict("ok", false, "error", msg); }
         static void WriteLine(string s) { lock (OutLock) { Console.Out.WriteLine(s); Console.Out.Flush(); } }

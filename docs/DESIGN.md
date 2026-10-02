@@ -1,3 +1,5 @@
+> Historical design notes. The stage-0 brake descriptions below are superseded by the current [README](../README.md), [lifecycle contract](../skills/computer-use/references/lifecycle.md), and [1.2.0-rc.2 release verification](RELEASE-1.2.0-rc.2.md).
+
 # dsh-computer-use — 设计文档
 
 > 让 DSH（DeepSeek Harness）里的 DeepSeek 模型用键鼠操控这台 Windows 电脑，

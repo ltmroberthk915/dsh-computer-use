@@ -5,7 +5,7 @@
 # DIRECTORY, so running them from elsewhere failed with ENOENT on a path that does not exist. A
 # safety net nobody runs (or that "fails" for a reason unrelated to the code) is decoration.
 #
-#   pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\build\run-guards.ps1
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File build\run-guards.ps1
 #
 # Exit code 0 = every guard passed. 1 = at least one failed (the failing names are printed last).
 $ErrorActionPreference = 'Continue'

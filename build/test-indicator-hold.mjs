@@ -4,6 +4,7 @@
 // outranks cyan, so a reading agent looked like a driving one. Keep the default a tail, not an era.
 import fs from 'node:fs'
 import path from 'node:path'
+import { maskComments } from './mask-comments.mjs'
 const W = path.resolve(import.meta.dirname, '../lib/core/worker.cs')
 const src = fs.readFileSync(W, 'utf8')
 const failures = []
@@ -33,12 +34,26 @@ if (!fired) failures.push('self-test FAILED: restoring the 30000 ms default did 
 // 1737 ms, cyan at 2153/3438 ms, moveStillPending on all 8 frames). The light now also reads the
 // injection itself, and its hold is ANCHORED to the last real injection rather than the op's start —
 // without lengthening the hold and without letting blue outlive the input.
-const SIC = /static void SendInputChecked\(INPUT\[\] arr\)[\s\S]*?\n        \}/.exec(src)
-const sicBody = SIC ? SIC[0] : ''
-const order = (...tokens) => {
+const code = maskComments(src)
+const body = (text, signature) => {
+  const start = text.indexOf(signature)
+  const end = text.indexOf('\n        }', start)
+  return start < 0 || end < 0 ? '' : text.slice(start, end)
+}
+const sicBody = body(code, 'static void SendInputChecked(INPUT[] arr)')
+const inOrder = (text, ...tokens) => {
   let at = -1
-  for (const t of tokens) { const i = sicBody.indexOf(t, at + 1); if (i < 0) return false; at = i }
+  for (const t of tokens) { const i = text.indexOf(t, at + 1); if (i < 0) return false; at = i }
   return at >= 0
+}
+const order = (...tokens) => inOrder(sicBody, ...tokens)
+const cleanupBypassesGate = text => {
+  const stuck = body(text, 'static void ReleaseStuck()')
+  const owned = body(text, 'public static uint ReleaseOwnedInputs()')
+  const key = body(text, 'static uint ReleaseOwnedKey(string key)')
+  return stuck.includes('Program.ReleaseOwnedInputs()') && owned.includes('ReleaseOwnedKey(key)') &&
+    inOrder(key, 'OwnedUps.TryGetValue(key, out input)', 'Panic.HumanHolds(physical)', 'InputSender(new INPUT[] { release })') &&
+    !/SendInputChecked\(|SendTrackedInput\(|Panic\.Check\(/.test(stuck + owned + key)
 }
 const CHECKS = [
   ['the ACTING light is true while an injection sequence is in flight',
@@ -47,7 +62,9 @@ const CHECKS = [
   // Order inside the ONE injection gate, not proximity: the interrupt gate added in 2026-09-13 sits
   // between the function head and KeepActing, and a length window is not a contract.
   ['every real injection re-anchors the hold (SendInputChecked is the one gate)',
-    order('Glow.InputBegin()', 'Glow.KeepActing()', 'Native.SendInput('),
+    order('Glow.InputBegin()', 'Glow.KeepActing()', 'SendTrackedInput(arr)') &&
+      body(code, 'static uint SendTrackedInput(INPUT[] inputs)').includes('InputSender(inputs)') &&
+      /InputSender = delegate\(INPUT\[\] inputs\)\s*\{\s*return Native.SendInput\(/.test(code),
     'SendInputChecked no longer marks the injection, re-anchors the ACTING light and then injects, in that order'],
   ['the injection mark is cleared in a finally (blue cannot outlive the input)',
     order('Glow.InputBegin()', 'finally { Glow.InputEnd(); }'),
@@ -56,8 +73,8 @@ const CHECKS = [
     order('if (Panic.Exited)', 'if (Panic.Engaged || Panic.Stopped)', 'Glow.InputBegin()', 'Glow.KeepActing()'),
     'SendInputChecked injects without re-checking a mid-action stop/exit — a 2.5 s move would keep moving after the brake'],
   ['cleanup releases do NOT go through the gate that refuses after a stop/exit',
-    /ReleaseStuck\(\)[\s\S]{0,2500}?Native\.SendInput\(/.test(src) && !/ReleaseStuck\(\)[\s\S]{0,2500}?SendInputChecked\(/.test(src),
-    'ReleaseStuck() sends through SendInputChecked — the interrupt gate would block the cleanup that releases a stuck drag/key'],
+    cleanupBypassesGate(code),
+    'ReleaseStuck must release the accepted-input ledger through the raw sender, without the ordinary input refusal gate'],
   ['an animated move brackets the whole SEQUENCE, not one step',
     /Stopwatch sw = Stopwatch\.StartNew\(\);[\s\S]{0,400}?Glow\.InputBegin\(\);[\s\S]{0,900}?finally \{ Glow\.InputEnd\(\); \}/.test(src),
     'AnimatedMove does not hold the injection mark across its sleeps — the gaps read as thinking again'],
@@ -67,6 +84,18 @@ const CHECKS = [
 ]
 for (const [name, ok, why] of CHECKS) {
   if (!ok) failures.push(`${name} — ${why}`)
+}
+// These mutations must fail even when the old call names remain in comments.
+if (inOrder(sicBody.replace('Glow.KeepActing();', ''), 'Glow.InputBegin()', 'Glow.KeepActing()', 'SendTrackedInput(arr)'))
+  failures.push('self-test FAILED: removing KeepActing did not break the injection ordering check')
+for (const [signature, before, after] of [
+  ['static void ReleaseStuck()', 'Program.ReleaseOwnedInputs()', 'Program.NoCleanup()'],
+  ['static uint ReleaseOwnedKey(string key)', 'InputSender(new INPUT[] { release })', 'SendTrackedInput(new INPUT[] { release })'],
+]) {
+  const original = body(code, signature)
+  const mutated = code.replace(original, original.replace(before, after))
+  if (!original.includes(before) || cleanupBypassesGate(mutated))
+    failures.push(`self-test FAILED: cleanup mutation was not rejected: ${before}`)
 }
 if (!failures.some((f) => f.startsWith('the ACTING light'))) {
   const stripped = src.replace('bool acting = _enabled && (Injecting ||', 'bool acting = _enabled && (false ||')
