@@ -6,6 +6,22 @@ import { execFileSync } from 'node:child_process'
 
 export const PACKAGE = 'dsh-codex-style-computer-use'
 export const MIN_AGE_MS = 24 * 60 * 60 * 1000
+export const OFFICIAL_REGISTRY = 'https://registry.npmjs.org'
+
+// A mirror is useful for a read-only local check. Promotion must recheck and
+// write the authoritative registry, even when CU_REGISTRY remains in the shell.
+export function releaseRegistry(operation, override = process.env.CU_REGISTRY) {
+  if (operation === 'promote') return OFFICIAL_REGISTRY
+  if (operation !== 'check') throw Error('Expected check or promote')
+  let registry
+  try { registry = new URL(override?.trim() || OFFICIAL_REGISTRY) }
+  catch { throw Error('CU_REGISTRY must be an HTTPS registry URL') }
+  if (registry.protocol !== 'https:' || registry.username || registry.password || registry.search || registry.hash) {
+    throw Error('CU_REGISTRY must be an HTTPS registry URL without credentials, query or fragment')
+  }
+  return registry.href.replace(/\/+$/, '')
+}
+
 export function releaseReadiness(metadata, version, now = Date.now()) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw Error('Promotion requires an exact stable version, e.g. 1.2.1')
   const manifest = metadata.versions?.[version]
@@ -28,22 +44,35 @@ export function releaseReadiness(metadata, version, now = Date.now()) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [operation, version] = process.argv.slice(2)
+  let registry
   try {
-    const [operation, version] = process.argv.slice(2)
     if (!['check', 'promote'].includes(operation) || !/^\d+\.\d+\.\d+$/.test(version || '')) throw Error('Usage: node scripts/release-channel.mjs check|promote <stable-version>')
+    registry = releaseRegistry(operation)
     const npm = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')
     if (!fs.existsSync(npm)) throw Error('Run this publisher command with the Node.js installation that includes npm')
-    const npmArgs = ['--registry=https://registry.npmjs.org', '--fetch-retries=0', '--fetch-timeout=20000']
-    const manifest = JSON.parse(execFileSync(process.execPath, [npm, 'view', `${PACKAGE}@${version}`, '--json', ...npmArgs], { encoding: 'utf8', windowsHide: true }))
+    const npmArgs = [`--registry=${registry}`, '--fetch-retries=0', '--fetch-timeout=20000']
+    const view = args => {
+      let stdout
+      try {
+        stdout = execFileSync(process.execPath, [npm, 'view', ...args, '--json', ...npmArgs], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      } catch (error) {
+        const code = String(error.stderr ?? '').match(/npm (?:error|ERR!) code ([A-Z0-9_]+)/i)?.[1] || error.code || error.status || 'unknown'
+        throw Error(`Registry query failed (${code}). Check network/proxy access and mirror synchronization; a failed query does not prove the package is unpublished. For a read-only check, set CU_REGISTRY to an accessible mirror. Promotion requires access to registry.npmjs.org.`)
+      }
+      try { return JSON.parse(stdout) }
+      catch { throw Error('Registry query did not return valid JSON; release readiness is unknown') }
+    }
+    const manifest = view([`${PACKAGE}@${version}`])
     const metadata = { ...manifest, versions: { [version]: manifest } }
-    const verdict = releaseReadiness(metadata, version)
+    const verdict = { ...releaseReadiness(metadata, version), registry, authoritative: registry === OFFICIAL_REGISTRY }
     console.log(JSON.stringify(verdict, null, 2))
     if (!verdict.ready) { process.exitCode = 2 }
     else if (operation === 'promote') {
       execFileSync(process.execPath, [npm, 'dist-tag', 'add', `${PACKAGE}@${version}`, 'latest', ...npmArgs], { stdio: 'inherit', windowsHide: true })
-      const tag = JSON.parse(execFileSync(process.execPath, [npm, 'view', PACKAGE, 'dist-tags.latest', '--json', ...npmArgs], { encoding: 'utf8', windowsHide: true }))
+      const tag = view([PACKAGE, 'dist-tags.latest'])
       if (tag !== version) throw Error('Registry latest did not match after promotion')
       console.log(`Verified latest: ${PACKAGE}@${version}`)
     }
-  } catch (error) { console.error(error.message); process.exitCode = 1 }
+  } catch (error) { console.error(JSON.stringify({ operation, registry, error: error.message }, null, 2)); process.exitCode = 1 }
 }

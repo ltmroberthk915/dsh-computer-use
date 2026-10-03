@@ -29,13 +29,15 @@ under `$DSH_HOME/data/computer-use/`.
 
 Once the catalog submission is merged and synced, search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, use **Update** or **Update all** for versions admitted by the host's release policy. The package includes both native helpers; no PowerShell 7 or build permission is needed.
 
-Before catalog sync, use **Settings → Plugins → Add plugin** and enter `dsh-codex-style-computer-use`. This uses npm and **is still subject to the release-age rule below**. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
+Before catalog sync, use **Settings → Plugins → Add plugin** and enter `dsh-codex-style-computer-use`. The default non-strict pnpm 11.7.0 configuration installs this published package immediately; an explicitly strict host policy can require waiting as described below. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
 
 ### Releases less than 24 hours old
 
-With pnpm 11's strict release-age policy enabled, the bare name, an exact `@1.2.0` pin, and the npm tarball URL can all fail with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. This happens before plugin code runs. Restarting DSH, installing PowerShell, or retrying the same command does not fix it. The official desktop bridge does not accept extra pnpm flags.
+The default non-strict pnpm 11.7.0 configuration automatically records a single-version exception and installs. A successful install on one machine does not establish that another machine permits fresh versions.
 
-To install without changing policy, wait until the version meets the configured age. Version 1.2.0 was published at `2026-10-03T03:50:11.586Z`; it meets the default 24-hour cutoff after **2026-10-04 03:50:12 UTC** (11:50:12 in China). A longer custom cutoff or a lagging registry mirror can delay availability further.
+With `minimumReleaseAgeStrict: true` (or a host policy that enables strict release-age checks), and no applicable exception, a version below the configured age is rejected before plugin code runs. The bare name, an exact `@1.2.0` pin, and the npm tarball URL were all verified to fail with `ERR_PNPM_NO_MATURE_MATCHING_VERSION` under that policy. Explicitly setting `minimumReleaseAge: 1440` also enables strict behavior in pnpm 11.7.0 unless `minimumReleaseAgeStrict` is separately set to false. Restarting DSH, installing PowerShell, or retrying the same command does not fix a strict-policy refusal. The official desktop bridge does not accept extra pnpm flags.
+
+If a strict policy blocks installation, wait until the version meets the configured age to install without changing policy. Version 1.2.0 was published at `2026-10-03T03:50:11.586Z`; it meets a 24-hour cutoff after **2026-10-04 03:50:12 UTC** (11:50:12 in China). A longer custom cutoff or a lagging registry mirror can delay availability further. Default non-strict users do not need to wait or edit configuration for this package.
 
 If you explicitly choose to install earlier, merge this single-version exception into the target profile's existing `pnpm-workspace.yaml`, then retry the market install. Preserve other entries; do not disable the global age policy:
 
@@ -44,7 +46,9 @@ minimumReleaseAgeExclude:
   - dsh-codex-style-computer-use@1.2.0
 ```
 
-The default desktop path is `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`; use the actual directory if `DSH_HOME` is customized. Remove this one exception after the version matures if desired. The default non-strict configuration adds an exception automatically, which does not prove that a different machine permits first-day installs.
+The default desktop path is `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`; use the actual directory if `DSH_HOME` is customized. Remove this one exception after the version matures if desired.
+
+These documentation and publisher-check corrections leave the npm runtime at **1.2.0**. Existing 1.2.0 users do not need to reinstall. Re-adding the same source can produce a host `ambiguous-install` error on some installation paths; it is not needed to receive a documentation fix.
 
 **Migrating an older Git/tarball installation from this repository:** remove the old **dsh-computer-use** entry in the market, then install **dsh-codex-style-computer-use**. The unscoped npm name `dsh-computer-use` belongs to a different repository; do not install it as an upgrade of this plugin. A Git installation cannot switch its dependency identity just by fetching a new commit. After this one-time UI migration, use normal market updates. Existing `computer_*` tool names and the `computer-use` settings namespace are retained.
 
@@ -154,6 +158,16 @@ node mcp/src/index.js
 ```
 
 ## Development
+
+Publisher release checks use npm's official registry by default. If that origin is unreachable on your network, `CU_REGISTRY` selects an explicit mirror for the read-only `check` command; the JSON result includes `registry` and `authoritative`. Example in PowerShell (this changes only the current shell):
+
+```powershell
+$env:CU_REGISTRY = 'https://registry.npmmirror.com'
+node scripts/release-channel.mjs check 1.2.0
+Remove-Item Env:CU_REGISTRY
+```
+
+Exit code `0` means the version has passed the 24-hour publisher check, `2` means it is still cooling, and `1` means the check failed. A network failure does not establish that a package is unpublished, and mirrors can lag. `promote` always rechecks and writes `https://registry.npmjs.org`, ignoring `CU_REGISTRY`; it needs access to that origin, using npm's proxy configuration when necessary. This publisher tool is not part of end-user installation. See [the release procedure](docs/RELEASE-1.2.0.md).
 
 The repository ships the guard suite that protects the invariants above — the cycle lifetime, the
 ask/brake protocol, the operation classification, the skill gate, and the bundled-skill wiring:

@@ -1,5 +1,7 @@
 # Distribution corrections (2026-10-03; npm runtime remains 1.2.0)
 
+- Clarify the default non-strict pnpm 11.7.0 install behavior and the explicit strict-policy conditions; existing 1.2.0 users do not need to reinstall.
+- Allow `CU_REGISTRY` for read-only publisher checks, include registry provenance in results and failures, and retain official-registry verification for `latest` promotion (issue #1).
 - Document strict pnpm release-age failures for bare names, exact pins and npm tarball URLs. Include the exact 1.2.0 maturity time and a narrowly scoped optional exception.
 - Add a publisher promotion guard: wait at least 24 hours before moving `latest`; reject missing registry evidence, wrong repository identity and downgrades.
 - Reproduce old-name configuration loss with the official app-boot composer. Provide an explicit migration utility with backups, atomic replacement, concurrent-edit protection and a Windows PowerShell 5.1/Desktop Node launcher.

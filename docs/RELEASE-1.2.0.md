@@ -57,6 +57,29 @@ managed by the external marketplace, separately from npm publication.
    promote the corresponding GitHub release to latest and verify both downloads.
 6. Verify that the market catalog resolves the repository to the new npm name.
 
+### Registry access for publisher checks
+
+`check` defaults to `https://registry.npmjs.org`. Set `CU_REGISTRY` to an accessible
+HTTPS registry for a read-only mirror check, for example in PowerShell:
+
+```powershell
+$env:CU_REGISTRY = 'https://registry.npmmirror.com'
+node scripts/release-channel.mjs check 1.2.0
+Remove-Item Env:CU_REGISTRY
+```
+
+Successful JSON reports both `registry` and `authoritative`; a mirror result has
+`authoritative: false`. Failure output identifies the selected registry. Exit
+codes are `0` (ready), `2` (still cooling), and `1` (query or validation failed).
+A failed request does not prove that the package is unpublished, and a mirror
+may not have synchronized its metadata yet. Configure npm's network/proxy access
+if necessary; do not change the end user's package registry for this check.
+
+`promote` always queries and writes the official registry, ignoring `CU_REGISTRY`.
+It must obtain fresh publication-age and repository evidence there before moving
+`latest`; a mirror's verdict never authorizes promotion by itself. This script is
+for publishers only and is not an installation hook.
+
 The npm package is discovered by the market from the repository's `package.json`
 and its matching npm repository metadata. The source catalog does not accept an
 `npm:` field in individual YAML entries.
@@ -93,6 +116,19 @@ Run the publisher checks with `node build/test-release-channel.mjs`. Run the hos
 composition check with `node build/verify-profile-migration.mjs <DSH-runtime-dir>`;
 the runtime directory contains the host package.json and dependencies. The
 migration tool is an explicit repair utility, not an install/startup hook.
+
+Issue #1 follow-up used the actual installed Desktop 0.2.0-rc.2 app.asar manager,
+its bundled Electron/Node and pnpm 11.7.0, and dshmarket 1.66.7's bridge. Fresh
+default-profile installation and an exact-version re-add succeeded; the market
+update check reported 1.2.0 current with no update. A separate strict profile
+reproduced the release-age refusal. These are isolated installation checks, not
+a claim that every same-source install path avoids the host's ambiguity check.
+The corrected publisher CLI also passed live read-only checks against npm's
+origin through a proxy and npmmirror directly with no proxy override; both
+reported the same publication time, their registry provenance and exit code 2
+while the release was younger than 24 hours. An unreachable registry returned
+exit code 1 with an explicit query failure, not an unpublished-version verdict.
+No npm version or runtime file changed for this follow-up.
 
 The third-party installation report observed new bundles loading live without a
 restart. That corrects a blanket restart requirement, not the host's explicit
