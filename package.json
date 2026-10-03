@@ -1,7 +1,7 @@
 {
-  "name": "dsh-computer-use",
-  "version": "1.2.0-rc.2",
-  "description": "Windows desktop control for DeepSeek Harness with per-Agent tool loading, observed UIA target recovery, incremental observations with retained full snapshots, native screenshots, batching and human brakes.",
+  "name": "dsh-codex-style-computer-use",
+  "version": "1.2.0",
+  "description": "Codex-style Computer Use for DeepSeek Harness: Windows desktop control, screenshots, UI Automation, human input handoff, approval gates and prebuilt native workers. Install and update from dsh-market without PowerShell 7 or build steps.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -16,7 +16,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "scripts"
   ],
   "dsh": {
     "bundle": {
@@ -67,6 +68,21 @@
     "gui-automation",
     "set-of-marks",
     "uia",
-    "mcp"
-  ]
+    "mcp",
+    "codex-style",
+    "desktop-automation",
+    "dsh-market"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "homepage": "https://github.com/ltmroberthk915/dsh-computer-use#readme",
+  "bugs": {
+    "url": "https://github.com/ltmroberthk915/dsh-computer-use/issues"
+  }
 }

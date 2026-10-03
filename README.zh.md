@@ -1,7 +1,7 @@
-# dsh-computer-use
+# Computer Use · Codex 风格桌面操控
 
 给 **DeepSeek Harness** 用的 Windows 桌面操控插件：18 个桌面工具加一个 Agent 激活入口，通过一个 C# worker
-观察并驱动原生 Windows 应用——worker 在首次使用时，由 Windows 自带的 C# 编译器现场编译。
+观察并驱动原生 Windows 应用。发布包已包含编译好的原生组件，无需安装 PowerShell 7、SDK 或执行编译命令。
 
 [English](README.md) | 中文
 
@@ -21,24 +21,21 @@
 工具读的是桌面，不读你的文件。插件自己只写三处：worker 二进制
 （`%LOCALAPPDATA%\dsh-computer-use\worker\`）、审计日志与截图（`$DSH_HOME/data/computer-use/`）。
 
-## 安装
+## 在 dsh-market 安装和更新
 
-**网页版 profile**
+搜索 **computer-use**，选择 **dsh-codex-style-computer-use**，作者 **ltmroberthk915**（npm 维护者 **ltmroberthk**），点击**安装**。以后直接点市场里的**更新**或**全部更新**。两份原生组件都已随包提供，无需终端、PowerShell 7、SDK 或手改构建白名单。
+
+目录尚未同步时，可在 **设置 → 插件 → 添加插件** 输入 `dsh-codex-style-computer-use` 安装；这同样是可由市场更新的 npm 安装。如果界面提示**需要重启**，从托盘彻底退出 DSH 后重新打开。
+
+**已有本仓库旧 Git/tgz 版本：**在市场卸载旧的 **dsh-computer-use**，再安装 **dsh-codex-style-computer-use**。npm 上的无 scope 包 `dsh-computer-use` 属于另一仓库，不能用作本插件的更新。旧 Git 依赖不会因仓库改名自动迁移；完成这一次界面内迁移后，后续使用普通市场更新即可。原有 `computer_*` 工具名与 `computer-use` 设置命名空间保留。
+
+GitHub Release 仍提供 `dsh-computer-use.tgz`，供离线或手动安装。市场自动更新优先使用 npm 包。
+
+网页版的命令行安装方式：
 
 ```sh
-dsh plugin --profile web add github:ltmroberthk915/dsh-computer-use
+dsh plugin --profile web add dsh-codex-style-computer-use
 ```
-
-重启 `dsh web`，打开 **设置 → computer-use**。
-
-**DSH Desktop**
-
-DSH Desktop 持有自己的 `desktop` profile，而 `dsh` CLI 刻意拒绝对它做插件管理。请从应用内安装：
-**设置 → 插件 → 添加插件**，粘贴 Git 地址 `github:ltmroberthk915/dsh-computer-use`，
-然后从托盘彻底退出并重启。
-
-**预构建 tarball** —— 每个 release 都附带 `dsh-computer-use.tgz`；不想从源码安装的话，
-把它的路径或 URL 填进同一个「添加插件」输入框即可。
 
 ## 随包 skill
 

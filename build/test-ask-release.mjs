@@ -138,14 +138,10 @@ async function withWorker (fn, faults = {}) {
     // unpatched worker and "pass" for the wrong reason. Read the file BACK and assert the seam.
     const seam = faults.hangEndAskMs ? 'DSH_CU_TEST_ENDASK_HANG_MS' : (faults.hangBeginAskMs ? 'DSH_CU_TEST_BEGINASK_HANG_MS' : null)
     if (seam && !fs.readFileSync(cs, 'utf8').includes(seam)) throw new Error(`self-test BUG: the sandbox source at ${cs} does not contain ${seam}`)
-    const { execFileSync } = await import('node:child_process')
-    const pwsh = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps', 'Microsoft.PowerShell_8wekyb3d8bbwe', 'pwsh.exe')
-    let printed
+    const { compileNativeBinary, workerReferences } = await import('../lib/core/native-runtime.js')
+    exe = path.join(dir, 'dsh-computer-use-worker.exe')
     try {
-      printed = execFileSync(pwsh, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        path.join(root, 'lib', 'core', 'compile-worker.ps1'), '-Path', cs, '-Force',
-        '-CacheToken', CACHE_TOKEN],
-      { encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] })
+      compileNativeBinary(cs, exe, workerReferences())
     } catch (e) {
       // A COMPILER FAILURE IS FATAL FOR THE CASE, never a fallback: `compile-worker.ps1` prints the
       // cache path BEFORE it invokes csc, so "it printed a path that exists" is not a success signal
@@ -153,9 +149,7 @@ async function withWorker (fn, faults = {}) {
       const tail = String((e && (e.stdout || e.message)) || e).slice(-500)
       throw new Error(`the sandbox worker FAILED TO COMPILE — this case cannot construct its fault and must not run: ${tail}`)
     }
-    exe = (printed.match(/[^\r\n]*dsh-computer-use-worker\.exe/g) || []).pop()
-    if (!exe || !fs.existsSync(exe.trim())) throw new Error(`the sandbox worker did not compile: ${printed.slice(-400)}`)
-    exe = exe.trim()
+    if (!fs.existsSync(exe)) throw new Error('the sandbox worker did not compile')
     if (process.env.DSH_CU_RELEASE_DEBUG) console.error(`[dbg] sandbox worker = ${exe}`)
   } else {
     exe = discoverWorker()

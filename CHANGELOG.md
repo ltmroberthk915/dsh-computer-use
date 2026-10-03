@@ -1,3 +1,11 @@
+# 1.2.0 — registry distribution and portable native runtime
+
+- Publish as **dsh-codex-style-computer-use**; preserve the GitHub repository, tool names and settings namespace.
+- Ship both native helpers with source and binary SHA-256 identities. Copy them into versioned user caches so running helpers do not lock package files during updates.
+- Remove the runtime PowerShell 7 dependency. Source checkouts compile directly with the Windows .NET Framework compiler.
+- No prepare/install/prepack hooks or packageManager bootstrap; all JS, skills, C# sources and native binaries are included.
+- Preserve the 1.2.0-rc.2 input handoff and safety behavior. Old Git/tarball installs need one migration through the plugin UI because the old npm name is owned by another author.
+
 # 1.2.0-rc.2
 
 - Physical input immediately yields desktop control; sustained input or held keys/buttons for 2 seconds enters waiting; 3 quiet seconds after release permits fresh observation and automatic task continuation.

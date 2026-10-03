@@ -8,7 +8,7 @@
 # Settings → computer-use, once you have decided the machine may be driven without a prompt.
 - insert:
   - id: computer-use
-    name: dsh-computer-use
+    name: dsh-codex-style-computer-use
     config:
       enabled: true
       automationMode: standard   # read-only | standard | autonomous | unrestricted

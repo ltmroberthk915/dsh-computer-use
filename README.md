@@ -1,8 +1,8 @@
-# dsh-computer-use
+# Computer Use · Codex-style desktop control
 
 Windows desktop computer use for **DeepSeek Harness**: 18 desktop tools plus an Agent activation entry that observe and drive
-native Windows applications through a C# worker compiled on first use by the compiler that already
-ships with Windows.
+native Windows applications through prebuilt C# workers included in the package. No PowerShell 7,
+SDK, terminal commands or install-time builds are needed.
 
 English | [中文](README.zh.md)
 
@@ -25,24 +25,21 @@ The tools read the desktop; they do not read your files. The only file the plugi
 is the Worker binary in `%LOCALAPPDATA%\dsh-computer-use\worker\`, plus the audit log and screenshots
 under `$DSH_HOME/data/computer-use/`.
 
-## Install
+## Install and update in dsh-market
 
-**Web profile**
+Search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, click **Update** or **Update all** in the market. The package includes both native helpers; no PowerShell 7 or build permission is needed.
+
+If the catalog has not synced yet, use **Settings → Plugins → Add plugin**, enter `dsh-codex-style-computer-use`, and install. This also creates an ordinary registry installation that can be updated from the market. If DSH reports **restart required**, fully exit DSH from its tray menu and reopen it.
+
+**Migrating an older Git/tarball installation from this repository:** remove the old **dsh-computer-use** entry in the market, then install **dsh-codex-style-computer-use**. The unscoped npm name `dsh-computer-use` belongs to a different repository; do not install it as an upgrade of this plugin. A Git installation cannot switch its dependency identity just by fetching a new commit. After this one-time UI migration, use normal market updates. Existing `computer_*` tool names and the `computer-use` settings namespace are retained.
+
+The GitHub Release also includes `dsh-computer-use.tgz` for offline/manual installation; registry installation is the default for market updates.
+
+CLI users (web profile):
 
 ```sh
-dsh plugin --profile web add github:ltmroberthk915/dsh-computer-use
+dsh plugin --profile web add dsh-codex-style-computer-use
 ```
-
-Then restart `dsh web` and open **Settings → computer-use**.
-
-**DSH Desktop**
-
-DSH Desktop keeps its own `desktop` profile, and the `dsh` CLI deliberately refuses to manage that
-profile. Install from the app instead: **Settings → Plugins → Add plugin**, paste the Git address
-`github:ltmroberthk915/dsh-computer-use`, then restart the app from the tray.
-
-**Prebuilt tarball** — every release attaches `dsh-computer-use.tgz`; pass its path or URL to the
-same Add-plugin field if you would rather not install from source.
 
 ## The bundled skill
 
