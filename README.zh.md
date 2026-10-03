@@ -7,6 +7,8 @@
 
 仅支持 Windows（`os: win32`）。需要 Node.js ≥ 22 与 Windows 自带的 .NET Framework 4.x。
 
+**1.2.1 提醒修复：**补齐 crypto 导入，修复 1.2.0 原生 `probe` / `raise` 请求还未发送就抛错的问题。这次是运行时代码修复，需要从 1.2.0 更新；重复安装 1.2.0 无效。新版本先发布到 npm 的 `next`，再提升为 `latest`，市场普通更新跟随 `latest`。详见 [1.2.1 验证和发布状态](docs/RELEASE-1.2.1.md)。
+
 ## 它能做什么
 
 - **观察** —— 窗口列表、截图（区域 / JPEG / PNG / 降采样）、可点元素的 Set-of-Marks 编号图，
@@ -44,7 +46,7 @@ minimumReleaseAgeExclude:
 
 默认 desktop 文件位于 `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`；设置过 `DSH_HOME` 时以实际目录为准。例外仅限这个版本，过了冷却可删除该项。
 
-本轮文档和发布检查修正后，npm 运行时仍为 **1.2.0**，已安装的用户无需重装。某些安装路径重复添加同一来源会触发宿主的 `ambiguous-install`；无需为文档更新重复安装。
+此前文档和发布检查修正没有改变 1.2.0 运行时，因此无需重装；**1.2.1 的原生提醒修复则需要更新版本**。某些安装路径重复添加同一来源会触发宿主的 `ambiguous-install`；重复安装 1.2.0 不会得到 1.2.1 的修复。
 
 **已有本仓库旧 Git/tgz 版本：**在市场卸载旧的 **dsh-computer-use**，再安装 **dsh-codex-style-computer-use**。npm 上的无 scope 包 `dsh-computer-use` 属于另一仓库，不能用作本插件的更新。旧 Git 依赖不会因仓库改名自动迁移；完成这一次界面内迁移后，后续使用普通市场更新即可。原有 `computer_*` 工具名与 `computer-use` 设置命名空间保留。
 

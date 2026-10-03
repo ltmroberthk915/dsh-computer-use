@@ -1,3 +1,8 @@
+# 1.2.1 — native attention request fix
+
+- Import `randomUUID` explicitly in the attention transport so native `probe` and `raise` requests reach the helper instead of throwing a `ReferenceError` (issue #2).
+- Exercise real native request/response round trips, unique request IDs and journal correlation. The release smoke test now sends a probe instead of stopping at helper readiness. Tests target an absent executable and do not raise real application windows.
+
 # Distribution corrections (2026-10-03; npm runtime remains 1.2.0)
 
 - Clarify the default non-strict pnpm 11.7.0 install behavior and the explicit strict-policy conditions; existing 1.2.0 users do not need to reinstall.
