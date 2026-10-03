@@ -1,3 +1,10 @@
+# Distribution corrections (2026-10-03; npm runtime remains 1.2.0)
+
+- Document strict pnpm release-age failures for bare names, exact pins and npm tarball URLs. Include the exact 1.2.0 maturity time and a narrowly scoped optional exception.
+- Add a publisher promotion guard: wait at least 24 hours before moving `latest`; reject missing registry evidence, wrong repository identity and downgrades.
+- Reproduce old-name configuration loss with the official app-boot composer. Provide an explicit migration utility with backups, atomic replacement, concurrent-edit protection and a Windows PowerShell 5.1/Desktop Node launcher.
+- Distinguish first-install hot loading from replacement/restart-required states and show the bundled Desktop CLI path.
+
 # 1.2.0 — registry distribution and portable native runtime
 
 - Publish as **dsh-codex-style-computer-use**; preserve the GitHub repository, tool names and settings namespace.

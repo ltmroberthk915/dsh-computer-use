@@ -44,11 +44,57 @@ managed by the external marketplace, separately from npm publication.
 
 1. Run `node scripts/build-native.mjs` on Windows after modifying either C# source.
 2. Run `node scripts/verify-package.mjs`, the regression suite and tool-schema guard.
-3. Pack and test the actual archive; publish a candidate to the `next` tag.
-4. Verify registry installation, same-version reinstall and update to the final
-   stable release using the market bridge. Publish stable versions to `latest`.
-5. Verify that the market catalog resolves the repository to the new npm name.
+3. Pack and test the actual archive. Publish the intended stable version to `next`
+   first (`npm publish <archive> --tag next`), and verify that the existing `latest`
+   tag has not changed. Do not use `--tag latest` for a newly published build.
+4. Test with independent cache/store directories and explicit strict release age,
+   in addition to the default host configuration. Verify same-version reinstall,
+   config composition and updates through the actual market bridge.
+5. After at least 24 hours, run `node scripts/release-channel.mjs check <version>`.
+   Only when ready, use `node scripts/release-channel.mjs promote <version>` to
+   recheck the registry and move `latest`. The command rejects young versions,
+   missing times, wrong repository identity, prereleases and downgrades. Then
+   promote the corresponding GitHub release to latest and verify both downloads.
+6. Verify that the market catalog resolves the repository to the new npm name.
 
 The npm package is discovered by the market from the repository's `package.json`
 and its matching npm repository metadata. The source catalog does not accept an
 `npm:` field in individual YAML entries.
+
+## Third-round distribution correction — 2026-10-03
+
+The original matrix used the default, non-strict pnpm 11 policy. That policy
+automatically records a single-version age exception. It did not establish that
+first-day installation works with a user's explicit strict policy.
+
+The new matrix runs the bundled Electron Node executable and pnpm.mjs from DSH
+Desktop, with separate profiles, caches, stores and configuration for every case:
+
+| Cold install case, using actual published 1.2.0 | Result |
+|---|---|
+| Default policy, bare package name | Installs; pnpm adds a version-specific exception |
+| Explicit `minimumReleaseAge: 1440`, bare name | Rejected: NO_MATURE_MATCHING_VERSION |
+| Same strict policy, exact `@1.2.0` | Rejected: NO_MATURE_MATCHING_VERSION |
+| Same strict policy, npm tgz URL | Rejected: NO_MATURE_MATCHING_VERSION |
+| Same strict policy, exception for only `name@1.2.0` | Installs; registry dependency recorded |
+
+No claim of a universal tarball bypass is made. The default 24-hour cutoff for
+1.2.0 is 2026-10-04 03:50:11.586 UTC. Mirrors and longer user policies remain host
+constraints. No newer npm version was published for these documentation and
+publisher-tool fixes, so the existing 1.2.0 publication clock is preserved.
+
+The official app-boot composer also reproduced the rename bug: an old-name
+override was skipped and `read-only` reverted to the bundle's `standard` default.
+After the narrowly scoped migration, all config values and the disabled flag were
+retained, with no name-mismatch warning. Tests cover backup integrity, comments and
+CRLF preservation, idempotence, invalid YAML and concurrent-edit refusal.
+
+Run the publisher checks with `node build/test-release-channel.mjs`. Run the host
+composition check with `node build/verify-profile-migration.mjs <DSH-runtime-dir>`;
+the runtime directory contains the host package.json and dependencies. The
+migration tool is an explicit repair utility, not an install/startup hook.
+
+The third-party installation report observed new bundles loading live without a
+restart. That corrects a blanket restart requirement, not the host's explicit
+restart-required result when replacing an already loaded module. Follow that
+result and verify tools/skill availability.

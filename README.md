@@ -1,8 +1,8 @@
-# Computer Use · Codex-style desktop control
+# dsh-codex-style-computer-use · Codex-style desktop control
 
 Windows desktop computer use for **DeepSeek Harness**: 18 desktop tools plus an Agent activation entry that observe and drive
 native Windows applications through prebuilt C# workers included in the package. No PowerShell 7,
-SDK, terminal commands or install-time builds are needed.
+SDK or install-time builds are needed.
 
 English | [中文](README.zh.md)
 
@@ -27,11 +27,30 @@ under `$DSH_HOME/data/computer-use/`.
 
 ## Install and update in dsh-market
 
-Search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, click **Update** or **Update all** in the market. The package includes both native helpers; no PowerShell 7 or build permission is needed.
+Once the catalog submission is merged and synced, search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, use **Update** or **Update all** for versions admitted by the host's release policy. The package includes both native helpers; no PowerShell 7 or build permission is needed.
 
-If the catalog has not synced yet, use **Settings → Plugins → Add plugin**, enter `dsh-codex-style-computer-use`, and install. This also creates an ordinary registry installation that can be updated from the market. If DSH reports **restart required**, fully exit DSH from its tray menu and reopen it.
+Before catalog sync, use **Settings → Plugins → Add plugin** and enter `dsh-codex-style-computer-use`. This uses npm and **is still subject to the release-age rule below**. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
+
+### Releases less than 24 hours old
+
+With pnpm 11's strict release-age policy enabled, the bare name, an exact `@1.2.0` pin, and the npm tarball URL can all fail with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. This happens before plugin code runs. Restarting DSH, installing PowerShell, or retrying the same command does not fix it. The official desktop bridge does not accept extra pnpm flags.
+
+To install without changing policy, wait until the version meets the configured age. Version 1.2.0 was published at `2026-10-03T03:50:11.586Z`; it meets the default 24-hour cutoff after **2026-10-04 03:50:12 UTC** (11:50:12 in China). A longer custom cutoff or a lagging registry mirror can delay availability further.
+
+If you explicitly choose to install earlier, merge this single-version exception into the target profile's existing `pnpm-workspace.yaml`, then retry the market install. Preserve other entries; do not disable the global age policy:
+
+```yaml
+minimumReleaseAgeExclude:
+  - dsh-codex-style-computer-use@1.2.0
+```
+
+The default desktop path is `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`; use the actual directory if `DSH_HOME` is customized. Remove this one exception after the version matures if desired. The default non-strict configuration adds an exception automatically, which does not prove that a different machine permits first-day installs.
 
 **Migrating an older Git/tarball installation from this repository:** remove the old **dsh-computer-use** entry in the market, then install **dsh-codex-style-computer-use**. The unscoped npm name `dsh-computer-use` belongs to a different repository; do not install it as an upgrade of this plugin. A Git installation cannot switch its dependency identity just by fetching a new commit. After this one-time UI migration, use normal market updates. Existing `computer_*` tool names and the `computer-use` settings namespace are retained.
+
+**Preserve your saved configuration too:** back up the profile's `cordis.patch.yml`, then change only `name: dsh-computer-use` on an override with `id: computer-use` to `name: dsh-codex-style-computer-use`. Keep its entire `config` and `disabled` fields. Retaining the settings namespace alone is insufficient: a name mismatch makes DSH skip even `read-only`, `dryRun`, and disabled-state overrides. Do not replace other plugins or a shared home patch globally. The repository's `scripts/migrate-profile.mjs` previews by default; `--apply` creates a backup and replaces the file atomically, refusing concurrent edits.
+
+Alternatively, download the [configuration migration utility](https://github.com/ltmroberthk915/dsh-computer-use/releases/download/v1.2.0/computer-use-profile-migration.zip), extract it and double-click `migrate-profile.cmd`. It locates the installed official Desktop app and uses Windows PowerShell 5.1 plus DSH's bundled Node to repair the default desktop profile. It stops if the new bundle is absent or the old bundle is still selected. It does not change release-age policy. For another profile, run `migrate-profile.ps1 -ProfileDirectory <absolute-directory>` to preview, then add `-Apply` when ready.
 
 The GitHub Release also includes `dsh-computer-use.tgz` for offline/manual installation; registry installation is the default for market updates.
 
@@ -40,6 +59,15 @@ CLI users (web profile):
 ```sh
 dsh plugin --profile web add dsh-codex-style-computer-use
 ```
+
+Desktop diagnostics must use the **CLI bundled with the official Desktop app**:
+
+```powershell
+$CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
+& "$CuDshInstall\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop why dsh-codex-style-computer-use
+```
+
+For a custom installation, set `$CuDshInstall` to the directory in the Desktop shortcut's target. An older global npm `dsh` can reject the desktop profile. Do not add `resources/runtime/bin` to the global PATH or install a separate pnpm for this task. Prefer the plugin UI for installation.
 
 ## The bundled skill
 

@@ -1,4 +1,4 @@
-# Computer Use · Codex 风格桌面操控
+# dsh-codex-style-computer-use · Codex 风格桌面操控
 
 给 **DeepSeek Harness** 用的 Windows 桌面操控插件：18 个桌面工具加一个 Agent 激活入口，通过一个 C# worker
 观察并驱动原生 Windows 应用。发布包已包含编译好的原生组件，无需安装 PowerShell 7、SDK 或执行编译命令。
@@ -23,11 +23,30 @@
 
 ## 在 dsh-market 安装和更新
 
-搜索 **computer-use**，选择 **dsh-codex-style-computer-use**，作者 **ltmroberthk915**（npm 维护者 **ltmroberthk**），点击**安装**。以后直接点市场里的**更新**或**全部更新**。两份原生组件都已随包提供，无需终端、PowerShell 7、SDK 或手改构建白名单。
+市场收录同步后，搜索 **computer-use**，选择 **dsh-codex-style-computer-use**，作者 **ltmroberthk915**（npm 维护者 **ltmroberthk**），点击**安装**。以后通过市场的**更新**或**全部更新**安装符合宿主发布策略的版本。两份原生组件都已随包提供，无需 PowerShell 7、SDK 或构建白名单。
 
-目录尚未同步时，可在 **设置 → 插件 → 添加插件** 输入 `dsh-codex-style-computer-use` 安装；这同样是可由市场更新的 npm 安装。如果界面提示**需要重启**，从托盘彻底退出 DSH 后重新打开。
+目录尚未同步时，可在 **设置 → 插件 → 添加插件** 输入 `dsh-codex-style-computer-use`；这同样使用 npm，**仍受下面的发布冷却限制**。首次新增 bundle 在官方桌面端可热加载；确认工具与 skill 已出现即可使用。替换已经加载的版本、客户端界面未刷新或界面明确提示 **restart-required / 需要重启** 时，再从托盘完整退出 DSH 并重新打开。
+
+### 发布未满 24 小时
+
+在启用严格发布冷却的 pnpm 11 配置中，裸包名、`dsh-codex-style-computer-use@1.2.0` 和 npm 的 tgz 下载地址均可能报 `ERR_PNPM_NO_MATURE_MATCHING_VERSION`。这发生在插件启动前，重启 DSH、反复重装或安装 PowerShell 都无效。官方桌面桥接不接受额外 pnpm 参数。
+
+**无需改配置的做法：等待该版本满冷却时间后，再在市场安装或更新。** 1.2.0 的 npm 发布时刻为 2026-10-03 11:50:11.586（北京时间），默认 24 小时门槛在 **2026-10-04 11:50:12** 后满足。自定义更长冷却或镜像同步延迟仍以宿主提示为准。
+
+若明确要在冷却期内安装，经确认后可在目标 profile 的 `pnpm-workspace.yaml` 中，将下面的**单个版本**合并进现有列表，再回到市场重试；不要覆盖原有项，也不需要把全局冷却设为 0：
+
+```yaml
+minimumReleaseAgeExclude:
+  - dsh-codex-style-computer-use@1.2.0
+```
+
+默认 desktop 文件位于 `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`；设置过 `DSH_HOME` 时以实际目录为准。例外仅限这个版本，过了冷却可删除该项。默认非严格配置会自动记录例外，但不能据此保证另一台机器也能在发布当天安装成功。
 
 **已有本仓库旧 Git/tgz 版本：**在市场卸载旧的 **dsh-computer-use**，再安装 **dsh-codex-style-computer-use**。npm 上的无 scope 包 `dsh-computer-use` 属于另一仓库，不能用作本插件的更新。旧 Git 依赖不会因仓库改名自动迁移；完成这一次界面内迁移后，后续使用普通市场更新即可。原有 `computer_*` 工具名与 `computer-use` 设置命名空间保留。
+
+**旧配置也要迁移：**先备份目标 profile 的 `cordis.patch.yml`，仅把 `id: computer-use` 覆盖项里的 `name: dsh-computer-use` 改为 `name: dsh-codex-style-computer-use`，保留整段 `config` 和 `disabled`。只保留设置命名空间并不足够：旧 name 不匹配时，DSH 会跳过覆盖项，连 `read-only`、`dryRun`、禁用状态也可能失效。不要全文替换其他插件或共享 home 层配置。可使用仓库的 `scripts/migrate-profile.mjs`：默认预览，`--apply` 才备份并原子写入，且会拒绝并发修改。
+
+也可下载 [配置迁移工具](https://github.com/ltmroberthk915/dsh-computer-use/releases/download/v1.2.0/computer-use-profile-migration.zip)，解压后双击 `migrate-profile.cmd`。它自动寻找已安装的官方 DSH，使用 Windows 自带的 PowerShell 5.1 和 DSH 自带的 Node，修复默认 desktop profile；新包未安装或旧 bundle 仍在时会停止。它不改变发布冷却策略。自定义 profile 可通过 `migrate-profile.ps1 -ProfileDirectory <完整目录>` 预览，确认后追加 `-Apply`。
 
 GitHub Release 仍提供 `dsh-computer-use.tgz`，供离线或手动安装。市场自动更新优先使用 npm 包。
 
@@ -36,6 +55,15 @@ GitHub Release 仍提供 `dsh-computer-use.tgz`，供离线或手动安装。市
 ```sh
 dsh plugin --profile web add dsh-codex-style-computer-use
 ```
+
+桌面版排障必须使用**官方桌面自带的入口**。例如默认安装目录可这样查询：
+
+```powershell
+$CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
+& "$CuDshInstall\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop why dsh-codex-style-computer-use
+```
+
+若安装在 D 盘等自定义位置，先将 `$CuDshInstall` 改成桌面快捷方式实际指向的安装目录。PATH 上旧 npm CLI 的 `dsh` 可能拒绝 desktop profile；不要把 `resources/runtime/bin` 加到全局 PATH，也无需自己安装 pnpm。GUI 安装仍是首选。
 
 ## 随包 skill
 
