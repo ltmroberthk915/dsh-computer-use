@@ -1,5 +1,9 @@
 # dsh-codex-style-computer-use · Codex-style desktop control
 
+**Give DeepSeek eyes and hands for Windows.**
+
+Ask your agent to work with desktop apps: see the screen, find controls, click and type. Take over with your own mouse or keyboard whenever needed; the agent waits before continuing. Approval prompts remain enabled by default.
+
 Windows desktop computer use for **DeepSeek Harness**: 18 desktop tools plus an Agent activation entry that observe and drive
 native Windows applications through prebuilt C# workers included in the package. No PowerShell 7,
 SDK or install-time builds are needed.
@@ -31,7 +35,7 @@ under `$DSH_HOME/data/computer-use/`.
 
 Once the catalog submission is merged and synced, search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, use **Update** or **Update all** for versions admitted by the host's release policy. The package includes both native helpers; no PowerShell 7 or build permission is needed.
 
-Before catalog sync, use **Settings → Plugins → Add plugin** and enter `dsh-codex-style-computer-use`. The default non-strict pnpm 11.7.0 configuration installs this published package immediately; an explicitly strict host policy can require waiting as described below. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
+Before catalog sync, use **Settings → Plugins → Add plugin**. The corrected version is **`dsh-codex-style-computer-use@1.2.1`**; the unversioned name still resolves to 1.2.0 until promotion. Do not paste the GitHub repository URL: that selects the source-download path instead of the small prebuilt npm package. The default non-strict pnpm 11.7.0 configuration can install 1.2.1 immediately; an explicitly strict host policy can require waiting as described below. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
 
 ### Releases less than 24 hours old
 

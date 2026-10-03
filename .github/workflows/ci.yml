@@ -1,0 +1,42 @@
+name: Windows package checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check release policy and attention behavior
+        run: |
+          node build/test-release-channel.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node build/test-attention.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate the actual npm archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          $packed = npm pack --ignore-scripts --json --pack-destination artifact | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path artifact/unpacked | Out-Null
+          tar -xzf (Join-Path artifact $packed[0].filename) -C artifact/unpacked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify-package.mjs artifact/unpacked/package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node build/test-attention-native.mjs artifact/unpacked/package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-windows-package
+          path: artifact/*.tgz
