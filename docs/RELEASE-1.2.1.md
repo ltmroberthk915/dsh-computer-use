@@ -40,6 +40,21 @@ selected. This is a remaining host/package-manager release-age limitation;
 same-version reinstallation during the cooling period is not claimed to work.
 The release stays on `next` pending the normal age threshold and promotion.
 
+The 2026-10-04 follow-up isolated the repeat-install cause in bundled pnpm
+11.7.0: its version-policy evaluator returns the first matching package rule.
+Separate `package@1.2.0` and `package@1.2.1` entries therefore do not act as a
+union. In the same failing isolated profile, consolidating only the two
+existing exclusions to `dsh-codex-style-computer-use@1.2.0 || 1.2.1` made the
+next exact-version reinstall pass. No lockfile was removed, no new version was
+added to the exception set, and no global policy was disabled. This is an
+operator repair for that specific duplicate-rule state, not a change shipped
+in the plugin runtime. Stable promotion still waits for the age threshold.
+
+Both the [Windows archive CI](https://github.com/ltmroberthk915/dsh-computer-use/actions/runs/37135029160)
+and [catalog submission checks](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/6290)
+passed. Catalog checks are prerequisites; human review, merge and catalog
+synchronization are still required before market search can display the plugin.
+
 Run against either the checkout or an extracted/installed package:
 
 ```sh
