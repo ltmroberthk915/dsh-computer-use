@@ -117,6 +117,8 @@ clicked at the wrong place.
 
 ## Approval modes
 
+For a host that reports a disabled-prompt automatic refusal as “the user rejected tool”, see the [DSH approval attribution patch and regression test](docs/APPROVAL-ATTRIBUTION.md).
+
 `automationMode` is set in the plugin's settings and defaults to `standard`:
 
 | Mode | Observation | Actuation |

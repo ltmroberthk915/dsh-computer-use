@@ -1,3 +1,9 @@
+# Host approval attribution patch (2026-10-19; plugin runtime remains 1.2.1)
+
+- Add a portable patch utility for DSH Desktop 0.2.1-rc.2's compiled tool runtime. Automatic `never` refusals identify disabled approval prompts; answerer refusals identify the channel without asserting a human decision.
+- Preserve approval outcomes, audit, cancellation and computer-use key policy. Include 14 regressions against upstream fixtures and document local live-host and independent loader verification.
+- Preview by default, create output exclusively, reject unknown source shapes, and support verified fixed-length module output. Host deployment is a separate step.
+
 # 1.2.1 — native attention request fix
 
 - Import `randomUUID` explicitly in the attention transport so native `probe` and `raise` requests reach the helper instead of throwing a `ReferenceError` (issue #2).
