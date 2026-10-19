@@ -36,6 +36,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/verify-package.mjs artifact/unpacked/package
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node build/test-approval-attribution.mjs artifact/unpacked/package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node build/test-attention-native.mjs artifact/unpacked/package
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4

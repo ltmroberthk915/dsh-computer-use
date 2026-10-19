@@ -22,7 +22,7 @@ for (const [source, binary] of [
   assert.equal(manifest.platform, 'win32')
   assert.equal(manifest.architecture, 'x64')
 }
-for (const file of ['lib/index.js', 'lib/core/native-runtime.js', 'lib/attention-native.js', 'skills/computer-use/SKILL.md', 'mcp/src/index.js']) assert(fs.existsSync(path.join(root, file)), file)
+for (const file of ['lib/index.js', 'lib/approval-attribution.js', 'lib/core/native-runtime.js', 'lib/attention-native.js', 'skills/computer-use/SKILL.md', 'mcp/src/index.js']) assert(fs.existsSync(path.join(root, file)), file)
 const attention = fs.readFileSync(path.join(root, 'lib/attention-native.js'), 'utf8')
 assert(attention.includes("'./core/native-runtime.js'"), 'attention helper must use the bundled core')
 console.log(`ok package: ${pkg.name}@${pkg.version}; prebuilt helpers verified; no install hooks`)

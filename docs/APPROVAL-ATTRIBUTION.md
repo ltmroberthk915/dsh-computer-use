@@ -1,5 +1,7 @@
 # Automatic approval refusals attributed to the user
 
+**1.2.3:** the plugin installs the compatibility correction automatically for `computer_*` calls. The manual utility below remains available for a separately managed host-wide patch. Installing/updating 1.2.3 is sufficient for the plugin's own calls; follow any host restart indication. The integrated correction delegates to the original approval service and restores its method on unload. Its nine additional regressions bring this guard to 23 cases.
+
 DSH Desktop 0.2.1-rc.2 can report `the user rejected tool "computer_key"` even though no approval prompt was shown. The host approval service returns `rejected` for the session's `never` policy, and the host tool runtime interprets every `rejected` outcome as a human decision. The same issue affects `computer_batch` and other tools that ask for approval.
 
 The correction snapshots the session's effective policy before requesting approval. A `never` rejection now names the disabled prompts and states that the request was rejected automatically without asking the user. An answerer rejection names the approval channel without asserting that a human made the decision. The original approval reason is included. Grants, cancellation, unavailable channels and approval audit events retain their existing behavior.

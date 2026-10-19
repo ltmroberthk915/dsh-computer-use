@@ -12,6 +12,8 @@ English | [中文](README.zh.md)
 
 Windows only (`os: win32`). Requires Node.js ≥ 22 and the .NET Framework 4.x that Windows ships with.
 
+**1.2.3 automatic fix:** normal installation/update now installs the approval-attribution correction for computer-use calls on affected DSH hosts. No manual host patch is required for those calls. Host approvals and audit remain authoritative; follow the host's restart indication after updating an already loaded plugin. See [1.2.3](docs/RELEASE-1.2.3.md).
+
 **1.2.1 attention fix:** fixes a missing crypto import that prevented 1.2.0's native `probe` and `raise` requests from reaching the helper. Updating from 1.2.0 is required for this runtime fix; reinstalling 1.2.0 does not fix it. New releases are staged on npm's `next` tag before promotion to `latest`; the market's normal update follows `latest`. See [1.2.1 validation and release status](docs/RELEASE-1.2.1.md).
 
 **1.2.2 GitHub pre-release:** includes a separately deployed DSH host approval-attribution patch and 14 regression cases. Plugin input and approval behavior is retained from 1.2.1. See [release contents and deployment scope](docs/RELEASE-1.2.2.md); GitHub publication does not update npm or the market automatically.

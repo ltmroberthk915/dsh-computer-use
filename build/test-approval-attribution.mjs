@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { policyDecision } from '../lib/policy.js';
 import { patchApprovalAttribution, fixedLengthPayload } from '../scripts/patch-approval-attribution.mjs';
+const { installApprovalAttribution } = await import(pathToFileURL(path.join(process.argv[2] || path.resolve(import.meta.dirname, '..'), 'lib/approval-attribution.js')));
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const originalToolSource = fs.readFileSync(path.join(root, 'fixtures/dsh-tools-service-ask-0.2.1-rc.2.js'), 'utf8');
@@ -170,5 +171,76 @@ await test('unknown runtime shapes and oversized fixed-layout changes are refuse
   assert.throws(() => patchApprovalAttribution('unrecognized runtime'), /Unsupported/);
   assert.throws(() => patchApprovalAttribution(originalToolSource.replace('the user rejected tool', 'a different outcome')), /Unsupported/);
   assert.throws(() => fixedLengthPayload('short', 'a much longer replacement'), /exceeds/);
+});
+function installed(f, method = oldAsk) {
+  f.owner.serviceAsk = method;
+  let dispose;
+  installApprovalAttribution({get:k=>k==='tools'?f.owner:undefined,effect:fn=>{dispose=fn()}},{info(){},warn(){}});
+  return {call:()=>f.owner.serviceAsk(f.exec,f.ask),dispose:()=>dispose?.()};
+}
+await test('installed plugin corrects the legacy host automatically while retaining its real approval audit', async () => {
+  const f = fixture({policy:'never'}), i = installed(f);
+  const result = await i.call();
+  assert.match(result.decision.reason,/automatically rejected without asking the user/);
+  assert.equal(result.decision.kind,'deny');
+  assert.equal(f.answerCalls(),0);
+  assert.equal(f.events.at(-2).type,'approval/asked');
+  assert.equal(f.events.at(-1).type,'approval/decided');
+  assert.equal(f.events.at(-2).data.id,f.events.at(-1).data.id);
+  i.dispose(); assert.equal(f.owner.serviceAsk,oldAsk);
+});
+await test('installed plugin preserves allow, cancellation and unavailable outcomes', async () => {
+  for(const answer of ['allowed-once','cancelled','unavailable']) {
+    const f=fixture({answer}), i=installed(f);
+    const result=await i.call();
+    assert.equal(result.decision.kind,answer==='allowed-once'?'allow':'deny');
+    assert.equal(result.approvalCancelled,answer==='cancelled');
+    i.dispose();
+  }
+});
+await test('installed plugin identifies channel rejection and snapshots policy before a pending answer', async () => {
+  const f=fixture({onAnswer:s=>s.append('approval/policy',{policy:'never'})}),i=installed(f);
+  const result=await i.call();
+  assert.match(result.decision.reason,/approval channel/);
+  assert.doesNotMatch(result.decision.reason,/automatically/);
+  i.dispose();
+});
+await test('installed plugin leaves non-computer tools alone', async () => {
+  const f=fixture({policy:'never'}),i=installed(f); f.exec.name='edit_file';
+  assert.equal((await i.call()).decision.reason,'the user rejected tool "edit_file"');
+  i.dispose();
+});
+await test('installed plugin leaves a corrected host result untouched', async () => {
+  const f=fixture({policy:'never'});
+  const expected=await fixedAsk.call(f.owner,f.exec,f.ask);
+  const i=installed(f,async()=>expected);
+  assert.equal(await i.call(),expected);
+  i.dispose();
+});
+await test('uninstall restores an inherited service method without creating a shadow property', async () => {
+  const f=fixture({policy:'never'});
+  const parent={serviceAsk:oldAsk}; Object.setPrototypeOf(f.owner,parent);
+  let dispose;
+  installApprovalAttribution({get:()=>f.owner,effect:fn=>{dispose=fn()}},{info(){},warn(){}});
+  assert.equal(Object.hasOwn(f.owner,'serviceAsk'),true);
+  dispose(); assert.equal(Object.hasOwn(f.owner,'serviceAsk'),false);
+  assert.equal(f.owner.serviceAsk,oldAsk);
+});
+await test('uninstall does not overwrite a later host method replacement', async () => {
+  const f=fixture(),i=installed(f),later=async()=>({decision:{kind:'deny',reason:'later'}});
+  f.owner.serviceAsk=later; i.dispose(); assert.equal(f.owner.serviceAsk,later);
+});
+await test('older hosts with no compatibility seam retain their existing behavior', async () => {
+  let effects=0,warnings=0;
+  installApprovalAttribution({get:()=>({}),effect:()=>effects++},{warn:()=>warnings++,info(){}});
+  assert.equal(effects,0);assert.equal(warnings,1);
+});
+await test('Cordis-style traced method access restores the stored method on uninstall', async () => {
+  const f=fixture({policy:'never'}),target=f.owner; target.serviceAsk=oldAsk;
+  const tools=new Proxy(target,{get(object,key,receiver){const value=Reflect.get(object,key,receiver);return typeof value==='function'?(...args)=>Reflect.apply(value,receiver,args):value}});
+  let dispose;
+  installApprovalAttribution({get:()=>tools,effect:fn=>{dispose=fn()}},{info(){},warn(){}});
+  assert.match((await tools.serviceAsk(f.exec,f.ask)).decision.reason,/automatically rejected/);
+  dispose();assert.equal(target.serviceAsk,oldAsk);
 });
 console.log(`${passed} regression tests passed`);

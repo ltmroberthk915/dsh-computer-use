@@ -1,3 +1,9 @@
+# 1.2.3 — automatic approval attribution compatibility
+
+- Install the approval attribution correction automatically when the plugin loads. Normal package installation/update now covers computer-use calls on affected hosts, including batches.
+- Delegate every request to the original host approval service, preserving grants, denial, cancellation and durable audit. Correct only the exact legacy rejection message; already-fixed hosts and other tools retain their own results.
+- Restore the original method on unload, including Cordis traced service access. Add nine integrated-plugin regressions (23 total) and test the module from the actual packed archive in CI.
+
 # 1.2.2 — host approval attribution tools (GitHub pre-release, 2026-10-19)
 
 - Package the host approval attribution patch, upstream fixtures and 14 regressions in a new GitHub pre-release, with a separate patch-toolkit archive and a complete plugin tarball.
