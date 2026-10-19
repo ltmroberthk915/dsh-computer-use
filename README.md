@@ -14,6 +14,8 @@ Windows only (`os: win32`). Requires Node.js ≥ 22 and the .NET Framework 4.x t
 
 **1.2.1 attention fix:** fixes a missing crypto import that prevented 1.2.0's native `probe` and `raise` requests from reaching the helper. Updating from 1.2.0 is required for this runtime fix; reinstalling 1.2.0 does not fix it. New releases are staged on npm's `next` tag before promotion to `latest`; the market's normal update follows `latest`. See [1.2.1 validation and release status](docs/RELEASE-1.2.1.md).
 
+**1.2.2 GitHub pre-release:** includes a separately deployed DSH host approval-attribution patch and 14 regression cases. Plugin input and approval behavior is retained from 1.2.1. See [release contents and deployment scope](docs/RELEASE-1.2.2.md); GitHub publication does not update npm or the market automatically.
+
 ## What it does
 
 - **Observe** — window list, screenshots (region / JPEG / PNG / downscaled), a Set-of-Marks map of

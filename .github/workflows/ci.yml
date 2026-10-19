@@ -19,6 +19,8 @@ jobs:
           node-version: 24
       - name: Check release policy and attention behavior
         run: |
+          node build/test-approval-attribution.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node build/test-release-channel.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node build/test-attention.mjs

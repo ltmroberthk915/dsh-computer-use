@@ -24,10 +24,10 @@ The 14 regression cases exercise the original shipped approval implementation ag
 
 The utility was also checked against the complete module used for the local repair: it generated the deployed payload byte for byte. The running desktop host returned the corrected refusal through its real approval service using an in-memory session. A separate Electron process loaded the corrected module from the installed archive. These checks performed no desktop input or writes to real sessions.
 
-This commit ships the host patch utility and regression evidence. The computer-use plugin runtime remains version 1.2.1; it does not install the host patch automatically. The local host repair is independent of npm distribution, and a desktop upgrade can replace it.
+The patch utility and regression evidence were introduced with plugin version 1.2.1 and are included in the 1.2.2 GitHub pre-release. The plugin does not install the host patch automatically. The local host repair is independent of npm distribution, and a desktop upgrade can replace it.
 
 ## 中文说明
 
 问题来自 DSH 宿主：会话审批策略为 `never` 时，审批服务直接返回 `rejected`，工具层却统一解释成“用户拒绝”。修复后会明确说明“审批弹窗已禁用，操作被自动拒绝，未询问用户”，并保留需要审批的原始原因；交互通道返回的拒绝会注明来自审批通道。
 
-本工具生成宿主模块补丁，默认只预览，指定 `--output` 才写入一个新文件。它保留审批、取消、审计和 computer-use 的按键策略。上述 14 项回归和本机宿主验证已通过。仓库提交包含可复用补丁工具及测试，插件仍为 1.2.1；桌面安装包替换需单独部署，桌面端升级也可能覆盖本机修复。
+本工具生成宿主模块补丁，默认只预览，指定 `--output` 才写入一个新文件。它保留审批、取消、审计和 computer-use 的按键策略。上述 14 项回归和本机宿主验证已通过。补丁工具及测试已收录到 1.2.2 GitHub 预发布；桌面安装包替换需单独部署，桌面端升级也可能覆盖本机修复。

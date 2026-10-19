@@ -1,4 +1,10 @@
-# Host approval attribution patch (2026-10-19; plugin runtime remains 1.2.1)
+# 1.2.2 — host approval attribution tools (GitHub pre-release, 2026-10-19)
+
+- Package the host approval attribution patch, upstream fixtures and 14 regressions in a new GitHub pre-release, with a separate patch-toolkit archive and a complete plugin tarball.
+- Run the new regression guard in Windows CI. Plugin actuation and approval rules retain the 1.2.1 behavior; the host patch requires separate deployment.
+- npm publication and market/latest promotion remain separate operations.
+
+# Host approval attribution patch (2026-10-19; introduced with plugin 1.2.1)
 
 - Add a portable patch utility for DSH Desktop 0.2.1-rc.2's compiled tool runtime. Automatic `never` refusals identify disabled approval prompts; answerer refusals identify the channel without asserting a human decision.
 - Preserve approval outcomes, audit, cancellation and computer-use key policy. Include 14 regressions against upstream fixtures and document local live-host and independent loader verification.
