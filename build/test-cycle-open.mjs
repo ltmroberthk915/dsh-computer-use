@@ -36,7 +36,7 @@ const TOOLS = 'tools.js'
 const readLib = () => Object.fromEntries(
   fs.readdirSync(LIBDIR)
     .filter((f) => f.endsWith('.js'))
-    .map((f) => [f, fs.readFileSync(path.join(LIBDIR, f), 'utf8')]),
+    .map((f) => [f, fs.readFileSync(path.join(LIBDIR, f), 'utf8').replace(/\r\n/g, '\n')]),
 )
 const BASE = readLib()
 if (!BASE[INDEX] || !BASE[TOOLS]) { console.log('FAIL test-cycle-open'); console.log('  lib/index.js or lib/tools.js is missing'); process.exit(1) }
@@ -140,6 +140,7 @@ async function ensureCycleBehaviour (indexSrc) {
     // The machine's mailbox: bound to the cycle OWNER, never to whoever called last (integration bug).
     '  const bus = { agent: null, driverSession: null }',
     '  const gate = createCycleGate({ sessionKey, agentKey: agentKeyOf, now: () => Date.now() })',
+    '  const callOwners = new WeakMap()',
     exitPath,
     exited,
     brake,
@@ -254,7 +255,7 @@ async function ensureCycleBehaviour (indexSrc) {
 async function dispatchBehaviour (toolsSrc, tag) {
   const out = []
   const file = path.join(SANDBOX, `tools-${tag}.mjs`)
-  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback)\.js'/g,
+  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback|continuation)\.js'/g,
     (_, name) => `from ${JSON.stringify(pathToFileURL(path.join(LIBDIR, name + '.js')).href)}`))
   let mod
   try {
@@ -439,12 +440,14 @@ const TEXT_CHECKS = [
     }],
   ['host stop button: cancel input and preserve any explicit manual pause',
     (s) => {
-      // NB: anchor on the interrupt branch's own log text — the self-abort branch above logs
-      // "NOT re-engaging the brake" and legitimately calms (that cycle IS over).
+      // The terminal helper reserves ownership until native cleanup settles; Q
+      // already cleaned the worker and must not enqueue a late redundant calm.
       const i = s[INDEX].indexOf('in a computer-use session')
       if (i < 0) return false
       const win = s[INDEX].slice(i, i + 550)
-      return win.includes('cu.cancelInputs?.()') && win.includes('if (!cu.stopped)') && !win.includes('cu.panic(')
+      const terminal = s['terminal-cleanup.js'] || ''
+      return win.includes('terminalCleanup.request(') && terminal.includes('cu.cancelInputs?.()') &&
+        terminal.includes('gate.beginTermination(') && terminal.includes('paused()') && !win.includes('cu.panic(')
     }],
   ['exit notice: the worker\'s record is quoted VERBATIM (never re-worded by the plugin)',
     (s) => /const record = \(e && e\.why\)/.test(s[INDEX]) && /\$\{record\}/.test(s[INDEX])],

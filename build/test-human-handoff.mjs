@@ -10,7 +10,7 @@ const exe=path.join(dir,'fixture.exe');
 try { execFileSync(path.join(win,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:exe','/platform:x64','/optimize+','/main:HumanHandoffFixture','/out:'+exe,...refs.map(r=>'/r:'+r),source,path.join(import.meta.dirname,'human-handoff-fixture.cs')],{windowsHide:true,timeout:30000,encoding:'utf8'}); }
 catch(error){console.error(error.stdout,error.stderr);throw error}
 const native=JSON.parse(execFileSync(exe,[],{windowsHide:true,timeout:15000,encoding:'utf8',env:{...process.env,DSH_HOME:path.join(dir,'home'),DSH_COMPUTER_USE_STOP_FILE:path.join(dir,'STOP'),DSH_COMPUTER_USE_EXIT_FILE:path.join(dir,'EXITED'),DSH_COMPUTER_USE_AUDIT_LOG:path.join(dir,'audit.log')}}));
-assert.equal(native.passed,18);
+assert.equal(native.passed,21);
 const js=[];
 const fresh=()=>new ComputerUse({workerExe:'X:/NOT-STARTED.exe'});
 const event=(cu,phase,revision=1)=>cu.onLine(JSON.stringify({event:'handoff',cooperation:{phase,active:phase!=='idle',revision}}));

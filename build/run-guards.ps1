@@ -5,19 +5,30 @@
 # DIRECTORY, so running them from elsewhere failed with ENOENT on a path that does not exist. A
 # safety net nobody runs (or that "fails" for a reason unrelated to the code) is decoration.
 #
-#   pwsh -NoProfile -ExecutionPolicy Bypass -File build\run-guards.ps1
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File D:\BuyKey\dsh-computer-use\build\run-guards.ps1
 #
 # Exit code 0 = every guard passed. 1 = at least one failed (the failing names are printed last).
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path $PSScriptRoot -Parent
+$previousOwnerFile = $env:DSH_COMPUTER_USE_OWNER_FILE
+$ownerTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dsh-cu-guards-owner-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $ownerTestRoot -Force | Out-Null
 Push-Location $repo
 try {
-  $passed = 0; $failed = New-Object System.Collections.Generic.List[string]
+  $passed = 0; $skipped = 0; $failed = New-Object System.Collections.Generic.List[string]
   $guards = Get-ChildItem (Join-Path $PSScriptRoot 'test-*.mjs') | Sort-Object Name
   foreach ($g in $guards) {
+    # Existing fixtures isolate STOP/EXIT/AUDIT. Also keep the desktop lease separate
+    # from live installed workers, even when a fixture exercises the entry gate.
+    $env:DSH_COMPUTER_USE_OWNER_FILE = Join-Path $ownerTestRoot ($g.BaseName + '.lock')
     $out = & node (Join-Path 'build' $g.Name) 2>&1
     $code = $LASTEXITCODE
     if ($code -eq 0) {
+      if ($out | Where-Object { $_ -match '^SKIP test-' }) {
+        $skipped++
+        Write-Host ("  SKIP  {0}" -f $g.Name) -ForegroundColor Yellow
+        continue
+      }
       $passed++
       $line = ($out | Where-Object { $_ -match '^ok ' } | Select-Object -Last 1)
       Write-Host ("  ok    {0}" -f $g.Name) -ForegroundColor Green
@@ -34,9 +45,12 @@ try {
   }
   Write-Host ""
   if ($failed.Count -gt 0) {
-    Write-Host ("FAIL run-guards — {0} passed, {1} failed: {2}" -f $passed, $failed.Count, ($failed -join ', ')) -ForegroundColor Red
+    Write-Host ("FAIL run-guards — {0} passed, {1} skipped, {2} failed: {3}" -f $passed, $skipped, $failed.Count, ($failed -join ', ')) -ForegroundColor Red
     exit 1
   }
-  Write-Host ("ok run-guards — all {0} guards passed (run from {1})" -f $passed, $repo) -ForegroundColor Green
+  Write-Host ("ok run-guards — {0} passed, {1} explicitly skipped (run from {2})" -f $passed, $skipped, $repo) -ForegroundColor Green
   exit 0
-} finally { Pop-Location }
+} finally {
+  $env:DSH_COMPUTER_USE_OWNER_FILE = $previousOwnerFile
+  Pop-Location
+}

@@ -173,10 +173,24 @@ const CHECKS = [
     brks: [[/RecordHumanInput\(\(int\)k\.vkCode, down, up\);/, '']],
   },
   {
-    name: 'calm() ends the cycle AND disarms the monitors',
+    name: 'calm() ends the cycle and disarms only after preserving manual pause and questions',
     file: 'worker',
-    re: /case "calm":[\s\S]{0,200}?Panic\.CycleLit = false;[\s\S]{0,200}?Panic\.Disarm\(\);/,
-    brks: [[/Panic\.Disarm\(\);/, 'Panic.DisarmX();']],
+    fn: (s) => {
+      if (!/case "calm":\s*if \(!Panic\.TryEndCycle\(\)\)/.test(s)) return 'calm bypasses the guarded cycle ending'
+      const end = sliceRange(s, 'public static bool TryEndCycle()', CS_END)
+      if (!end) return 'guarded cycle-ending method is missing'
+      const required = ['lock (SyncLock)', 'if (_engaged || _stopped || PauseRequested) return false;',
+        'CycleLit = false;', 'Disarm();', 'Glow.Kill();', 'Program.ReleaseOwnedInputs();', 'Program.ReleaseDesktopOwnership();']
+      let at = -1
+      for (const token of required) { const next = end.text.indexOf(token, at + 1); if (next < 0) return `cycle ending loses ordered boundary: ${token}`; at = next }
+      return null
+    },
+    brks: [
+      [/if \(!Panic\.TryEndCycle\(\)\)/, 'if (false)'],
+      { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'Disarm();', with: 'DisarmX();' },
+      { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'if (_engaged || _stopped || PauseRequested) return false;', with: '' },
+      { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'Program.ReleaseOwnedInputs();', with: '' },
+    ],
   },
   {
     // R2, RESTORED TO ITS ORIGINAL SCOPE after the cold-start fix over-reached (2026-09-13): the red
@@ -282,17 +296,22 @@ const CHECKS = [
     ],
   },
   {
-    name: 'the indicator NAMES the state: 监听中 only while listening, 未监听 once the cycle is over',
+    name: 'the indicator titles name monitoring, pause and exit; the compact pause hint retains the resume chord',
     file: 'worker',
     fn: (s) => {
-      if (!/PaintBadge\(g, "监听中 · Ctrl\+Esc 暂停 · Ctrl\+Alt\+Q 退出"/.test(s)) return 'the live badge no longer says 监听中'
-      if (!/PaintBadge\(g, "已暂停 · Ctrl\+Alt\+R 继续 · Ctrl\+Alt\+Q 退出"/.test(s)) return 'the pause badge no longer names both keys (Ctrl+Alt+R 继续 / Ctrl+Alt+Q 退出)'
-      if (!/"AI 已停止操控 · 未监听"/.test(s)) return 'the idle title no longer says 未监听 — a dead cycle would read like a live one'
+      if (!/static volatile string _label = "AI 正在操控此电脑 · 监听中";/.test(s)) return 'the live window title no longer says 监听中'
+      const title = sliceRange(s, 'public static string DeriveTitle(string label)', CS_END)
+      if (!title || !/if \(Panic\.Exited\) return "AI 已停止操控 · 未监听";/.test(title.text)) return 'the exited title no longer says 未监听 — a dead cycle would read like a live one'
+      if (!/_stoppedMode \? "已暂停 · Ctrl\+Alt\+R 继续 · Ctrl\+Alt\+Q 退出"/.test(title.text)) return 'the paused window title no longer names both manual controls'
+      const paint = sliceRange(s, 'static void PaintStop(IntPtr bits, int w, int h)', CS_END)
+      if (!paint || !/PaintStatusChip\(g, w, h, "操作已暂停 · Ctrl\+Alt\+R 继续", tint\);/.test(paint.text)) return 'the compact pause hint no longer identifies the resume chord'
       return null
     },
     brks: [
-      { find: /监听中 · Ctrl\+Esc 暂停 · Ctrl\+Alt\+Q 退出/, with: '运行中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出' },
-      { find: /"AI 已停止操控 · 未监听"/, with: '"AI 已停止操控"' },
+      { find: /static volatile string _label = "AI 正在操控此电脑 · 监听中";/, with: 'static volatile string _label = "AI 正在操控此电脑";' },
+      { scope: 'public static string DeriveTitle(string label)', end: CS_END, find: /"AI 已停止操控 · 未监听"/, with: '"AI 已停止操控"' },
+      { scope: 'public static string DeriveTitle(string label)', end: CS_END, find: /已暂停 · Ctrl\+Alt\+R 继续 · Ctrl\+Alt\+Q 退出/, with: '操作暂停' },
+      { scope: 'static void PaintStop(IntPtr bits, int w, int h)', end: CS_END, find: /PaintStatusChip\(g, w, h, "操作已暂停 · Ctrl\+Alt\+R 继续", tint\);/, with: '' },
     ],
   },
   {
@@ -849,8 +868,8 @@ const CHECKS = [
       return null
     },
     brks: [
-      { find: /"stop" = raise the emergency brake/,
-        with: '"resume" = re-arm after a stop (ask the human first) | "stop" = raise the emergency brake' },
+      { find: /stop raises a manual brake/,
+        with: 'resume re-arms after a stop; stop raises a manual brake' },
       { find: /selftest \| calibrate \| stop \| exit \| indicator/,
         with: 'selftest | calibrate | stop | resume | exit | indicator' },
     ],

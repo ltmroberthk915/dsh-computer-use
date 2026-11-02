@@ -13,7 +13,7 @@
 // Safety model: the worker is a faithful actuator. Policy (approvals,
 // blacklists, masking) lives in the DSH plugin / MCP gate layers. Worker-side
 // guards: exact physical Ctrl+Esc for manual pause, event-driven human ownership,
-// and accepted-input cleanup. Physical activity yields until three seconds quiet.
+// and accepted-input cleanup. Physical takeover during actuation yields until three seconds quiet.
 
 using System;
 using System.Collections.Generic;
@@ -32,15 +32,14 @@ using System.Windows.Forms; // Clipboard (watch out: bare Point stays our own st
 
 namespace DshComputerUse.Worker
 {
-    // Monotonic, event-driven ownership. A brief touch yields immediately; two seconds
-    // of continued input/holding enters waiting. Only three seconds with no held input
-    // and no physical event returns control. Ordinary input never creates a STOP file.
+    // A live cycle observes physical holds, but only actual actuation can start a handoff.
+    // Once yielded, three quiet seconds with no held input returns control to the agent.
     public sealed class HumanInputState
     {
         public const int SustainedMs = 2000, IdleMs = 3000;
         readonly object sync = new object();
         readonly HashSet<int> held = new HashSet<int>();
-        bool enabled, seen;
+        bool enabled, acting, seen;
         string phase = "idle", lastKind = "none";
         long first, last, revision, burst;
         public string Phase { get { lock (sync) { return phase; } } }
@@ -67,8 +66,18 @@ namespace DshComputerUse.Worker
             {
                 if (enabled == on) return;
                 enabled = on;
-                if (!on) { phase = "idle"; return; }
-                if (held.Count > 0 || (seen && now - last < IdleMs)) Start(now);
+                if (!on) { phase = "idle"; acting = false; }
+            }
+        }
+        public void SetActing(bool on, long now)
+        {
+            lock (sync)
+            {
+                acting = on;
+                // Do not replay earlier ordinary activity. A key/button still physically
+                // held does need ownership before we can inject a conflicting chord.
+                if (on && enabled && phase == "idle" && held.Count > 0)
+                { last = now; revision++; Start(now); }
             }
         }
         void Start(long now) { phase = "yielding"; first = now; if (!seen) last = now; burst++; }
@@ -79,8 +88,9 @@ namespace DshComputerUse.Worker
                 bool continued = held.Count > 0 || (seen && now - last < IdleMs);
                 lastKind = key == 0 ? "pointer-or-wheel" : key <= 6 ? "button" : "keyboard";
                 if (key != 0) { if (down) held.Add(key); if (up) held.Remove(key); }
-                seen = true; last = now; revision++;
-                if (!enabled) return;
+                seen = true; last = now;
+                if (!enabled || (phase == "idle" && !acting)) return;
+                revision++;
                 if (phase == "idle" || !continued) Start(now);
                 if (now - first >= SustainedMs) phase = "waiting";
             }
@@ -100,6 +110,35 @@ namespace DshComputerUse.Worker
                 "revision", revision, "burst", burst, "heldCount", held.Count, "lastKind", lastKind,
                 "quietRemainingMs", phase == "idle" ? 0 : held.Count > 0 ? IdleMs : Math.Max(0, IdleMs - (now - last)),
                 "sustainedMs", SustainedMs, "idleMs", IdleMs);
+        }
+    }
+
+    // Sum only physical displacement, rebasing every injected cursor event. Agent
+    // motion cannot turn a 1-pixel hand tremor into a takeover. Back-and-forth jitter
+    // cancels rather than accumulating path length; a deliberate 16-pixel move yields.
+    public sealed class PointerHandoffTolerance
+    {
+        public const int DistancePx = 16, BurstGapMs = 250;
+        readonly object sync = new object();
+        bool seen;
+        int x, y;
+        long dx, dy, lastPhysical;
+        public void Reset(int px, int py)
+        { lock (sync) { seen = true; x = px; y = py; dx = dy = 0; lastPhysical = 0; } }
+        public bool Record(int px, int py, bool physical, bool acting, bool yielded, long now)
+        {
+            lock (sync)
+            {
+                long mx = seen ? (long)px - x : 0, my = seen ? (long)py - y : 0;
+                x = px; y = py; seen = true;
+                if (!physical) return false;
+                if (!acting && !yielded) { dx = dy = 0; lastPhysical = now; return false; }
+                if (mx == 0 && my == 0) return false;
+                if (yielded) return true;
+                if (now - lastPhysical > BurstGapMs) dx = dy = 0;
+                lastPhysical = now; dx += mx; dy += my;
+                return dx * dx + dy * dy >= DistancePx * DistancePx;
+            }
         }
     }
 
@@ -474,40 +513,45 @@ namespace DshComputerUse.Worker
         [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst, ref POINTL pptDst, ref SIZEL psize,
             IntPtr src, ref POINTL pptSrc, int colorKey, ref BLENDFUNCTION blend, int flags);
         [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
 
         static Thread _thread;
-        static volatile int _lastTouchMs;       // 0 = never; else Environment.TickCount of the last actuation
-        static volatile int _holdMs = 900;
+        static volatile bool _acting;
+        static volatile bool _preparing;
+        static volatile int _preparationStart;
+        static int _preparationSerial, _presentedPreparation;
+        public const int PreparationMs = 1500;
         static volatile bool _enabled = true;
         static volatile string _label = "AI 正在操控此电脑 · 监听中";
 
-        /// Mark "the agent is acting right now" — the glow stays lit for holdMs afterwards.
+        /// Legacy indicator requests announce monitoring; only real input can paint deep blue.
         public static void Touch(int holdMs)
         {
             if (!_enabled) return;
-            _holdMs = holdMs < 200 ? 200 : holdMs;
-            _lastTouchMs = Environment.TickCount;
+            _thinking = true;
             EnsureStarted();
         }
-        public static void Off() { _lastTouchMs = 0; _thinking = false; }
+        public static void Off() { _acting = false; _preparing = false; _thinking = false; }
+        public static bool Acting { get { return _acting; } }
+        public static bool Preparing { get { return _preparing; } }
+        public static bool PreparationVisible { get { return _preparing && Volatile.Read(ref _presentedPreparation) == Volatile.Read(ref _preparationSerial); } }
+        public static void ActuationBegin() { _acting = true; EnsureStarted(); }
+        public static void ActuationEnd() { _acting = false; }
+        public static void Prepare(bool on)
+        {
+            if (!on) { _preparing = false; return; }
+            _preparationStart = 0;
+            Interlocked.Increment(ref _preparationSerial);
+            _preparing = true; _enabled = true; EnsureStarted();
+        }
 
-        // ---- "INPUT IS HAPPENING RIGHT NOW" IS A FACT, NOT A GUESS (indicator bug, 2026-09-13) ----
-        // Measured on the production build: a real move(moveDurationMs=3500) took 3823 ms, and the
-        // deep-blue ACTING border had already expired at its fixed 1200 ms hold WHILE SendInput steps
-        // were still being injected — pixels went blue at 1737 ms, then cyan/green at 2153/3438 ms with
-        // moveStillPending:true on all eight frames. Nothing here lengthens the hold: the hold is
-        // still 1200 ms. What changes is WHERE IT IS ANCHORED (the last real injection, not the moment
-        // the op began) and that an injection SEQUENCE in flight is a state the light can read.
+        // Nested injection sequences stay observable across drag/key/typing gaps.
+        // The enclosing actual action scope controls ownership and the deep-blue cue.
         static int _injecting = 0;               // refcount; Interlocked supplies the barriers
         public static void InputBegin() { Interlocked.Increment(ref _injecting); }
         public static void InputEnd() { if (Interlocked.Decrement(ref _injecting) < 0) _injecting = 0; }
         public static bool Injecting { get { return _injecting > 0; } }
-        /// Re-anchor the ACTING light on the injection itself: called from the ONE function every real
-        /// SendInput goes through, so a multi-step op (type/drag/scroll/key/animated move) stays blue
-        /// for as long as its events keep coming, and still fades on the same short tail once they
-        /// stop. The old behaviour anchored on the op's START, so any op longer than the hold went
-        /// cyan mid-flight — the "not a long think, the input is still running" report.
-        public static void KeepActing() { _lastTouchMs = Environment.TickCount; }
+        public static void KeepActing() { /* Actual operation scope owns the cue, with no trailing hold. */ }
 
         // Emergency stop must LOOK like one. The normal fade is a slow ease (~1.6 s) which,
         // during a panic, reads as "nothing happened" — so this snaps the overlay to zero on
@@ -515,7 +559,7 @@ namespace DshComputerUse.Worker
         static volatile bool _killNow = false;
         public static void Kill()
         {
-            _lastTouchMs = 0; _thinking = false; _flashStart = 0;
+            _acting = false; _preparing = false; _thinking = false; _flashStart = 0;
             _killNow = true;
         }
 
@@ -567,7 +611,7 @@ namespace DshComputerUse.Worker
         public static int DeriveWant(bool flashOn, int committed)
         {
             if (Panic.Exited) return 0;
-            return _askMode ? 5 : (_stoppedMode ? 4 : (Panic.HumanActive ? 6 : (flashOn ? 2 : committed)));
+            return _askMode ? 5 : (_stoppedMode ? 4 : (Panic.HumanActive ? 6 : (_preparing ? 7 : (Acting ? 1 : (flashOn ? 2 : committed)))));
         }
         /// The title states the same fact as the light, derived the same way (an ended session must
         /// not advertise "已暂停 · Ctrl+Alt+R 继续" in the window list).
@@ -575,7 +619,7 @@ namespace DshComputerUse.Worker
         {
             if (Panic.Exited) return "AI 已停止操控 · 未监听";
             return _askMode ? "AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）"
-                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : Panic.HumanActive ? "已让出键鼠 · 等待人操作 · 静默 3 秒后继续" : label);
+                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : Panic.HumanActive ? "已让出键鼠 · 等待人操作 · 静默 3 秒后继续" : _preparing ? "即将开始操作，请暂停键鼠 · 1.5 秒准备" : label);
         }
         static volatile string _shownTitle = null;
         // What the indicator is ACTUALLY rendering right now, readable from outside via `probe`.
@@ -678,6 +722,7 @@ namespace DshComputerUse.Worker
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                 "STATIC", _label, WS_POPUP, vx, vy, vw, vh, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (hwnd == IntPtr.Zero) return;
+            TryExcludeOverlayFromCapture(hwnd);
             _hwnd = hwnd;
 
             IntPtr screenDc = GetDC(IntPtr.Zero);
@@ -703,37 +748,16 @@ namespace DshComputerUse.Worker
             int paintedFlash = 0;
             int alpha = 0;
             bool visible = false;
-            int committed = 0;      // 0 idle / 1 acting / 3 thinking, committed after a dwell
-            int pending = -1;
-            int pendingSince = 0;
+            int committed = 0;
             while (true)
             {
-                // ACTING = input in flight (a sequence, across its sleeps) OR the short tail after the
-                // last injection. Never "a longer guess": the hold is unchanged and the tail still ends.
-                bool acting = _enabled && (Injecting ||
-                    (_lastTouchMs != 0 && unchecked(Environment.TickCount - _lastTouchMs) < _holdMs));
+                // Ownership and deep blue use the same actual action scope. There is no
+                // delayed onset or lingering tail during reading, thinking or preparation.
+                bool acting = _enabled && Acting;
                 bool thinking = ThinkingActive;
                 bool flashOn = _flashStart != 0 && unchecked(Environment.TickCount - _flashStart) < _flashMs;
 
-                int live = acting ? 1 : (thinking ? 3 : 0);
-                // The flash is an OVERRIDE, never a state that lingers.
-                //
-                // 2026-09-13: the flash used to write `committed = 2`, so once it ended the dwell
-                // hysteresis (600 ms) held the yellow bitmap on screen — with the border snapped to
-                // full alpha that read as "the yellow frame is permanently lit", and the human lost
-                // the ability to tell WHICH step took a screenshot. Now yellow shows only while the
-                // flash is actually running (<=400 ms) and the border drops straight back to deep
-                // blue when acting, or pale breathing when thinking.
-                if (!flashOn)
-                {
-                    if (live != committed)
-                    {
-                        // require a state to hold for 600 ms before switching: kills strobe
-                        if (pending != live) { pending = live; pendingSince = Environment.TickCount; }
-                        else if (unchecked(Environment.TickCount - pendingSince) >= 600) { committed = live; pending = -1; }
-                    }
-                    else { pending = -1; }
-                }
+                committed = acting ? 1 : (thinking ? 3 : 0);
 
                 // ONE derivation (Glow.DeriveWant): the exit flag outranks ask/stop/flash/committed,
                 // so no later state change on another thread can paint a light on an ended session.
@@ -760,14 +784,14 @@ namespace DshComputerUse.Worker
                     _killNow = false;
                     alpha = 0;
                     if (visible) { ShowWindow(hwnd, SW_HIDE); visible = false; }
-                    curBitmap = 0; committed = 0; pending = -1; paintedFlash = 0;
+                    curBitmap = 0; committed = 0; paintedFlash = 0;
                     MSG mk; while (PeekMessage(out mk, hwnd, 0, 0, PM_REMOVE)) { }
                     Thread.Sleep(12);
                     continue;
                 }
                 // want: 0 idle | 1 acting (deep blue) | 3 thinking (pale blue) | 2 flash (yellow)
                 //       4 emergency-stopped (RED, steady — the session is dead until re-armed)
-                int needBitmap = want == 6 ? 5 : want == 2 ? 2 : (want == 0 ? curBitmap : (want == 1 ? 3 : (want == 4 || want == 5 ? 4 : 1)));
+                int needBitmap = want == 7 ? 6 : want == 6 ? 5 : want == 2 ? 2 : (want == 0 ? curBitmap : (want == 1 ? 3 : (want == 4 || want == 5 ? 4 : 1)));
                 // A REPAINT MUST REACH THE SCREEN EVEN WHEN ALPHA DOES NOT MOVE.
                 //
                 // The present below used to be gated on `diff != 0` alone, while the flash snaps
@@ -778,7 +802,8 @@ namespace DshComputerUse.Worker
                 // RED frame when the border happened to be at full alpha already — whether the
                 // brake was visible was luck. Present when EITHER the bitmap or the alpha changed.
                 bool repaint = false;
-                if (needBitmap == 2 && paintedFlash != _flashStart) { PaintFlash(bits, vw, vh); paintedFlash = _flashStart; curBitmap = 2; alpha = 204; repaint = true; /* snap ON at 80%: a flash is an event, not a fade */ }
+                if (needBitmap == 6) { PaintPreparation(bits, vw, vh, PreparationVisible ? unchecked(Environment.TickCount - _preparationStart) : 0); curBitmap = 6; repaint = true; }
+                else if (needBitmap == 2 && paintedFlash != _flashStart) { PaintFlash(bits, vw, vh); paintedFlash = _flashStart; curBitmap = 2; alpha = 204; repaint = true; /* snap ON at 80%: a flash is an event, not a fade */ }
                 else if (needBitmap == 5 && curBitmap != 5) { PaintHumanYield(bits, vw, vh); curBitmap = 5; repaint = true; }
                 else if (needBitmap == 4 && curBitmap != 4) { PaintStop(bits, vw, vh); curBitmap = 4; repaint = true; }
                 else if (needBitmap == 3 && curBitmap != 3) { PaintBlue(bits, vw, vh, true); curBitmap = 3; repaint = true; }
@@ -790,7 +815,7 @@ namespace DshComputerUse.Worker
                 int target;
                 bool flashFrame = false;
                 bool breathFrame = false;      // breathing states are ABSOLUTE, never eased
-                if (want == 0) target = 0;
+                if (want == 0) { target = 0; breathFrame = true; }
                 else if (want == 2)
                 {
                     // The capture cue runs its OWN envelope (wind-up, burst, short fade): an absolute
@@ -798,7 +823,8 @@ namespace DshComputerUse.Worker
                     target = FlashAlpha(unchecked(Environment.TickCount - _flashStart));
                     flashFrame = true;
                 }
-                else if (want == 1) target = FULL;
+                else if (want == 1) { target = FULL; breathFrame = true; }
+                else if (want == 7) { target = 255; breathFrame = true; }
                 else if (want == 4) target = FULL;         // steady red, no breathing
                 else if (want == 6)
                 {
@@ -860,7 +886,11 @@ namespace DshComputerUse.Worker
                             SetWindowPos(hwnd, new IntPtr(-1), vx, vy, vw, vh, 0x0004 | 0x0010 | 0x0040);
                             visible = true;
                         }
-                        UpdateLayeredWindow(hwnd, screenDc, ref dst, ref size, memDc, ref src, 0, ref bf, ULW_ALPHA);
+                        if (UpdateLayeredWindow(hwnd, screenDc, ref dst, ref size, memDc, ref src, 0, ref bf, ULW_ALPHA) && want == 7 && !PreparationVisible)
+                        {
+                            _preparationStart = Environment.TickCount;
+                            Volatile.Write(ref _presentedPreparation, Volatile.Read(ref _preparationSerial));
+                        }
                     }
                     else if (visible) { ShowWindow(hwnd, SW_HIDE); visible = false; }
                 }
@@ -870,146 +900,154 @@ namespace DshComputerUse.Worker
             }
         }
 
-        /// The agent's activity border, in two clearly different states.
-        ///
-        /// 2026-09-12 (human request): the two states no longer share a width, and they no longer
-        /// share a hue. "thinking" is now a WIDER CYAN halo and "acting" a NARROWER DEEP BLUE one,
-        /// so the pair reads unambiguously: an outer cyan ring breathing = the agent is thinking
-        /// (it has not touched the machine yet), the inner steady blue = it is driving right now.
-        /// The old design made them the same shape and the same hue at different densities, which
-        /// is exactly the case where "is it doing something?" becomes a guess.
-        ///
-        /// Drawn as N concentric rounded-rect strokes whose alpha follows (1-t)^1.8 — a
-        /// hand-rolled gradient guaranteed to reach alpha 0 at the INNER edge (a residual
-        /// tint there read as a hard seam against near-black windows).
-        static void PaintBlue(IntPtr bits, int w, int h, bool intense)
+        // Thin, square screen-edge rails leave the application itself completely clear.
+        // Each pixel belongs to exactly one inset ring: corners meet without gaps or
+        // overlapping hot spots, and the inward bloom ends after eight physical pixels.
+        static void PaintEdgeRail(System.Drawing.Graphics g, Rectangle bounds, Color tint)
         {
-            WithGraphics(bits, w, h, delegate (System.Drawing.Graphics g)
+            int[] alpha = { 244, 216, 94, 53, 30, 16, 8, 3 };
+            var smoothing = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+            try
             {
-                // Width and intensity are both scaled from ONE place per state, and the layered
-                // window's constant alpha does the intensity: perceived brightness = bitmap alpha x
-                // layer alpha, so scaling BOTH would give 0.64 where the human asked for 0.8.
-                // (2026-09-13: "all frames 80% as dense, 80% as wide".)
-                // The CAP has to carry the width: at 1600p the cap is what binds, so a divisor
-                // change alone moves nothing (min(46, 1600/26) == min(46, 1600/32) == 46).
-                //   acting  : 37 px  (80% of the original 46) — stays INSIDE the thinking ring
-                //   thinking: 52 px  (~40% wider)              — reaches OUTSIDE it
-                int band = intense
-                    ? Math.Max(22, Math.Min(37, Math.Min(w, h) / 32))
-                    : Math.Max(30, Math.Min(52, Math.Min(w, h) / 23));
-                int r = band + 10;
-                int peak = intense ? 240 : 168;
-                System.Drawing.Color col = intense
-                    ? System.Drawing.Color.FromArgb(255, 46, 132, 255)     // deep, saturated blue
-                    : System.Drawing.Color.FromArgb(255, 34, 226, 240);    // cyan halo (thinking)
-                const int N = 60;
-                float step = (float)band / N;
-                for (int i = 0; i < N; i++)
+                for (int i = 0; i < alpha.Length; i++)
                 {
-                    double t = (double)i / N;
-                    int a = (int)Math.Round(peak * Math.Pow(1 - t, intense ? 2.0 : 1.8));
-                    if (a <= 0) continue;
-                    float inset = i * step;
-                    using (System.Drawing.Pen pen = new System.Drawing.Pen(
-                               System.Drawing.Color.FromArgb(a, col.R, col.G, col.B), step + 1.2f))
+                    int x = bounds.Left + i, y = bounds.Top + i;
+                    int width = bounds.Width - 2 * i, height = bounds.Height - 2 * i;
+                    if (width <= 0 || height <= 0) break;
+                    Color start = Color.FromArgb(alpha[i], Math.Min(255, tint.R + 18), Math.Min(255, tint.G + 14), Math.Min(255, tint.B + 8));
+                    Color end = Color.FromArgb(alpha[i], tint.R, tint.G, tint.B);
+                    using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
+                        new RectangleF(bounds.X, bounds.Y, Math.Max(1, bounds.Width), Math.Max(1, bounds.Height)), start, end, 32f))
                     {
-                        System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
-                        AddRound(path, inset, inset, w - inset * 2, h - inset * 2, Math.Max(1, r - inset));
-                        g.DrawPath(pen, path);
-                        path.Dispose();
+                        g.FillRectangle(brush, x, y, width, 1);
+                        if (height > 1) g.FillRectangle(brush, x, y + height - 1, width, 1);
+                        if (height > 2)
+                        {
+                            g.FillRectangle(brush, x, y + 1, 1, height - 2);
+                            if (width > 1) g.FillRectangle(brush, x + width - 1, y + 1, 1, height - 2);
+                        }
                     }
                 }
-                PaintEscBadge(g, intense ? 238 : 148);
+            }
+            finally { g.SmoothingMode = smoothing; }
+        }
+
+        static Rectangle OverlayDisplay(int w, int h)
+        {
+            var display = new Rectangle(0, 0, w, h);
+            if (w == Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN) && h == Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN))
+            {
+                display = Screen.PrimaryScreen.Bounds;
+                display.Offset(-Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), -Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN));
+            }
+            return display;
+        }
+
+        // WDA_EXCLUDEFROMCAPTURE must not be sent on older Windows, where its fallback
+        // can black out the covered image. Unsupported APIs simply leave the overlay visible.
+        static void TryExcludeOverlayFromCapture(IntPtr hwnd)
+        {
+            try
+            {
+                object build = Microsoft.Win32.Registry.GetValue(
+                    @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuildNumber", null);
+                int number;
+                if (int.TryParse(Convert.ToString(build), out number) && number >= 19041)
+                    SetWindowDisplayAffinity(hwnd, 0x00000011);
+            }
+            catch { /* display preference only; never changes control or capture behavior */ }
+        }
+
+        static void PaintBlue(IntPtr bits, int w, int h, bool intense)
+        {
+            WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
+                PaintEdgeRail(g, new Rectangle(0, 0, w, h), intense
+                    ? Color.FromArgb(49, 116, 248) : Color.FromArgb(36, 206, 216));
             });
         }
 
-        /// Semi-transparent badge in the top-left corner. The human must be able to SEE that a
-        /// brake exists (and whether it is currently on) — a brake nobody can see feels exactly
-        /// like no brake at all.
         public static int HumanYieldAlpha(int tick)
         { return 48 + (int)Math.Round(30 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }
         static void PaintHumanYield(IntPtr bits, int w, int h)
         {
             WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
-                int band = Math.Max(20, Math.Min(40, Math.Min(w, h) / 30));
-                for (int i = 0; i < 48; i++)
-                {
-                    float inset = (float)i * band / 48;
-                    int alpha = (int)(175 * Math.Pow(1 - i / 48.0, 1.8));
-                    using (var pen = new Pen(Color.FromArgb(alpha, 255, 231, 151), band / 48f + 1.2f))
-                    using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
-                    { AddRound(shape, inset, inset, w - 2 * inset, h - 2 * inset, Math.Max(1, band + 8 - inset)); g.DrawPath(pen, shape); }
-                }
-                PaintBadge(g, "已让出键鼠 · 静默 3 秒后继续 · Ctrl+Esc 暂停", 175, false);
+                Color tint = Color.FromArgb(238, 190, 102);
+                PaintEdgeRail(g, new Rectangle(0, 0, w, h), tint);
+                PaintStatusChip(g, w, h, "已让出键鼠 · 静默 3 秒后接续", tint);
             });
         }
 
-        static void PaintEscBadge(System.Drawing.Graphics g, int opacity)
+        static void PaintPreparation(IntPtr bits, int w, int h, int elapsed)
         {
-            PaintBadge(g, "监听中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出", opacity, false);
+            WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
+                Color tint = Color.FromArgb(166, 139, 250);
+                PaintEdgeRail(g, new Rectangle(0, 0, w, h), tint);
+                Rectangle display = OverlayDisplay(w, h);
+                float scale = Math.Max(1f, Math.Min(1.25f, display.Width / 1920f));
+                float bw = Math.Min(408 * scale, display.Width - 24), bh = 64 * scale;
+                float x = display.Left + (display.Width - bw) / 2, y = display.Top + 10 * scale;
+                float progress = Math.Max(0f, Math.Min(1f, elapsed / (float)PreparationMs));
+                using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
+                using (var fill = new System.Drawing.Drawing2D.LinearGradientBrush(new RectangleF(x, y, bw, bh),
+                    Color.FromArgb(224, 23, 27, 39), Color.FromArgb(224, 35, 31, 53), 0f))
+                using (var outline = new Pen(Color.FromArgb(110, tint), 1f))
+                using (var title = new Font("Microsoft YaHei UI", 12.5f * scale, FontStyle.Bold))
+                using (var detail = new Font("Microsoft YaHei UI", 9f * scale))
+                using (var white = new SolidBrush(Color.FromArgb(255, 246, 247, 253)))
+                using (var soft = new SolidBrush(Color.FromArgb(238, 183, 188, 207)))
+                using (var ring = new Pen(Color.FromArgb(70, tint), 2 * scale))
+                using (var accent = new Pen(Color.FromArgb(245, tint), 2 * scale))
+                using (var track = new SolidBrush(Color.FromArgb(52, tint)))
+                using (var bar = new System.Drawing.Drawing2D.LinearGradientBrush(
+                    new RectangleF(x + 48 * scale, y + 56 * scale, bw - 64 * scale, 2 * scale),
+                    Color.FromArgb(220, 167, 139, 250), Color.FromArgb(235, 96, 165, 250), 0f))
+                {
+                    AddRound(shape, x, y, bw, bh, 14 * scale); g.FillPath(fill, shape); g.DrawPath(outline, shape);
+                    g.DrawEllipse(ring, x + 16 * scale, y + 20 * scale, 20 * scale, 20 * scale);
+                    if (progress > 0) g.DrawArc(accent, x + 16 * scale, y + 20 * scale, 20 * scale, 20 * scale, -90, 360 * progress);
+                    g.DrawString("即将开始操作，请暂停键鼠", title, white, x + 48 * scale, y + 9 * scale);
+                    g.DrawString("Ctrl+Esc 暂停", detail, soft, x + 48 * scale, y + 34 * scale);
+                    string remaining = (Math.Max(0, PreparationMs - elapsed) / 1000.0).ToString("0.0") + " 秒后开始";
+                    SizeF size = g.MeasureString(remaining, detail);
+                    g.DrawString(remaining, detail, soft, x + bw - 16 * scale - size.Width, y + 34 * scale);
+                    g.FillRectangle(track, x + 48 * scale, y + 56 * scale, bw - 64 * scale, 2 * scale);
+                    if (progress > 0) g.FillRectangle(bar, x + 48 * scale, y + 56 * scale, (bw - 64 * scale) * progress, 2 * scale);
+                }
+            });
         }
 
-        static void PaintBadge(System.Drawing.Graphics g, string txt, int opacity, bool red)
+        static void PaintStatusChip(System.Drawing.Graphics g, int w, int h, string text, Color tint)
         {
-            // The human asked for a QUIETER badge (2026-09-13): they already know what the overlay
-            // means, so it must inform without shouting. Font at 75% (15 -> 11.25 pt), and text,
-            // outline and background all pulled well below full opacity.
-            int o = Math.Max(40, Math.Min(255, opacity));
-            using (System.Drawing.Font f = new System.Drawing.Font("Microsoft YaHei", 11.25f, System.Drawing.FontStyle.Bold))
+            Rectangle display = OverlayDisplay(w, h);
+            float scale = Math.Max(1f, Math.Min(1.25f, display.Width / 1920f));
+            using (var font = new Font("Microsoft YaHei UI", 9f * scale))
             {
-                System.Drawing.SizeF sz = g.MeasureString(txt, f);
-                float bw = sz.Width + 24f, bh = sz.Height + 12f;
-                float x = 22f, y = 22f;
-                System.Drawing.Drawing2D.GraphicsPath p = new System.Drawing.Drawing2D.GraphicsPath();
-                AddRound(p, x, y, bw, bh, 10f);
-                System.Drawing.Color edge = red
-                    ? System.Drawing.Color.FromArgb((int)(o * 0.42), 255, 150, 150)
-                    : System.Drawing.Color.FromArgb((int)(o * 0.34), 150, 200, 255);
-                using (System.Drawing.SolidBrush b = new System.Drawing.SolidBrush(
-                           red ? System.Drawing.Color.FromArgb((int)(o * 0.30), 46, 8, 12)
-                               : System.Drawing.Color.FromArgb((int)(o * 0.26), 10, 14, 22)))
-                    g.FillPath(b, p);
-                using (System.Drawing.Pen pen = new System.Drawing.Pen(edge, 1.4f))
-                    g.DrawPath(pen, p);
-                p.Dispose();
-                using (System.Drawing.SolidBrush tb = new System.Drawing.SolidBrush(
-                           red ? System.Drawing.Color.FromArgb((int)(o * 0.70), 255, 226, 226)
-                               : System.Drawing.Color.FromArgb((int)(o * 0.62), 236, 245, 255)))
-                    g.DrawString(txt, f, tb, x + 12f, y + 6f);
+                SizeF measured = g.MeasureString(text, font);
+                float bw = Math.Min(measured.Width + 38 * scale, display.Width - 24), bh = 28 * scale;
+                float x = display.Left + (display.Width - bw) / 2, y = display.Top + 8 * scale;
+                using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
+                using (var fill = new SolidBrush(Color.FromArgb(222, 22, 26, 36)))
+                using (var outline = new Pen(Color.FromArgb(90, tint), 1f))
+                using (var accent = new SolidBrush(Color.FromArgb(255, tint)))
+                using (var ink = new SolidBrush(Color.FromArgb(250, 235, 239, 248)))
+                {
+                    AddRound(shape, x, y, bw, bh, 12 * scale); g.FillPath(fill, shape); g.DrawPath(outline, shape);
+                    g.FillEllipse(accent, x + 12 * scale, y + 11 * scale, 6 * scale, 6 * scale);
+                    g.DrawString(text, font, ink, x + 24 * scale, y + (bh - measured.Height) / 2);
+                }
             }
         }
 
-        /// The stopped state: a RED border plus a red badge, steady (no breathing) — the
-        /// computer-use session is dead until a human re-arms it.
         static void PaintStop(IntPtr bits, int w, int h)
         {
-            WithGraphics(bits, w, h, delegate (System.Drawing.Graphics g)
-            {
-                int band = Math.Max(22, Math.Min(37, Math.Min(w, h) / 32));   // 80% of what it was (cap included)
-                int r = band + 10;
-                const int N = 60;
-                float step = (float)band / N;
-                for (int i = 0; i < N; i++)
-                {
-                    double t = (double)i / N;
-                    int a = (int)Math.Round(248 * Math.Pow(1 - t, 2.0));
-                    if (a <= 0) continue;
-                    float inset = i * step;
-                    using (System.Drawing.Pen pen = new System.Drawing.Pen(
-                               System.Drawing.Color.FromArgb(a, 238, 66, 74), step + 1.2f))
-                    {
-                        System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
-                        AddRound(path, inset, inset, w - inset * 2, h - inset * 2, Math.Max(1, r - inset));
-                        g.DrawPath(pen, path);
-                        path.Dispose();
-                    }
-                }
-                PaintBadge(g, "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出", 252, true);
+            WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
+                Color tint = Color.FromArgb(240, 84, 102);
+                PaintEdgeRail(g, new Rectangle(0, 0, w, h), tint);
+                PaintStatusChip(g, w, h, "操作已暂停 · Ctrl+Alt+R 继续", tint);
             });
         }
 
-        /// Yellow "a screenshot was just taken" rectangle around the captured region —
-        /// same stepped-gradient treatment, no strokes, no hard edges.
         static void PaintFlash(IntPtr bits, int w, int h)
         {
             int fx = _fx, fy = _fy, fw = _fw, fh = _fh;
@@ -1019,32 +1057,8 @@ namespace DshComputerUse.Worker
             if (fx + fw > w) fw = w - fx;
             if (fy + fh > h) fh = h - fy;
             if (fw < 8 || fh < 8) { fx = 0; fy = 0; fw = w; fh = h; }
-
-            WithGraphics(bits, w, h, delegate (System.Drawing.Graphics g)
-            {
-                // 2026-09-12 (human): the capture cue on its own, 40% narrower again — 32 -> 19.
-                // The corner radius scales with it (13 -> 8) so the strip still reads as a thin
-                // glow instead of a fat rounded rectangle. Width only: the alpha profile is
-                // untouched, so the cue keeps its brightness.
-                int band = 19;
-                int r = 8;
-                const int N = 40;
-                float step = (float)band / N;
-                for (int i = 0; i < N; i++)
-                {
-                    double t = (double)i / N;
-                    int a = (int)Math.Round(200 * Math.Pow(1 - t, 1.9));
-                    if (a <= 0) continue;
-                    float inset = i * step;
-                    using (System.Drawing.Pen pen = new System.Drawing.Pen(
-                               System.Drawing.Color.FromArgb(a, 255, 186, 20), step + 1.2f))
-                    {
-                        System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
-                        AddRound(path, fx + inset, fy + inset, fw - inset * 2, fh - inset * 2, Math.Max(1, r - inset));
-                        g.DrawPath(pen, path);
-                        path.Dispose();
-                    }
-                }
+            WithGraphics(bits, w, h, delegate(System.Drawing.Graphics g) {
+                PaintEdgeRail(g, new Rectangle(fx, fy, fw, fh), Color.FromArgb(247, 193, 62));
             });
         }
 
@@ -1056,6 +1070,7 @@ namespace DshComputerUse.Worker
                 using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmp))
                 {
                     g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                     g.Clear(System.Drawing.Color.Transparent);
                     draw(g);
                 }
@@ -1232,6 +1247,7 @@ namespace DshComputerUse.Worker
             // separate statements, so a Q between the check and the write re-lit a dead cycle.
             lock (SyncLock)
             {
+                Program.InvalidateActiveInput();
                 _temporary = null;
                 _engaged = false;
                 _stopped = false;
@@ -1258,6 +1274,7 @@ namespace DshComputerUse.Worker
             {
                 if (_exited) return false;
                 if (!CycleLit) Program.ResetKickoffFocus();
+                _controlsReleased = false;
                 CycleLit = true;      // an agent cycle is live: cyan is on (R1)
                 Arm();                // "Computer use 一旦启用，立即挂打断监听"
                 // A BRAKE OUTRANKS "THINKING" (cold-start bug, 2026-09-13): if a stop is already
@@ -1278,6 +1295,19 @@ namespace DshComputerUse.Worker
                 {
                     Glow.Thinking(thinkMs);
                 }
+                return true;
+            }
+        }
+        public static bool TryEndCycle()
+        {
+            SyncExitedFromFile(); SyncFromFile();
+            lock (SyncLock)
+            {
+                if (_engaged || _stopped || PauseRequested) return false;
+                _controlsReleased = true;
+                CycleLit = false;
+                Disarm(); Glow.Kill();
+                Program.ReleaseOwnedInputs(); Program.ReleaseDesktopOwnership();
                 return true;
             }
         }
@@ -1355,7 +1385,7 @@ namespace DshComputerUse.Worker
             }
             // OUTSIDE the lock: Notify writes to stdout, and a full pipe must never hold the lock the
             // exit and the cycle-opener share.
-            if (adopted) ReleaseStuck();   // adopted exit == detected exit, cleanup included
+            if (adopted) { ReleaseStuck(); Program.ReleaseDesktopOwnership(); }
             if (announce) Notify("exit", ExitSummary());
         }
 
@@ -1751,6 +1781,20 @@ namespace DshComputerUse.Worker
                 } while (!ControlQueue.IsEmpty && Interlocked.CompareExchange(ref _controlWorkQueued, 1, 0) == 0);
             });
         }
+        static void QueueDesktopControl(Action action, Action skipped = null)
+        {
+            QueueControl(delegate {
+                // Serialize with graceful release: a queued physical hotkey may not
+                // reopen a completed cycle or steer an exit into its continuing chat.
+                lock (SyncLock)
+                {
+                    if (!ControlListenersEnabled || !Program.TryClaimDesktop("physical control"))
+                    { if (skipped != null) skipped(); return; }
+                    try { action(); }
+                    finally { if (!CycleLit) Program.ReleaseDesktopOwnership(); }
+                }
+            });
+        }
         public static string ControlHotkey(uint vk, bool down, bool human, bool ctrl, bool alt, bool shift, bool win, bool live)
         {
             if (!down || !human) return "";
@@ -1760,8 +1804,7 @@ namespace DshComputerUse.Worker
             return "";
         }
         static bool _suppressPauseEsc;
-        static bool _havePhysicalPoint;
-        static POINT _physicalPoint;
+        static readonly PointerHandoffTolerance PointerMotion = new PointerHandoffTolerance();
         public static bool PhysicalEvent(IntPtr extra, uint flags, uint injectedMask)
         { return extra != OwnMagic && (flags & injectedMask) == 0; }
 
@@ -1773,15 +1816,18 @@ namespace DshComputerUse.Worker
                 {
                     var m = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
                     if (m.dwExtraInfo != OwnMagic) Interlocked.Increment(ref _externalInput);
-                    if (PhysicalEvent(m.dwExtraInfo, m.flags, 3))
+                    bool physical = PhysicalEvent(m.dwExtraInfo, m.flags, 3);
+                    int message = wParam.ToInt32();
+                    // Significant idle motion invalidates observations, but does not yield.
+                    bool movement = message == 0x200 && PointerMotion.Record(m.pt.X, m.pt.Y, physical,
+                        true, Handoff.Active, HumanClock.ElapsedMilliseconds);
+                    if (physical)
                     {
-                        int message = wParam.ToInt32(), key = 0;
+                        int key = 0;
                         bool down = false, up = false, activity = true;
                         switch (message)
                         {
-                            case 0x200:
-                                activity = !_havePhysicalPoint || m.pt.X != _physicalPoint.X || m.pt.Y != _physicalPoint.Y;
-                                _physicalPoint = m.pt; _havePhysicalPoint = true; break;
+                            case 0x200: activity = movement; break;
                             case 0x201: key = 1; down = true; break;
                             case 0x202: key = 1; up = true; break;
                             case 0x204: key = 2; down = true; break;
@@ -1820,8 +1866,8 @@ namespace DshComputerUse.Worker
                         { if (up) _suppressPauseEsc = false; return new IntPtr(1); }
                         bool ctrl = _humanCtrl && (Native.GetAsyncKeyState(Native.VK_CONTROL) & 0x8000) != 0;
                         bool alt = _humanAlt && (Native.GetAsyncKeyState(Native.VK_MENU) & 0x8000) != 0;
-                        string hotkey = ControlHotkey(k.vkCode, down, human, ctrl, alt,
-                            Handoff.Held(0x10), Handoff.Held(0x5B) || Handoff.Held(0x5C), CycleLit && !_exited);
+                        string hotkey = ControlListenersEnabled ? ControlHotkey(k.vkCode, down, human, ctrl, alt,
+                            Handoff.Held(0x10), Handoff.Held(0x5B) || Handoff.Held(0x5C), CycleLit && !_exited) : "";
                         if (hotkey == "pause")
                         {
                             _suppressPauseEsc = true;
@@ -1829,19 +1875,19 @@ namespace DshComputerUse.Worker
                             // The hook marks ownership immediately; do not perform SendInput or
                             // filesystem work on this OS hook thread.
                             string evidence = ChordEvidence(k, ctrl, alt);
-                            QueueControl(delegate {
+                            QueueDesktopControl(delegate {
                                 try { Engage("Ctrl+Esc chord detected", false, "hook", evidence); }
                                 finally { Interlocked.Decrement(ref _pendingPauses); }
-                            });
+                            }, delegate { Interlocked.Decrement(ref _pendingPauses); });
                             return new IntPtr(1); // Ctrl+Esc must not also open the Windows Start menu.
                         }
                         if (hotkey == "exit")
                         {
                             string evidence = ChordEvidence(k, ctrl, alt);
-                            QueueControl(delegate { Exit("Ctrl+Alt+Q chord detected", "hook", evidence); });
+                            QueueDesktopControl(delegate { Exit("Ctrl+Alt+Q chord detected", "hook", evidence); });
                         }
                         else if (hotkey == "resume")
-                            QueueControl(delegate { Clear(); });
+                            QueueDesktopControl(delegate { Clear(); });
                     }
                 }
             }
@@ -1886,6 +1932,7 @@ namespace DshComputerUse.Worker
             // SendInputChecked (which now refuses after an exit): releasing what is stuck is exactly
             // the cleanup that must still be allowed.
             ReleaseStuck();
+            Program.ReleaseDesktopOwnership();
             Program.AuditRecord("EXIT", _exitSource + "\t" + why + "\t" + _exitEvidence);
             Notify("exit", ExitSummary());
         }
@@ -1963,12 +2010,12 @@ namespace DshComputerUse.Worker
                     bool r = (Native.GetAsyncKeyState(Native.VK_R) & 1) != 0;
                     bool agentQuiet = _agentActAt == 0 || unchecked(Environment.TickCount - _agentActAt) > 400;
                     if (warm < 3) warm++;
-                    else if (_humanCtrl && _humanAlt && asyncCtrl && asyncAlt && agentQuiet)
+                    else if (ControlListenersEnabled && _humanCtrl && _humanAlt && asyncCtrl && asyncAlt && agentQuiet)
                     {
                         // R FIRST: Ctrl+Alt+R is the human's explicit re-arm, and a stale Q bit must
                         // never beat it — pressing the key that brings computer use BACK used to be
                         // able to END it instead.
-                        if (r && !prevR) QueueControl(delegate { Clear(); });
+                        if (r && !prevR) QueueDesktopControl(delegate { Clear(); });
                         else if (q && !prevQ)
                         {
                             Native.KBDLLHOOKSTRUCT kk = new Native.KBDLLHOOKSTRUCT();
@@ -1977,7 +2024,7 @@ namespace DshComputerUse.Worker
                                  "q-latch + hook-tracked modifiers + measured async key state " +
                                  "(no keydown was seen by the hook); " +
                                  ChordEvidence(kk, asyncCtrl, asyncAlt);
-                            QueueControl(delegate { Exit("Ctrl+Alt+Q chord detected", "poll", evidence); });
+                            QueueDesktopControl(delegate { Exit("Ctrl+Alt+Q chord detected", "poll", evidence); });
                         }
                     }
                     prevQ = q; prevR = r;
@@ -1993,6 +2040,8 @@ namespace DshComputerUse.Worker
         // durable manual brake and never creates a STOP record.
         static int _agentActAt;
         static volatile bool _armed = false;
+        static volatile bool _controlsReleased = true;
+        public static bool ControlListenersEnabled { get { return !_controlsReleased; } }
         public static volatile bool CycleLit;
         public static bool Armed { get { return _armed; } }
         public static bool Exited { get { return _exited; } }
@@ -2000,15 +2049,33 @@ namespace DshComputerUse.Worker
         static readonly HumanInputState Handoff = new HumanInputState();
         static readonly object HandoffPublishLock = new object();
         static string _publishedHandoff = "idle";
+        static long _physicalInputEpoch, _publishedInputEpoch;
         static int _handoffWorkQueued;
         public static bool HumanActive { get { return Handoff.Active; } }
         public static long HumanRevision { get { return Handoff.Revision; } }
         public static bool HumanHolds(int vk) { return Handoff.Held(vk); }
-        public static object CooperationState() { return Handoff.Snapshot(HumanClock.ElapsedMilliseconds); }
+        public static long InputEpoch { get { return Interlocked.Read(ref _physicalInputEpoch); } }
+        public static object CooperationState()
+        {
+            var state = (Dictionary<string, object>)Handoff.Snapshot(HumanClock.ElapsedMilliseconds);
+            state["inputEpoch"] = InputEpoch; state["mouseTolerancePx"] = PointerHandoffTolerance.DistancePx;
+            return state;
+        }
         static void ResetMonitorRun() { /* Manual recovery must not erase physical input history. */ }
         public static void Arm() { _armed = true; Handoff.Enable(CycleLit && !_exited, HumanClock.ElapsedMilliseconds); }
         public static void Disarm() { _armed = false; Handoff.Enable(false, HumanClock.ElapsedMilliseconds); PublishHandoff(); }
         public static void AgentActed() { _agentActAt = Environment.TickCount; }
+        public static void BeginActuation()
+        {
+            POINT point; if (Native.GetCursorPos(out point)) PointerMotion.Reset(point.X, point.Y);
+            Glow.ActuationBegin();
+            Handoff.SetActing(true, HumanClock.ElapsedMilliseconds);
+        }
+        public static void EndActuation()
+        {
+            Handoff.SetActing(false, HumanClock.ElapsedMilliseconds);
+            Glow.ActuationEnd();
+        }
         static bool IsBareModifier(uint vk)
         {
             return vk == Native.VK_SHIFT || vk == Native.VK_CONTROL || vk == Native.VK_MENU ||
@@ -2017,6 +2084,7 @@ namespace DshComputerUse.Worker
         }
         public static void RecordHumanInput(int key, bool down, bool up)
         {
+            Interlocked.Increment(ref _physicalInputEpoch);
             long now = HumanClock.ElapsedMilliseconds;
             bool was = Handoff.Active;
             Handoff.Enable(_armed && CycleLit && !_exited, now);
@@ -2032,15 +2100,20 @@ namespace DshComputerUse.Worker
             lock (HandoffPublishLock)
             {
                 string phase = Handoff.Phase;
-                if (phase == _publishedHandoff) return;
+                long epoch = InputEpoch;
+                if (phase == _publishedHandoff && epoch == _publishedInputEpoch) return;
+                bool changed = phase != _publishedHandoff;
                 _publishedHandoff = phase;
+                _publishedInputEpoch = epoch;
+                if (!ControlListenersEnabled && !CycleLit && phase == "idle") return;
                 if (phase != "idle") Glow.HumanYield();
-                Program.AuditRecord("HUMAN-HANDOFF", "phase=" + phase + "; revision=" + HumanRevision + "; kind=" + Handoff.LastKind);
+                if (changed) Program.AuditRecord("HUMAN-HANDOFF", "phase=" + phase + "; revision=" + HumanRevision + "; kind=" + Handoff.LastKind);
                 Notify("handoff", phase);
             }
         }
         static void MonitorHuman()
         {
+            if (!ControlListenersEnabled) return;
             SyncExitedFromFile();
             long now = HumanClock.ElapsedMilliseconds;
             Handoff.Enable(_armed && CycleLit && !_exited, now);
@@ -2822,8 +2895,8 @@ namespace DshComputerUse.Worker
         static readonly object OutLock = new object();   // responses AND unsolicited events share stdout
         static readonly DateTime Epoch = new DateTime(1970, 1, 1);
 
-        // Position correction is diagnostic only. Physical input immediately yields;
-        // no distance, reversal, wheel-count or screen-corner rule latches a pause.
+        // Position correction is diagnostic only. Deliberate physical takeover during
+        // actual input yields; incidental mouse jitter and idle use do not pause the task.
         static int _positionCorrections;
         static string _dpiNote = "unset";
         static readonly HashSet<string> ObsOps = new HashSet<string>
@@ -2841,16 +2914,44 @@ namespace DshComputerUse.Worker
             "activate", "windowOp", "calibrate", "selectRange", "uiaAct"
         };
         static readonly object InputLock = new object();
+        static readonly DesktopOwnershipLease DesktopLease = new DesktopOwnershipLease(DesktopOwnershipLease.DefaultPath());
+        static bool _releaseDesktopPending;
+        public static bool DesktopOwned { get { return DesktopLease.Owned; } }
+        public static bool TryClaimDesktop(string owner)
+        { string occupiedBy; return DesktopLease.TryAcquire(owner, out occupiedBy); }
+        static void EnsureDesktopOwnership(string op)
+        {
+            if (op == "ping" || op == "echoargs" || op == "keyClass" || op == "stuckPlan" || op == "probe") return;
+            string occupiedBy;
+            if (!DesktopLease.TryAcquire("native cycle: " + op, out occupiedBy))
+            {
+                var error = InputInterrupted("MACHINE_OWNED", "Another agent owns this desktop's computer-use cycle (" + occupiedBy + "). This operation was not dispatched; keep the task pending until that cycle releases control.");
+                error.Data["outcome"] = "not-dispatched"; throw error;
+            }
+        }
+        public static void ReleaseDesktopOwnership()
+        {
+            lock (InputLock)
+            {
+                _releaseDesktopPending = true;
+                if (!_operationLive && OwnedUps.Count == 0) { DesktopLease.Dispose(); _releaseDesktopPending = false; }
+            }
+        }
         static readonly Dictionary<string, INPUT> OwnedUps = new Dictionary<string, INPUT>();
         static readonly ConcurrentDictionary<int, bool> CancelledRequests = new ConcurrentDictionary<int, bool>();
         static long _cancelGeneration;
+        public static void InvalidateActiveInput() { Interlocked.Increment(ref _cancelGeneration); }
         static long _operationCancelGeneration, _operationHumanRevision;
         static volatile bool _operationLive, _operationDispatched;
+        static bool _operationActing;
+        static string _lastAnnouncedSeries;
+        static long _announcedHumanRevision, _announcedInputEpoch, _preparedInputEpoch;
         static volatile int _activeRequestId, _lastCompletedRequestId;
         // The seam is internal to the compiled program; no tool can replace it.
         internal static Func<INPUT[], uint> InputSender = delegate(INPUT[] inputs) {
             return Native.SendInput((uint)inputs.Length, inputs, InputCbSize);
         };
+        internal static Func<IntPtr> PreparationForeground = delegate { return Native.GetForegroundWindow(); };
 
         static Exception InputInterrupted(string code, string message)
         {
@@ -2866,11 +2967,74 @@ namespace DshComputerUse.Worker
             if (_operationLive && _operationCancelGeneration != Interlocked.Read(ref _cancelGeneration))
                 throw InputInterrupted("INPUT_CANCELLED", "the owning tool was cancelled; no further input will be sent.");
             if (Panic.HumanActive || (_operationLive && _operationHumanRevision != Panic.HumanRevision))
-                throw InputInterrupted("HUMAN_YIELD", "Physical input owns the desktop. Wait for three quiet seconds, then inspect the current target before continuing; never replay a partial write.");
+                throw InputInterrupted("HUMAN_YIELD", "Temporary interruption only: the user currently owns input and the original task remains active. Wait locally until control returns after three quiet seconds, then immediately obtain fresh target evidence and continue the remaining authorized task. Do not abandon, cancel or declare completion; never replay a partial write.");
         }
         static void MarkMutation()
         {
-            Panic.Check("actuation"); CheckHumanInput(); _operationDispatched = true;
+            Panic.Check("actuation"); BeginActuation(); CheckHumanInput(); _operationDispatched = true;
+        }
+        static void BeginActuation()
+        {
+            if (_operationActing) return;
+            if (_operationLive && _preparedInputEpoch != Panic.InputEpoch)
+                throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop before input began. No action was dispatched. Obtain fresh target evidence and continue the original task; this is a temporary checkpoint, not cancellation.");
+            _operationActing = true;
+            Panic.BeginActuation();
+            CheckHumanInput();
+            if (_operationLive && _preparedInputEpoch != Panic.InputEpoch)
+                throw InputInterrupted("HUMAN_REOBSERVE", "The desktop changed at the input boundary. No action was dispatched. Read the current target and continue the pending task.");
+        }
+        static void EndActuationForReadback()
+        {
+            lock (InputLock)
+            {
+                // Nested selection/chord helpers may still own a modifier or button.
+                // Keep their sequence protected until every accepted down is released.
+                if (OwnedUps.Count != 0) return;
+                _operationActing = false;
+                Panic.EndActuation();
+            }
+        }
+        static void PrepareActuation(string op, Dictionary<string, object> request)
+        {
+            object raw;
+            var args = request.TryGetValue("args", out raw) ? raw as Dictionary<string, object> : null;
+            string series = args == null ? "" : GetS(args, "__inputSeries", "");
+            if (!string.IsNullOrEmpty(series) && series == _lastAnnouncedSeries &&
+                _announcedHumanRevision == Panic.HumanRevision)
+            {
+                if (_announcedInputEpoch != Panic.InputEpoch)
+                    throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop between batch steps. Obtain fresh target evidence and continue the remaining task without replaying completed input.");
+                _preparedInputEpoch = Panic.InputEpoch; return;
+            }
+            Panic.Check(op); CheckHumanInput();
+            long inputEpoch = Panic.InputEpoch;
+            IntPtr foreground = PreparationForeground();
+            Glow.Prepare(true);
+            try
+            {
+                var startup = Stopwatch.StartNew();
+                while (!Glow.PreparationVisible)
+                {
+                    Panic.Check(op); CheckHumanInput();
+                    if (startup.ElapsedMilliseconds >= 5000)
+                        throw InputInterrupted("PREPARATION_UNAVAILABLE", "The preparation notice could not be displayed; no input was dispatched.");
+                    Thread.Sleep(10);
+                }
+                var timer = Stopwatch.StartNew();
+                while (timer.ElapsedMilliseconds < Glow.PreparationMs)
+                {
+                    Panic.Check(op); CheckHumanInput();
+                    int remaining = Glow.PreparationMs - (int)timer.ElapsedMilliseconds;
+                    if (remaining > 0) Thread.Sleep(Math.Min(25, remaining));
+                }
+                Panic.Check(op); CheckHumanInput();
+                if (inputEpoch != Panic.InputEpoch || foreground != PreparationForeground())
+                    throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop during the preparation cue. No action was dispatched. Preserve the task, obtain fresh target evidence, and continue the authorized task immediately; this is not cancellation or abandonment.");
+                _lastAnnouncedSeries = series; _announcedHumanRevision = Panic.HumanRevision;
+                _announcedInputEpoch = _preparedInputEpoch = inputEpoch;
+            }
+            finally { Glow.Prepare(false); }
         }
         public static bool CancelInput(int requestId)
         {
@@ -2912,6 +3076,7 @@ namespace DshComputerUse.Worker
                 // cross-process STOP may hold SyncLock while releasing owned input.
                 if (Panic.Engaged || Panic.Stopped || Panic.Exited)
                     throw InputInterrupted("ABORTED", "manual pause or exit owns the desktop; no further input will be sent.");
+                BeginActuation();
                 if (inputs.Length == 1)
                 {
                     bool isUp; INPUT release; int physical;
@@ -3218,7 +3383,11 @@ namespace DshComputerUse.Worker
         {
             var request = Json.Deserialize<Dictionary<string, object>>(line);
             string op = GetS(request, "op", "");
-            bool input = ActOps.Contains(op) || op == "shiftClick" || op == "selftest";
+            object rawArgs;
+            var args = request.TryGetValue("args", out rawArgs) ? rawArgs as Dictionary<string, object> : null;
+            bool input = ActOps.Contains(op) || op == "shiftClick" || op == "selftest" ||
+                (op == "focus" && args != null && GetB(args, "refocus", false));
+            EnsureDesktopOwnership(op);
             int requestId = GetI(request, "id", 0);
             bool ignored;
             _activeRequestId = requestId;
@@ -3240,8 +3409,13 @@ namespace DshComputerUse.Worker
             }
             finally
             {
-                if (input) ReleaseOwnedInputs();
+                if (input)
+                {
+                    try { ReleaseOwnedInputs(); }
+                    finally { _operationActing = false; Panic.EndActuation(); Glow.Prepare(false); }
+                }
                 _operationLive = false; _activeRequestId = 0;
+                if (_releaseDesktopPending) ReleaseDesktopOwnership();
                 _lastCompletedRequestId = Math.Max(_lastCompletedRequestId, requestId);
                 CancelledRequests.TryRemove(requestId, out ignored);
             }
@@ -3257,6 +3431,7 @@ namespace DshComputerUse.Worker
             Dictionary<string, object> a = (req.TryGetValue("args", out av) && av is Dictionary<string, object>) ? (Dictionary<string, object>)av : new Dictionary<string, object>();
             bool cycleOp = GetB(a, "__cycle", false) && op != null &&
                 op != "abort" && op != "ping" && op != "echoargs" &&
+                op != "probe" && op != "keyClass" && op != "stuckPlan" &&
                 op != "indicator" && op != "calm" && op != "panic" && op != "resume" && op != "recover" &&
                 // ... AND THE CYCLE HAS TO BE ALIVE TO BE LIT (2026-09-13). "Lit by any call" is how
                 // a DEAD cycle came back as a cyan breathing border: after Ctrl+Alt+Q ended the
@@ -3280,6 +3455,10 @@ namespace DshComputerUse.Worker
             // Emergency stop gates EVERY op that could drive the machine; a DRY RUN drives nothing
             // and is therefore treated as the observation it really is.
             Panic.CheckOp((op == "click" || op == "move" || op == "type" || op == "key") && GetB(a, "dryRun", false) ? "probe" : op);
+
+            if ((ActOps.Contains(op) || op == "shiftClick" || op == "selftest" ||
+                (op == "focus" && GetB(a, "refocus", false))) && !GetB(a, "dryRun", false))
+                PrepareActuation(op, req);
 
             switch (op)
             {
@@ -3399,8 +3578,9 @@ namespace DshComputerUse.Worker
                     pr["glow"] = Dict(
                         "want", Glow.Want,
                         // Is a real injection sequence in flight RIGHT NOW? The ACTING light is driven
-                        // by this as well as by its short tail, so the state is reported as a fact.
+                        // by the actual action scope, so both are reported as observable facts.
                         "injecting", Glow.Injecting,
+                        "acting", Glow.Acting, "preparing", Glow.Preparing, "preparationMs", Glow.PreparationMs,
                         "title", Glow.ShownTitle == null ? "" : Glow.ShownTitle);
                     // EVENTS THE OS ACTUALLY INSERTED (not the plan): 0 after a plain pause with
                     // nothing held is the observable form of "no ghost right-click / Alt menu".
@@ -3417,9 +3597,9 @@ namespace DshComputerUse.Worker
                 // like the emergency brake. Called when the agent's turn ends, so a lingering blue
                 // border can never claim the machine is still being driven after control stopped.
                 case "calm":
-                    Panic.CycleLit = false;  // the turn is over: the cycle is dead (R2)
-                    Panic.Disarm();          // the human monitors stop WITH it
-                    Glow.Kill(); return Ok(Dict("indicator", "off", "hard", true));
+                    if (!Panic.TryEndCycle())
+                        return Ok(Dict("released", false, "reason", "A manual pause or question still owns this cycle; its brake and ownership were preserved."));
+                    return Ok(Dict("released", true, "indicator", "off", "hard", true));
                 case "focus": return Ok(FocusReport(a, GetB(a, "refocus", false)));
                 case "frameSig": return Ok(FrameSigOp(a));
                 // `source=agent` (not "unknown"): this op exists ONLY for the agent's own `stop`, and a
@@ -3706,6 +3886,7 @@ namespace DshComputerUse.Worker
             // ACTING light on it, and clear the mark in a finally so the blue can never outlive the
             // input it is describing.
             CheckHumanInput();
+            BeginActuation();
             Glow.InputBegin();
             try
             {
@@ -3921,6 +4102,7 @@ namespace DshComputerUse.Worker
                 SendMouse(down, 0, 0, 0); Thread.Sleep(30); SendMouse(up, 0, 0, 0);
                 if (i < clicks - 1) Thread.Sleep(gap);
             }
+            EndActuationForReadback();
             double changedPct = -1;
             if (verify && before != null)
             {
@@ -4047,16 +4229,8 @@ namespace DshComputerUse.Worker
             {
                 _lastRefocus = EnsureTargetForeground();
             }
-            // Stays lit across the agent's thinking gaps: the glow means "the agent is
-            // driving this machine right now", not "a click happened a moment ago".
-            // 1200 ms, not 30000 (2026-09-13). The hold is how long the DEEP BLUE "acting" border
-            // stays after an input injection — and 30 s meant a 50 ms click painted half a minute of
-            // "I am driving the machine", during which the cyan "thinking" state could never show
-            // (the render loop shows acting in preference to thinking). The human watched the blue
-            // light sit still through a whole page read and asked, correctly, why. Blue now means
-            // "input, right now, plus a short tail"; cyan is what a reading agent looks like.
-            int hold = GetI(a, "indicatorMs", 1200);
-            Glow.Touch(hold);
+            // Validation and focus readback do not own input. The first real mutation
+            // or SendInput opens the actual scope and its deep-blue cue.
         }
 
         static Dictionary<string, object> Indicator(Dictionary<string, object> a)
@@ -4665,6 +4839,7 @@ namespace DshComputerUse.Worker
             KeyboardChord.Run(vks, SendKey, ReleaseKeyForCleanup,
                 delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
                 delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); });
+            EndActuationForReadback();
             Thread.Sleep(30);
             Dictionary<string, object> keyOut = Dict("combo", combo, "focus", focus);
             if (_lastRefocus != null) keyOut["refocused"] = _lastRefocus;
@@ -5550,8 +5725,8 @@ namespace DshComputerUse.Worker
         {
             CheckHumanInput();
             if (h == IntPtr.Zero || !Native.IsWindow(h)) return null;
-            if (!Native.IsWindowVisible(h)) Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
-            if (Native.IsIconic(h)) Native.ShowWindow(h, Native.SW_RESTORE);
+            if (!Native.IsWindowVisible(h)) { MarkMutation(); Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE); }
+            if (Native.IsIconic(h)) { MarkMutation(); Native.ShowWindow(h, Native.SW_RESTORE); }
             Thread.Sleep(40);
             CheckHumanInput();
             if (IsForeground(h)) return "already-foreground";
@@ -6018,8 +6193,7 @@ namespace DshComputerUse.Worker
                     ", automationId=" + (autoId ?? "-") + ", role=" + (role ?? "-") +
                     ", index=" + index + ") among " + seen + " elements");
 
-            // This changes the UI, so the human gets the cue — but there is no pointer to
-            // fight, so the quiet gate is skipped on purpose.
+            // A UIA mutation shares the same actual-action boundary and takeover checks.
             // A selector WITHOUT hwnd searches the whole desktop, so there the element that
             // actually matched decides the victim - and a host control is never driven through
             // its automation pattern either.
@@ -6028,11 +6202,9 @@ namespace DshComputerUse.Worker
             HostGuardPid(foundPid, "uiaAct");
             Panic.Check("uiaAct");
             CheckHumanInput();
-            Glow.Touch(GetI(a, "indicatorMs", 1200));   // same reason: see AgentActing
 
             object pat = null;
             string via = null;
-            MarkMutation();
             switch (action)
             {
                 case "invoke":
@@ -6064,6 +6236,7 @@ namespace DshComputerUse.Worker
                 default:
                     throw new Exception("action must be invoke|select|expand|collapse|toggle|setValue|focus|scrollIntoView");
             }
+            EndActuationForReadback();
             if (via == null)
                 throw new Exception("element does not support '" + action + "': " + ElemDict(found)["name"]);
 
@@ -6371,5 +6544,81 @@ namespace DshComputerUse.Worker
         }
         static Dictionary<string, object> Err(string msg) { return Dict("ok", false, "error", msg); }
         static void WriteLine(string s) { lock (OutLock) { Console.Out.WriteLine(s); Console.Out.Flush(); } }
+    }
+}
+
+// Integrated verbatim into worker.cs by the native worker build. Tests compile this
+// production class without starting hooks, overlays or desktop input.
+namespace DshComputerUse.Worker
+{
+    public sealed class DesktopOwnershipLease : System.IDisposable
+    {
+        readonly object sync = new object();
+        readonly string path;
+        System.IO.FileStream stream;
+        public DesktopOwnershipLease(string file) { path = file; }
+        public bool Owned { get { lock (sync) { return stream != null; } } }
+        public static string DefaultPath()
+        {
+            string isolated = System.Environment.GetEnvironmentVariable("DSH_COMPUTER_USE_OWNER_FILE");
+            if (!string.IsNullOrEmpty(isolated)) return isolated;
+            return System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "dsh-computer-use", "desktop-" + System.Diagnostics.Process.GetCurrentProcess().SessionId + ".owner");
+        }
+        public bool TryAcquire(string owner, out string occupiedBy)
+        {
+            lock (sync)
+            {
+                occupiedBy = "";
+                if (stream != null) return true;
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)));
+                System.IO.FileStream opened;
+                try
+                {
+                    // A persistent handle is the lock. Never delete the pathname, use a
+                    // timer, or steal based on PID: Windows releases it when the process dies.
+                    opened = new System.IO.FileStream(path, System.IO.FileMode.OpenOrCreate,
+                        System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read);
+                }
+                catch (System.IO.IOException error)
+                {
+                    int code = System.Runtime.InteropServices.Marshal.GetHRForException(error) & 0xFFFF;
+                    if (code != 32 && code != 33) throw;
+                    occupiedBy = ReadOwner();
+                    return false;
+                }
+                try
+                {
+                    byte[] record = System.Text.Encoding.UTF8.GetBytes("pid=" + System.Diagnostics.Process.GetCurrentProcess().Id +
+                        "\nowner=" + (owner ?? "worker").Replace("\r", " ").Replace("\n", " ") + "\n");
+                    opened.SetLength(0); opened.Write(record, 0, record.Length); opened.Flush();
+                    stream = opened;
+                    return true;
+                }
+                catch { opened.Dispose(); throw; }
+            }
+        }
+        string ReadOwner()
+        {
+            try
+            {
+                using (var input = new System.IO.FileStream(path, System.IO.FileMode.Open,
+                    System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+                using (var reader = new System.IO.StreamReader(input))
+                {
+                    char[] buffer = new char[512];
+                    return new string(buffer, 0, reader.Read(buffer, 0, buffer.Length)).Trim();
+                }
+            }
+            catch { return "another live computer-use worker"; }
+        }
+        public void Dispose()
+        {
+            lock (sync)
+            {
+                if (stream == null) return;
+                stream.Dispose(); stream = null;
+            }
+        }
     }
 }

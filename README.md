@@ -12,6 +12,10 @@ English | [中文](README.zh.md)
 
 Windows only (`os: win32`). Requires Node.js ≥ 22 and the .NET Framework 4.x that Windows ships with.
 
+**1.3.0 desktop lifecycle update:** the deep-blue cue now matches actual actuation, with a 16-pixel pointer jitter allowance and a visible 1.5-second purple notice before input. Human takeover returns a required continuation checkpoint. Session/agent ownership and a native cross-process lease allow only one controller. Call `computer_ctrl {action:"release"}` after desktop work and verification; the conversation continues and later desktop work can open a fresh cycle in the same turn. Normal completion releases automatically without an exit question card. Explicit pauses, exits and pending questions remain authoritative.
+
+The indicators use continuous 2-pixel rails with square screen corners and an 8-pixel glow. Normal working states have no floating badges; handoff, pause and preparation use compact top hints. Content interiors remain transparent. The visual revision preserves state logic and animation timing.
+
 **1.2.3 automatic fix:** normal installation/update now installs the approval-attribution correction for computer-use calls on affected DSH hosts. No manual host patch is required for those calls. Host approvals and audit remain authoritative; follow the host's restart indication after updating an already loaded plugin. See [1.2.3](docs/RELEASE-1.2.3.md).
 
 **1.2.1 attention fix:** fixes a missing crypto import that prevented 1.2.0's native `probe` and `raise` requests from reaching the helper. Updating from 1.2.0 is required for this runtime fix; reinstalling 1.2.0 does not fix it. New releases are staged on npm's `next` tag before promotion to `latest`; the market's normal update follows `latest`. See [1.2.1 validation and release status](docs/RELEASE-1.2.1.md).
@@ -137,7 +141,7 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 
 ## Safety model
 
-- **Shared input** — physical typing, scrolling, mouse movement and mouse buttons immediately yield control. Continued input or a held key/button for 2 seconds enters automatic waiting. After all keys/buttons are released and 3 seconds pass without physical input, the agent takes a fresh observation and continues the authorized task. A brief touch also waits for the 3-second quiet interval. A gentle pale-yellow edge gradient shows human ownership.
+- **Shared input** — ordinary user activity is allowed while the agent is thinking, observing or preparing. During actual actuation, typing, scrolling and buttons yield immediately; pointer movement has a 16-pixel displacement tolerance. Continued input or a held key/button for 2 seconds enters automatic waiting. After release and 3 quiet seconds, the agent must inspect the current target and continue the original task, without blindly replaying partial writes. A gentle pale-yellow edge gradient shows human ownership.
 - **Manual pause** — only physical `Ctrl+Esc` raises a persistent input brake; `Ctrl+Alt+R` resumes. Ordinary Esc, typing, scrolling, pointer distance/frequency and the screen corner do not create this pause. Explicit question/diagnostic holds remain separate.
 - **Exit** — `Ctrl+Alt+Q` ends the session: the overlay goes away, its listeners are torn down, and
   further actuation is refused until a later turn opens a new one.

@@ -1,3 +1,13 @@
+# 1.3.0 — desktop lifecycle and indicators
+
+- Allow ordinary user input outside actual actuation; align the deep-blue indicator with that boundary and remove its timed tail. Tolerate 16 pixels of pointer jitter during actuation.
+- Show a purple 1.5-second notice before a new input call or coherent batch. Start the full countdown after the first visible frame; cancel on a stop and refresh evidence if the user changes the desktop.
+- Return human handoff as a required continuation checkpoint with partial outcomes and batch resume positions, so the authorized task remains active.
+- Isolate live cycles by session/agent/turn and by an exclusive native operating-system handle across workers. Recheck ownership after waits; serialize MCP calls.
+- Add voluntary computer_ctrl release / cu_release. End desktop work while the chat continues, permit subsequent same-turn acquisition, and automatically release on normal completion without an exit-question menu.
+- Preserve explicit manual pauses, questions, cancellation and Q termination. Retain the 1.2.3 approval-attribution compatibility fix.
+- Restyle indicators as continuous square-corner 2-pixel rails with an 8-pixel glow. Keep ordinary states free of floating badges, use compact top hints for handoff/pause/preparation, and request overlay capture exclusion on supported Windows builds. Control state and animation timing are unchanged by this visual revision.
+
 # 1.2.3 — automatic approval attribution compatibility
 
 - Install the approval attribution correction automatically when the plugin loads. Normal package installation/update now covers computer-use calls on affected hosts, including batches.

@@ -7,6 +7,8 @@ import assert from 'node:assert/strict'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { ComputerUse } from '../lib/core/index.js'
 import { createCycleGate, agentKeyOf } from '../lib/cycle.js'
+import { createCycleLifecycle } from '../lib/cycle-lifecycle.js'
+import { createTerminalCleanup } from '../lib/terminal-cleanup.js'
 import { registerTools } from '../lib/tools.js'
 import { recoveryProblem } from '../lib/recovery.js'
 import { installToolExposure, ACTIVATION_TOOL } from '../lib/exposure.js'
@@ -77,8 +79,8 @@ function harness(legacyTimeout) {
   // that the module may never learn where it lives would be a rule about the harness, not about the
   // product. Rewriting keeps `new URL(..., import.meta.url)` resolving exactly as it does in production.
   const prelude = source.replace(/^import .+$/gm, '').replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify(SOURCE_URL.href))
-  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'appendAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', prelude + '\nreturn apply;')(
-    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', () => {}, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL)
+  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'appendAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createTerminalCleanup', 'installApprovalAttribution', prelude + '\nreturn apply;')(
+    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', () => {}, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL, createCycleLifecycle, createTerminalCleanup, () => {})
   // This fixture tests lifecycle ordering in the supported legacy registration mode;
   // actual scoped activation is tested separately against the host ToolRuntime.
   apply(ctx, { enabled: true, progressiveTools: false, automationMode: 'standard', calmAfterMs: legacyTimeout, maxActionsPerMinute: 60 })
@@ -132,6 +134,7 @@ for (const legacy of [600000, 1, 0]) {
   h.advance(86400000); assert.equal(h.gate.state(), 'open')
   h.handlers.get('session/event')('A', { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   h.handlers.get('agent/status')({ agent: h.agent, status: 'idle' })
+  await settle()
   assert.equal(h.gate.state(), 'ended'); assert.equal(h.state.lit, false)
 }
 // Q during a long approval wait is still terminal and a late R must not wake the owner.
@@ -146,8 +149,8 @@ for (const legacy of [600000, 1, 0]) {
   let cancellations = 0; h.cu.cancelInputs = () => { cancellations++ }
   h.handlers.get('session/event')('A', { type: 'turn/end', data: { reason: { kind: 'aborted' } } })
   h.handlers.get('agent/status')({ agent: h.agent, status: 'idle' })
-  assert.equal(h.gate.state(), 'ended'); assert.equal(cancellations, 1)
-  await settle(); assert.equal(h.cu.stopped, false)
+  assert.equal(h.gate.state(), 'releasing'); assert.equal(cancellations, 1)
+  await settle(); assert.equal(h.gate.state(), 'ended'); assert.equal(h.cu.stopped, false)
 }
 // Host cancellation must not clear a physical Ctrl+Esc pause that already exists.
 {
@@ -178,6 +181,7 @@ for (const scenario of ['success', 'approval', 'late-approval', 'human-stop', 'Q
   const pending = ctrl({ action: 'recover', pauseId: scenario === 'stale-token' ? 'old' : pause.pauseId })
   if (release) { await settle(); approval(); release() }
   if (scenario === 'foreign-owner') await assert.rejects(pending, /owned by another/)
+  else if (scenario === 'Q') await assert.rejects(pending, error => error.code === 'COMPUTER_OWNER_CHANGED')
   else {
     const result = await pending
     assert.equal(result.recovered, scenario === 'success', scenario)

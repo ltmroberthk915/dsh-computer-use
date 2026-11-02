@@ -17,18 +17,18 @@
 //                            sandraschi's approve_automation pattern
 //   DSH_CU_DRY_RUN=1         actuations are simulated and logged only
 
-// resolve the core: the plugin ships it inlined at lib/core, one level up from this server.
+// resolve the core package across layouts: installed dependency, sibling in
+// node_modules (@dsh scope), or repo monorepo checkout (packages/*)
 async function loadCore () {
-  const candidates = [
-    '../../lib/core/index.js',
-  ]
+  const candidates = ['../../lib/core/index.js']
   let lastErr
   for (const c of candidates) {
     try { return await import(c) } catch (e) { lastErr = e }
   }
-  throw new Error(`cannot locate the computer-use core (tried ${candidates.join(', ')}): ${lastErr && lastErr.message}`)
+  throw new Error(`cannot locate @dsh/computer-use-core (tried ${candidates.join(', ')}): ${lastErr && lastErr.message}`)
 }
-const { ComputerUse } = await loadCore()
+import { createToolQueue, continuationResult } from './execution.js'
+const { ComputerUse, humanContinuation } = await loadCore()
 
 const PROTOCOL_VERSION = '2025-06-18'
 const SERVER_INFO = { name: 'dsh-computer-use', version: '0.1.0' }
@@ -41,6 +41,8 @@ if (process.env.DSH_CU_KILL === '1') {
 const allowInputDirect = process.env.DSH_CU_ALLOW_INPUT === '1'
 const dryRun = process.env.DSH_CU_DRY_RUN === '1'
 const cu = new ComputerUse({ dryRun })
+const enqueueTool = createToolQueue()
+const requests = new Map()
 let approvalUntil = 0
 
 // ---------------- tool definitions ----------------
@@ -136,6 +138,9 @@ const TOOLS = [
     },
   },
   // ---- mutation tools ----
+  tool('cu_release', 'Release computer-use ownership as soon as desktop work and verification are finished, even while the conversation continues. Preserves a manual pause or pending question. Later desktop work can start a fresh cycle.', {
+    type: 'object', additionalProperties: false, properties: {},
+  }, false),
   tool('cu_approve', 'Open a mutation approval window (human-in-the-loop gate). minutes ≤ 10.', {
     type: 'object', additionalProperties: false, required: ['minutes'],
     properties: { minutes: { type: 'integer', minimum: 1, maximum: 10 } },
@@ -197,7 +202,7 @@ const TOOLS = [
       hwnd: { type: 'integer' }, titleContains: { type: 'string' },
     },
   }),
-  tool('cu_batch', 'Execute several computer actions in one call, serially, first failure stops (Anthropic batch semantics). Every action that did not run returns "Not executed: an earlier computer action in this turn failed." End a batch with a screenshot when you need to verify.',
+  tool('cu_batch', 'Execute computer actions serially. A failure stops later steps. A human handoff returns a continuing-task checkpoint: inspect the interrupted effect and resume remaining work. End with a screenshot when verification needs one.',
     {
       type: 'object', additionalProperties: false, required: ['actions'],
       properties: {
@@ -234,6 +239,7 @@ const HANDLERS = {
   cu_cursor: () => cu.call('cursor', {}),
   cu_clipboard_read: () => cu.clipRead(),
   cu_wait: (a) => cu.waitForIdle(a),
+  cu_release: async () => ({ ...await cu.calm(), conversationContinues: true }),
   cu_approve: async (a) => {
     const mins = Math.min(10, Math.max(1, a.minutes || 1))
     approvalUntil = Date.now() + mins * 60_000
@@ -251,12 +257,20 @@ const HANDLERS = {
   cu_batch: async (a) => {
     const out = []
     let failed = false
+    let checkpoint = null
     for (const step of a.actions) {
-      if (failed) { out.push({ tool: step.tool, ok: false, error: 'Not executed: an earlier computer action in this turn failed.' }); continue }
+      if (failed) { out.push({ tool: step.tool, ok: false, outcome: 'not-dispatched',
+        error: checkpoint ? 'Deferred until fresh target evidence; continue the original task.' : 'Not executed: an earlier computer action in this turn failed.' }); continue }
       try { out.push({ tool: step.tool, ok: true, result: await runTool(step.tool, step.args || {}) }) }
-      catch (e) { failed = true; out.push({ tool: step.tool, ok: false, error: String(e.message || e) }) }
+      catch (e) {
+        failed = true
+        const interrupted = continuationResult(e, humanContinuation)
+        if (interrupted) checkpoint = { ...interrupted, resumeFromActionIndex: out.length }
+        out.push({ tool: step.tool, ok: false, error: String(e.message || e),
+          ...(interrupted || { outcome: e.outcome || 'unknown' }) })
+      }
     }
-    return { actions: out }
+    return { actions: out, ...(checkpoint || {}) }
   },
 }
 
@@ -299,6 +313,10 @@ function send (obj) { process.stdout.write(JSON.stringify(obj) + '\n') }
 async function handleLine (line) {
   let msg
   try { msg = JSON.parse(line) } catch { return }
+  if (msg.method === 'notifications/cancelled') {
+    requests.get(msg.params?.requestId)?.abort()
+    return
+  }
   if (msg.id === undefined) return // notification (initialized, cancelled) — no reply
   try {
     switch (msg.method) {
@@ -314,14 +332,19 @@ async function handleLine (line) {
       case 'tools/call': {
         const name = msg.params && msg.params.name
         const args = (msg.params && msg.params.arguments) || {}
+        const controller = new AbortController()
+        requests.set(msg.id, controller)
         try {
-          const { value, image } = await runTool(name, args)
+          const { value, image } = await enqueueTool(() =>
+            cu.withInputContext({ signal: controller.signal }, () => runTool(name, args)), controller.signal)
           const content = [{ type: 'text', text: JSON.stringify(value, null, 1).slice(0, 60_000) }]
           if (image) content.push({ type: 'image', data: image.toString('base64'), mimeType: 'image/jpeg' })
           send({ jsonrpc: '2.0', id: msg.id, result: { content, isError: false } })
         } catch (e) {
-          send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: String(e.message || e) }], isError: true } })
-        }
+          const checkpoint = continuationResult(e, humanContinuation)
+          send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text',
+            text: checkpoint ? JSON.stringify(checkpoint) : String(e.message || e) }], isError: !checkpoint } })
+        } finally { requests.delete(msg.id) }
         break
       }
       default:

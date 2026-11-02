@@ -96,8 +96,8 @@ const CHECKS = [
     // ending could set _stoppedMode again a moment after the teardown had cleared it.
     name: 'ask is its own visual state (want=5 above stopped=4) and an EXIT outranks both',
     file: 'worker',
-    re: /if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(flashOn \? 2 : committed\)\)\);/,
-    brk: [/if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(flashOn \? 2 : committed\)\)\);/,
+    re: /if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting \? 1 : \(flashOn \? 2 : committed\)\)\)\)\);/,
+    brk: [/if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting \? 1 : \(flashOn \? 2 : committed\)\)\)\)\);/,
       'if (Panic.Exited) return 0;\n            return _stoppedMode ? 4 : (flashOn ? 2 : committed);'],
   },
   {

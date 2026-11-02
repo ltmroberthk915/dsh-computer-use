@@ -5,7 +5,7 @@
 The human's own words are the spec here; this section is what they mean.
 
 - **A cycle is opened by the PLUGIN, on the first REAL computer-use call of a turn** — the call that
-  actually reaches the worker, via `ensureCycle` (ONE decision per session+agent+turn; a turn boundary
+  actually reaches the worker, via `ensureCycle` (one owner per live cycle; a turn boundary
   by itself opens nothing and resets nothing for another session). It is opened for ANY agent op,
   **observation included**: a call that only reads the screen is still a live cycle the human may
   stop. Every op the plugin sends carries the `__cycle` signature, and **nothing else can open a
@@ -15,15 +15,23 @@ The human's own words are the spec here; this section is what they mean.
   live, the Ctrl+Esc emergency listener and physical-input cooperation listener are live with it —
   for the WHOLE cycle, not just for a driving op. **They die with the cycle**: no listener survives
   it ("Computer use 周期结束之后, 所有跟 computer use 相关的监听, 全部都要终结").
-- **A pause NEVER ends the cycle.** The cycle stays live while paused; only Ctrl+Alt+Q, or the turn
-  ending (`calm`), kills it.
+- **A pause NEVER ends the cycle.** The cycle stays live while paused. Normal desktop completion can release an unpaused cycle before the chat turn ends; an explicit Q remains a terminal exit for that turn.
+
+## Release as soon as desktop work is done
+
+Call `computer_ctrl {action:"release"}` immediately after the final desktop action and its verification. This closes the indicator/listeners and releases the exclusive desktop lease while the conversation continues. Subsequent explanation, computation and other tools do not require a computer-use cycle. When new desktop work becomes necessary, a later real tool call can open a new cycle in the same turn.
+
+Release is owner-checked and distinct from `exit`: it does not cancel the conversation or write an EXITED latch. It cannot release an explicit human pause or a pending question. Closure is serialized with ownership acquisition so an old owner's delayed release cannot close a new owner's cycle. An explicit Ctrl+Alt+Q still prevents reopening in that same turn.
+
+Normal owner idle / turn completion releases automatically, without a question card, recommendation timer or a new agent turn. Only a genuine unresolved decision uses `computer_ask`. Keeping the chat alive is not a reason to keep the desktop cycle alive.
 
 ## The states, and what each one looks like
 
 | state | border | title / badge |
 |---|---|---|
 | cycle · thinking (an op is in flight) | pale blue, breathing | `AI 正在操控此电脑 · 监听中` |
-| cycle · acting (input going out) | deep saturated blue, steady | badge `监听中 · Ctrl+Esc 暂停 · Ctrl+Alt+Q 退出` |
+| cycle · acting (input going out) | deep saturated blue, steady | window title `AI 正在操控此电脑 · 监听中`; no persistent badge |
+| preparing an input call / batch | purple notice and progress, 1.5 s | `即将开始操作，请暂停键鼠` |
 | **PAUSED** (Ctrl+Esc) | **red, steady** | `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` |
 | **ASKING** (`computer_ask`) | **red, breathing at TWICE the cyan rate**, no countdown | `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` |
 | **EXITED** (Ctrl+Alt+Q) | **gone — nothing is listening** | ask-card in the chat, EXITED latch on disk |
@@ -35,13 +43,19 @@ appear on a session that has nothing to stop.
 
 ## Automatic cooperation
 
-Physical typing, wheel movement, mouse buttons and mouse movement immediately yield control. After 2 seconds of continued activity or holding a key/button, the state becomes waiting. After all keys/buttons are released and 3 seconds pass without another physical event, the state returns to idle. One brief touch yields for the same 3-second quiet interval but is not mislabeled sustained activity. No mouse distance, reversal count, wheel threshold or top-left position raises a manual brake.
+Ordinary user input while the agent is thinking, observing or showing the pre-operation notice is allowed and does not initiate a handoff. During actual actuation, physical typing, wheel movement and mouse buttons immediately yield control. Mouse movement must exceed a 16-screen-pixel displacement tolerance; repeated sub-threshold jitter is not accumulated into a false takeover. After yielding, 2 seconds of continued activity or holding a key/button changes the state to waiting. After all keys/buttons are released and 3 seconds pass without another physical event, the state returns to idle. No ordinary input raises a manual brake.
+
+Before a new input call or coherent batch, the worker displays a purple 1.5-second notice, “即将开始操作，请暂停键鼠”, with progress. The notice itself does not own input. Pause, exit and cancellation remain effective during the countdown. The deep-blue acting cue and physical takeover detection use the same active boundary; there is no blue tail or minimum display dwell after actuation ends.
 
 The native hook marks ownership before returning to Windows. A separate cleanup path releases only accepted plugin-owned downs; it preserves keys/buttons physically held by the user. Input loops, window refocus, UIA mutation and clipboard writes check ownership. UIA/COM actions already accepted by an application cannot be undone; their result remains unknown and needs a readback.
 
-The core waits for state events locally; it does not call the model or poll screenshots while waiting. The worker's native-call timeout remains short. Driver tools allow a local wait up to their one-hour Host deadline and obey cancellation immediately. On HUMAN_REOBSERVE, automatically read the current target and continue the task. No partial input is silently replayed, and a manual pause/exit is never cleared by this timer.
+The core waits for state events locally; it does not call the model or poll screenshots while waiting. The worker's native-call timeout remains short. Driver tools allow a local wait up to their one-hour Host deadline and obey cancellation immediately. HUMAN_REOBSERVE is returned as a continuation-required checkpoint, not a terminal tool failure: taskStatus is continuing and continuation.required is true. The agent MUST immediately inspect the current target, verify any partial effect, and continue the original authorized task from the unfinished step until complete. A handoff does not authorize a final wrap-up or require a new permission question. A batch retains successful receipts and its resumeFromActionIndex. No partial input is silently replayed, and explicit cancellation/manual pause/exit still takes precedence.
 
 The automatic handoff has a pale-yellow gradient with a 2.8-second smooth breathing period. It is click-through, does not activate a window, and has precedence over acting/thinking/capture cues; manual pause/question/exit states take precedence over it.
+
+## One agent at a time
+
+The plugin reserves the cycle for one session/agent before awaiting startup and rechecks ownership before dispatch. A native operating-system-backed exclusive lease excludes other worker processes for the entire live cycle, including thinking, pre-operation warning, temporary human handoff and manual pause. A peer cannot acquire it by waiting out a timer or release another owner's lease. Normal cycle completion releases it; process death releases the operating-system handle. Calls after ownership changes must reacquire with fresh target evidence. The MCP transport also serializes complete calls, so a second call cannot insert actions into a batch or a handoff wait.
 
 ## Who may release what (the asymmetry is the point)
 
@@ -161,18 +175,15 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 
 | light | meaning |
 |---|---|
-| **cyan, breathing (2.5 s), ~52 px — the OUTER ring** | the agent is engaged/thinking; it has not touched the machine yet |
-| **deep saturated blue, steady, ~37 px — INSIDE the cyan ring** | the agent is actuating right now |
+| **cyan edge light, breathing (2.5 s)** | the agent is engaged/thinking; it has not touched the machine yet |
+| **deep blue edge light, steady** | the agent is actuating right now |
 | pale-yellow gentle gradient (2.8 s) | physical input owns the desktop; continue after 3 s quiet |
 | gold-orange three-beat flash (2 quick pulses → burst → short fade) | a screenshot was just taken |
 | red, steady + title `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` | PAUSED: an actuation was blocked (Ctrl+Esc) until the human re-arms |
 | red, breathing at 2× the cyan rate + title `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` | ASKING: `computer_ask` is waiting for the answer on the chat card — with **no clock at all**; the worker holds the brake and the card holds the wait |
 | **nothing** | idle — cut instantly when the turn ends, never lingering |
 
-The two working states differ in **hue AND width** on purpose (2026-09-12): same-shape,
-same-hue-different-density made "is it doing something?" a guess. Cyan-outer-breathing =
-thinking; steady blue inside it = driving. The thinking state is LATCHED: it stays lit from the
-agent's first computer op until the turn ends — a pause mid-turn must not look like "stopped".
+All state lights use a continuous 2-pixel rail at the rectangular screen edge, with a soft glow contained within 8 pixels. Square outer corners meet without gaps. Normal thinking, acting and capture states do not place badges over application content; their interior pixels are transparent. Handoff and pause use small top-edge status chips, and preparation uses a compact progress notice. Cyan breathing means thinking; steady deep blue means driving. State transitions and animation timing are unchanged by the visual treatment. The thinking state remains latched until the cycle is released or ends.
 
 ## Human in the loop
 

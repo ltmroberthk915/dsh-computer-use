@@ -18,15 +18,19 @@ static class HumanHandoffFixture
     }
     static void Main()
     {
+        // Suppress the render thread in this alternate Main. Production drawing is
+        // tested offscreen; the input sender below never dispatches to Windows.
+        typeof(Glow).GetField("_thread", BindingFlags.Static | BindingFlags.NonPublic)
+            .SetValue(null, new Thread(delegate() { }));
         Case("brief touch immediately yields; exact 3-second idle boundary", delegate {
-            var s = new HumanInputState(); s.Enable(true, 0); s.Record(0, false, false, 10);
+            var s = new HumanInputState(); s.Enable(true, 0); s.SetActing(true, 0); s.Record(0, false, false, 10);
             Check(s.Phase == "yielding", "first movement yields immediately");
             s.Tick(2010); Check(s.Phase == "yielding", "a solitary touch does not fabricate sustained input");
             s.Tick(3009); Check(s.Active, "2999ms does not release");
             s.Tick(3010); Check(!s.Active, "3000ms releases");
         });
         Case("continuous input reaches waiting at exactly 2 seconds", delegate {
-            var s = new HumanInputState(); s.Enable(true, 0);
+            var s = new HumanInputState(); s.Enable(true, 0); s.SetActing(true, 0);
             s.Record(0, false, false, 100); s.Record(0, false, false, 2099);
             Check(s.Phase == "yielding", "1999ms remains initial yield");
             s.Record(0, false, false, 2100); Check(s.Phase == "waiting", "2000ms enters waiting");
@@ -36,7 +40,7 @@ static class HumanHandoffFixture
         });
         Case("held key and mouse button never count as quiet", delegate {
             foreach (int key in new int[] { 1, 2, 4, 5, 6, 0x41, 0xA2, 0xA3, 0x5B }) {
-                var s = new HumanInputState(); s.Enable(true, 0); s.Record(key, true, false, 0);
+                var s = new HumanInputState(); s.Enable(true, 0); s.SetActing(true, 0); s.Record(key, true, false, 0);
                 s.Tick(1999); Check(s.Phase == "yielding", "hold under 2s");
                 s.Tick(2000); Check(s.Phase == "waiting", "held input at 2s");
                 s.Tick(3600000); Check(s.Active, "held input has no idle timeout");
@@ -45,7 +49,7 @@ static class HumanHandoffFixture
             }
         });
         Case("auto repeat and both sides of modifiers retain physical ownership", delegate {
-            var s = new HumanInputState(); s.Enable(true, 0);
+            var s = new HumanInputState(); s.Enable(true, 0); s.SetActing(true, 0);
             s.Record(0xA2, true, false, 0); s.Record(0xA2, true, false, 10); s.Record(0xA3, true, false, 20);
             s.Record(0xA2, false, true, 30); Check(s.Held(0x11), "right Ctrl remains held");
             s.Tick(10000); Check(s.Active, "autorepeat is not a separate release obligation");
@@ -53,22 +57,50 @@ static class HumanHandoffFixture
         });
         Case("no cycle stays idle; opening during a held key yields", delegate {
             var s = new HumanInputState(); s.Record(0x41, true, false, 0); Check(!s.Active, "no cycle no overlay");
-            s.Enable(true, 4000); Check(s.Active, "held key is respected on cycle open");
+            s.Enable(true, 4000); s.SetActing(true, 4000); Check(s.Active, "held key is respected on cycle open");
             s.Enable(false, 5000); Check(!s.Active, "cycle end closes wait");
-            s.Record(0x41, false, true, 6000); s.Enable(true, 7000); Check(s.Active, "recent user event respected");
+            s.Record(0x41, false, true, 6000); s.Enable(true, 7000); s.SetActing(true, 7000); Check(!s.Active, "released idle activity is not replayed at actuation");
             s.Tick(9000); Check(!s.Active, "quiet calculation uses release event");
         });
         Case("timestamps survive signed Windows tick rollover", delegate {
-            long t = (long)int.MaxValue - 2; var s = new HumanInputState(); s.Enable(true, t);
+            long t = (long)int.MaxValue - 2; var s = new HumanInputState(); s.Enable(true, t); s.SetActing(true, t);
             s.Record(0, false, false, t); s.Tick(t + 2999); Check(s.Active, "64-bit monotonic clock");
             s.Tick(t + 3000); Check(!s.Active, "rollover does not wedge");
         });
         Case("separate touches do not merge when the polling tick arrives late", delegate {
-            var s = new HumanInputState(); s.Enable(true, 0);
+            var s = new HumanInputState(); s.Enable(true, 0); s.SetActing(true, 0);
             s.Record(0, false, false, 10); s.Record(0, false, false, 3010);
             Check(s.Phase == "yielding", "a 3-second gap starts a fresh burst without a poll tick");
             s.Record(0, false, false, 5009); Check(s.Phase == "yielding", "new burst under 2s");
             s.Record(0, false, false, 5010); Check(s.Phase == "waiting", "new burst reaches 2s");
+        });
+        Case("passive reading and preparation never take ownership or change takeover revision", delegate {
+            var s = new HumanInputState(); s.Enable(true, 0);
+            s.Record(0, false, false, 10); s.Record(0x41, true, false, 20);
+            s.Record(0x41, false, true, 30); s.Tick(100);
+            Check(!s.Active && s.Revision == 0, "ordinary idle input is free");
+            s.SetActing(true, 100); Check(!s.Active, "released earlier activity does not delay action");
+            s.Record(0, false, false, 110); Check(s.Active && s.Revision == 1, "actual input yields");
+            s.SetActing(false, 120); s.Tick(3109); Check(s.Active, "ending action does not steal human ownership");
+            s.Tick(3110); Check(!s.Active, "quiet returns ownership");
+            s.Record(0x41, true, false, 3200); Check(!s.Active, "held during idle is still allowed");
+            s.SetActing(true, 3210); Check(s.Active, "new action waits for a physically held key");
+        });
+        Case("pointer jitter cancels while deliberate movement reaches the 16 pixel boundary", delegate {
+            var p = new PointerHandoffTolerance(); p.Reset(100, 100);
+            for (int i = 0; i < 100; i++) Check(!p.Record(100 + i % 2, 100, true, true, false, i), "one pixel tremor ignored");
+            Check(!p.Record(115, 100, true, true, false, 100), "15 pixels below threshold");
+            Check(p.Record(116, 100, true, true, false, 101), "16 pixels yields");
+            Check(p.Record(117, 100, true, false, true, 102), "any ongoing human motion renews quiet interval");
+        });
+        Case("agent motion and idle travel cannot amplify physical mouse jitter", delegate {
+            var p = new PointerHandoffTolerance(); p.Reset(0, 0);
+            Check(!p.Record(1500, 800, false, true, false, 10), "own movement does not yield");
+            Check(!p.Record(1501, 800, true, true, false, 11), "own jump is excluded from physical delta");
+            Check(!p.Record(10, 10, true, false, false, 12), "idle travel is unrestricted");
+            Check(!p.Record(11, 10, true, true, false, 13), "idle travel does not carry into new action");
+            Check(!p.Record(20, 10, true, true, false, 500), "separate small movements do not accumulate forever");
+            Check(!p.Record(29, 10, true, true, false, 1000), "burst gap clears old displacement");
         });
         Case("manual control callbacks preserve event order even when one is slow", delegate {
             var entered = new ManualResetEvent(false); var release = new ManualResetEvent(false);
@@ -142,7 +174,7 @@ static class HumanHandoffFixture
         });
         Case("human input between accepted down and next event stops dispatch and releases down", delegate {
             sent.Clear(); state.Enable(false, 5000); Invoke("SendKey", (ushort)0x42, false);
-            state.Enable(true, 5000); state.Record(0, false, false, 5001);
+            state.Enable(true, 5000); state.SetActing(true, 5000); state.Record(0, false, false, 5001);
             bool refused = false;
             try { Invoke("SendKey", (ushort)0x43, false); } catch (Exception e) { refused = (string)e.Data["code"] == "HUMAN_YIELD"; }
             Check(refused, "next event refused immediately"); Check(sent.Count == 1, "no C accepted");

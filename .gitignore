@@ -13,3 +13,5 @@ audit.jsonl
 # Local verification evidence and isolated fixtures are not release source.
 build/handoff-evidence/
 build/coactive-evidence/
+build/preparation-evidence/
+build/glow-visual-evidence/

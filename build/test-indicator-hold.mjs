@@ -1,106 +1,64 @@
-// A light that lies is worse than no light. This guard exists because the deep-blue "acting" border
-// stayed lit for THIRTY SECONDS after a millisecond of input: the default hold was 30000 while the
-// plugin never passes indicatorMs, so blue meant "recently touched", not "touching now" — and it
-// outranks cyan, so a reading agent looked like a driving one. Keep the default a tail, not an era.
+// The dark-blue cue and physical ownership must describe the actual action scope.
+// Timing and offscreen visual behavior are exercised by test-preparation.mjs.
 import fs from 'node:fs'
 import path from 'node:path'
+import assert from 'node:assert/strict'
 import { maskComments } from './mask-comments.mjs'
-const W = path.resolve(import.meta.dirname, '../lib/core/worker.cs')
-const src = fs.readFileSync(W, 'utf8')
-const failures = []
-const cap = 2500
-
-const defaults = [...src.matchAll(/GetI\(a, "indicatorMs", (\d+)\)/g)].map((m) => Number(m[1]))
-if (defaults.length === 0) failures.push('no indicatorMs default found at all — did the wording change?')
-for (const d of defaults) {
-  if (!(d > 0 && d <= cap)) failures.push(`indicatorMs default is ${d} ms — a single input would paint the ACTING light for ${(d / 1000).toFixed(1)} s (cap ${cap} ms)`)
-}
-const acting = /int hold = GetI\(a, "indicatorMs", (\d+)\)/.test(src) || /hold = GetI\(a, "indicatorMs", (\d+)\)/.test(src)
-if (!acting) failures.push('the AgentActing hold is no longer derived from indicatorMs — re-check what the blue light means now')
-
-// the guard must be able to fail: putting 30000 back has to trip it
-let fired = false
-for (const d of defaults) {
-  const mutated = src.split(`"indicatorMs", ${d})`).join('"indicatorMs", 30000)')
-  if (mutated === src) continue
-  const bad = [...mutated.matchAll(/GetI\(a, "indicatorMs", (\d+)\)/g)].map((m) => Number(m[1])).filter((v) => v > cap)
-  if (bad.length > 0) fired = true
-}
-if (!fired) failures.push('self-test FAILED: restoring the 30000 ms default did not trip the cap')
-
-// ---- 2026-09-13 (indicator bug, measured on the production build): the hold is a TAIL, so it must
-// never be the only thing that decides "acting" while input is still being injected. A real
-// move(moveDurationMs=3500) ran 3823 ms and the blue expired at 1200 ms mid-flight (pixels: blue at
-// 1737 ms, cyan at 2153/3438 ms, moveStillPending on all 8 frames). The light now also reads the
-// injection itself, and its hold is ANCHORED to the last real injection rather than the op's start —
-// without lengthening the hold and without letting blue outlive the input.
-const code = maskComments(src)
+const source = fs.readFileSync(path.resolve(import.meta.dirname, '../lib/core/worker.cs'), 'utf8')
+const code = maskComments(source)
 const body = (text, signature) => {
-  const start = text.indexOf(signature)
-  const end = text.indexOf('\n        }', start)
+  const start = text.indexOf(signature), end = text.indexOf('\n        }', start)
   return start < 0 || end < 0 ? '' : text.slice(start, end)
 }
-const sicBody = body(code, 'static void SendInputChecked(INPUT[] arr)')
-const inOrder = (text, ...tokens) => {
+const ordered = (text, ...tokens) => {
   let at = -1
-  for (const t of tokens) { const i = text.indexOf(t, at + 1); if (i < 0) return false; at = i }
-  return at >= 0
+  for (const token of tokens) { const next = text.indexOf(token, at + 1); if (next < 0) return false; at = next }
+  return true
 }
-const order = (...tokens) => inOrder(sicBody, ...tokens)
 const cleanupBypassesGate = text => {
   const stuck = body(text, 'static void ReleaseStuck()')
   const owned = body(text, 'public static uint ReleaseOwnedInputs()')
   const key = body(text, 'static uint ReleaseOwnedKey(string key)')
   return stuck.includes('Program.ReleaseOwnedInputs()') && owned.includes('ReleaseOwnedKey(key)') &&
-    inOrder(key, 'OwnedUps.TryGetValue(key, out input)', 'Panic.HumanHolds(physical)', 'InputSender(new INPUT[] { release })') &&
+    ordered(key, 'OwnedUps.TryGetValue(key, out input)', 'Panic.HumanHolds(physical)', 'InputSender(new INPUT[] { release })') &&
     !/SendInputChecked\(|SendTrackedInput\(|Panic\.Check\(/.test(stuck + owned + key)
 }
-const CHECKS = [
-  ['the ACTING light is true while an injection sequence is in flight',
-    /bool acting = _enabled && \(Injecting \|\|/.test(src),
-    'the render loop decides ACTING only from the hold timer — a long injection would go cyan mid-flight'],
-  // Order inside the ONE injection gate, not proximity: the interrupt gate added in 2026-09-13 sits
-  // between the function head and KeepActing, and a length window is not a contract.
-  ['every real injection re-anchors the hold (SendInputChecked is the one gate)',
-    order('Glow.InputBegin()', 'Glow.KeepActing()', 'SendTrackedInput(arr)') &&
-      body(code, 'static uint SendTrackedInput(INPUT[] inputs)').includes('InputSender(inputs)') &&
-      /InputSender = delegate\(INPUT\[\] inputs\)\s*\{\s*return Native.SendInput\(/.test(code),
-    'SendInputChecked no longer marks the injection, re-anchors the ACTING light and then injects, in that order'],
-  ['the injection mark is cleared in a finally (blue cannot outlive the input)',
-    order('Glow.InputBegin()', 'finally { Glow.InputEnd(); }'),
-    'the injection refcount is not released in a finally — a thrown SendInput would leave the light stuck blue'],
-  ['an interrupt is enforced at the injection gate, BEFORE anything is sent',
-    order('if (Panic.Exited)', 'if (Panic.Engaged || Panic.Stopped)', 'Glow.InputBegin()', 'Glow.KeepActing()'),
-    'SendInputChecked injects without re-checking a mid-action stop/exit — a 2.5 s move would keep moving after the brake'],
-  ['cleanup releases do NOT go through the gate that refuses after a stop/exit',
-    cleanupBypassesGate(code),
-    'ReleaseStuck must release the accepted-input ledger through the raw sender, without the ordinary input refusal gate'],
-  ['an animated move brackets the whole SEQUENCE, not one step',
-    /Stopwatch sw = Stopwatch\.StartNew\(\);[\s\S]{0,400}?Glow\.InputBegin\(\);[\s\S]{0,900}?finally \{ Glow\.InputEnd\(\); \}/.test(src),
-    'AnimatedMove does not hold the injection mark across its sleeps — the gaps read as thinking again'],
-  ['probe reports the injection state as a fact',
-    /"injecting", Glow\.Injecting/.test(src),
-    'probe does not report whether input is in flight, so the light cannot be checked numerically'],
-]
-for (const [name, ok, why] of CHECKS) {
-  if (!ok) failures.push(`${name} — ${why}`)
-}
-// These mutations must fail even when the old call names remain in comments.
-if (inOrder(sicBody.replace('Glow.KeepActing();', ''), 'Glow.InputBegin()', 'Glow.KeepActing()', 'SendTrackedInput(arr)'))
-  failures.push('self-test FAILED: removing KeepActing did not break the injection ordering check')
+const exactScope = text => /bool acting = _enabled && Acting;/.test(text) &&
+  !/_lastTouchMs|_holdMs|pendingSince/.test(text) &&
+  ordered(body(text, '\n        static void BeginActuation()'), 'Panic.BeginActuation()', 'CheckHumanInput()') &&
+  body(text, 'static Dictionary<string, object> Handle(string line)').includes('finally { _operationActing = false; Panic.EndActuation(); Glow.Prepare(false); }')
+assert.ok(exactScope(code), 'actual action scope controls blue, with no timer tail or dwell')
+assert.equal(exactScope(code.replace('bool acting = _enabled && Acting;', 'bool acting = true;')), false, 'the guard rejects an always-on cue')
+assert.equal(exactScope(code.replace('finally { _operationActing = false; Panic.EndActuation(); Glow.Prepare(false); }',
+  'finally { _operationActing = false; Glow.Prepare(false); }')), false, 'the guard rejects missing finally cleanup')
+const input = body(code, 'static void SendInputChecked(INPUT[] arr)')
+assert.ok(ordered(input, 'if (Panic.Exited)', 'if (Panic.Engaged || Panic.Stopped)', 'CheckHumanInput()',
+  'BeginActuation()', 'Glow.InputBegin()', 'SendTrackedInput(arr)', 'finally { Glow.InputEnd(); }'),
+  'every injection obeys brake and ownership checks and balances its injection scope')
+assert.ok(body(code, 'static uint SendTrackedInput(INPUT[] inputs)').includes('InputSender(inputs)'), 'accepted inputs use the testable sender')
+assert.ok(/InputSender = delegate\(INPUT\[\] inputs\)\s*\{\s*return Native.SendInput\(/.test(code), 'production sender calls Windows')
+assert.ok(cleanupBypassesGate(code), 'accepted-input cleanup remains possible after a brake')
 for (const [signature, before, after] of [
   ['static void ReleaseStuck()', 'Program.ReleaseOwnedInputs()', 'Program.NoCleanup()'],
   ['static uint ReleaseOwnedKey(string key)', 'InputSender(new INPUT[] { release })', 'SendTrackedInput(new INPUT[] { release })'],
 ]) {
   const original = body(code, signature)
-  const mutated = code.replace(original, original.replace(before, after))
-  if (!original.includes(before) || cleanupBypassesGate(mutated))
-    failures.push(`self-test FAILED: cleanup mutation was not rejected: ${before}`)
+  assert.ok(original.includes(before))
+  assert.equal(cleanupBypassesGate(code.replace(original, original.replace(before, after))), false, `cleanup mutation rejected: ${before}`)
 }
-if (!failures.some((f) => f.startsWith('the ACTING light'))) {
-  const stripped = src.replace('bool acting = _enabled && (Injecting ||', 'bool acting = _enabled && (false ||')
-  if (/bool acting = _enabled && \(Injecting \|\|/.test(stripped)) failures.push('self-test FAILED: removing the injection term did not trip the check')
-}
-
-if (failures.length) { for (const f of failures) console.log('  FAIL ' + f); console.log('FAIL test-indicator-hold'); process.exit(1) }
-console.log(`ok test-indicator-hold — the ACTING light's hold defaults are ${defaults.join('/')} ms (cap ${cap}); a 30 s restore is caught by the self-test`)
+const moving = body(code, 'static void AnimatedMove(int tx, int ty, int durationMs)')
+assert.ok(ordered(moving, 'Glow.InputBegin()', 'Thread.Sleep(stepMs)', 'finally { Glow.InputEnd(); }'), 'animated sequence includes inter-step gaps')
+const warning = body(code, 'static void PrepareActuation(string op, Dictionary<string, object> request)')
+assert.ok(ordered(warning, 'Glow.Prepare(true)', 'while (!Glow.PreparationVisible)', 'while (timer.ElapsedMilliseconds < Glow.PreparationMs)',
+  'finally { Glow.Prepare(false); }'), 'warning duration starts after visibility and clears on failure')
+assert.ok(/public const int PreparationMs = 1500;/.test(code), 'warning lasts 1.5 seconds')
+assert.ok(!warning.includes('BeginActuation()'), 'warning does not claim physical input')
+assert.ok(ordered(body(code, 'static Dictionary<string, object> Click(Dictionary<string, object> a)'),
+  'if (i < clicks - 1) Thread.Sleep(gap)', 'EndActuationForReadback()', 'verifyDelayMs', 'FocusReport(a, false)'),
+  'click releases real control before verification delays and focus readback')
+assert.ok(ordered(body(code, 'static Dictionary<string, object> UiaAct(Dictionary<string, object> a)'),
+  'switch (action)', 'EndActuationForReadback()', 'Thread.Sleep(GetI(a, "settleMs", 120))'),
+  'UIA releases real control before its settling/readback phase')
+assert.ok(code.includes('"acting", Glow.Acting') && code.includes('"preparing", Glow.Preparing') && code.includes('"injecting", Glow.Injecting'),
+  'probe exposes observable actuation, preparation and injection facts')
+console.log('ok test-indicator-hold — actual-scope cue, balanced injection, no timed tail, visible 1.5s preparation and cleanup guards')

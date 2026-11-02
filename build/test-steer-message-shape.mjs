@@ -123,14 +123,9 @@ if (!/role:\s*'user'/.test(build)) failures.push("buildUserMessage does not set 
 if (!/content/.test(build)) failures.push('buildUserMessage does not set content')
 if (!/typeof createUserMessage === 'function'/.test(build)) failures.push('buildUserMessage calls the imported constructor without checking it is a function (a wrong export would throw instead of falling back)')
 
-// ---- 3. the card's branches must go through it ----------------------------------------------------------
-// ASSERTED ON THE RAW SOURCE, because the literal text IS the subject here — the scan above masks string
-// literals (deliberately), so a masked copy cannot be searched for `'继续'`. Each branch is pinned by the
-// builder call that carries its form tag, which a `Promise.resolve({text})` detour cannot satisfy.
-if (!/buildUserMessage\(\s*'继续'\s*,\s*'turn-end-card'/.test(src)) failures.push("the 继续 branch does not build a real message through buildUserMessage('继续', 'turn-end-card', …)")
-if (!/buildUserMessage\(\s*out\.custom\s*,\s*'turn-end-strategy'/.test(src)) failures.push('the typed-strategy branch does not build a real message')
-if (!/buildUserMessage\(\s*lateText\s*,\s*'turn-end-late'/.test(src)) failures.push('the late-answer branch does not build a real message')
-// …and no branch may keep a bare object beside them.
+// ---- 3. active brake/resume notices must still use the real message builder --------------------
+// Ordinary completion no longer raises a menu or wakes a new chat turn.
+if (!/buildUserMessage\(text, 'notice', summary\)/.test(src)) failures.push('the notice adapter bypasses the real message builder')
 if (/\.steer\(\s*\{/.test(stripped) || /\.inject\(\s*\{/.test(stripped)) failures.push('a steer/inject call with an object literal survives elsewhere in the file')
 
 // ---- mutation self-test ---------------------------------------------------------------------------------
@@ -138,8 +133,8 @@ if (/\.steer\(\s*\{/.test(stripped) || /\.inject\(\s*\{/.test(stripped)) failure
 // is not a proof — that mistake was already made once in this repo). `sites` is not asserted here; a
 // mutation that removes call sites entirely is caught by the `sites === 0` rule in the real run.
 const mutants = [
-  { name: 'the 继续 branch goes back to a bare object', find: /void buildUserMessage\('继续', 'turn-end-card', 'the human chose 继续 at the turn-end card'\)/, with: "void Promise.resolve({ text: '继续' })" },
-  { name: 'the strategy branch goes back to a bare object', find: /buildUserMessage\(out\.custom, 'turn-end-strategy'/, with: 'Promise.resolve({ text: out.custom })' },
+  { name: 'the steer path receives a bare object', find: 'agent.steer(msg);', with: 'agent.steer({ text: msg });' },
+  { name: 'the notice adapter returns a bare object', find: "buildUserMessage(text, 'notice', summary)", with: '({ text })' },
   { name: 'the builder reverts to the retired plugin wrapper (v4 refuses it)', find: "source = { kind: 'plugin:dsh-computer-use', form, ...(detail ? { summary: detail } : {}) }", with: "source = { kind: 'plugin', plugin: 'dsh-computer-use', form, ...(detail ? { summary: detail } : {}) }" },
   { name: 'the inject path is handed a bare object', find: 'else { agent.inject(msg);', with: "else { agent.inject({ text: msg });" },
 ]
@@ -163,8 +158,7 @@ for (const mu of mutants) {
     bad.push('unrecognised: ' + a.slice(0, 40))
   })
   const builderBad = !/source\s*=\s*\{[^}]*kind:\s*'plugin:dsh-computer-use'/.test(mutant.slice(mutant.indexOf('async function buildUserMessage'), mutant.indexOf('async function buildUserMessage') + 2000))
-  const branchBad = !/buildUserMessage\(\s*'继续'\s*,\s*'turn-end-card'/.test(mStripped) ||
-    !/buildUserMessage\(\s*out\.custom\s*,\s*'turn-end-strategy'/.test(mStripped)
+  const branchBad = !/buildUserMessage\(text, 'notice', summary\)/.test(mutant)
   if (bad.length === 0 && !builderBad && !branchBad) { console.error(`MUTATION NOT CAUGHT: "${mu.name}" left the guard GREEN`); process.exit(1) }
   caught++
 }
