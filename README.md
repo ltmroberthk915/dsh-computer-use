@@ -1,26 +1,35 @@
-# dsh-codex-style-computer-use · Codex-style desktop control
+# Codex-style Computer Use
 
-**Give DeepSeek eyes and hands for Windows.**
+**Bring a Codex-style desktop workflow to DeepSeek Harness.**
 
-Ask your agent to work with desktop apps: see the screen, find controls, click and type. Take over with your own mouse or keyboard whenever needed; the agent waits before continuing. Approval prompts remain enabled by default.
+Describe the goal. Your agent observes the screen, locates controls, clicks and types, then checks the result. Work with native Windows apps from the conversation.
 
-Windows desktop computer use for **DeepSeek Harness**: 18 desktop tools plus an Agent activation entry that observe and drive
-native Windows applications through prebuilt C# workers included in the package. No PowerShell 7,
-SDK or install-time builds are needed.
+English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md)
 
-English | [中文](README.zh.md)
+![Codex-style Windows desktop control: observe, act, verify](docs/images/01-codex-style.png)
 
-Windows only (`os: win32`). Requires Node.js ≥ 22 and the .NET Framework 4.x that Windows ships with.
+- **See the target. Take the action.** Combine screenshots, UI Automation and numbered targets with mouse, keyboard, drag, scroll and window tools.
+- **Take over. Let the agent wait. Hand back and continue.** Version 1.3.0 adds a 1.5-second notice before input. Use your computer normally outside actual actuation; after handback, the agent re-observes and resumes the original task.
+- **Fewer round trips. More efficient token use.** Incremental control observations, cropped or downsampled screenshots and batches of known actions reduce repeated context and model calls.
 
-**1.3.0 desktop lifecycle update:** the deep-blue cue now matches actual actuation, with a 16-pixel pointer jitter allowance and a visible 1.5-second purple notice before input. Human takeover returns a required continuation checkpoint. Session/agent ownership and a native cross-process lease allow only one controller. Call `computer_ctrl {action:"release"}` after desktop work and verification; the conversation continues and later desktop work can open a fresh cycle in the same turn. Normal completion releases automatically without an exit question card. Explicit pauses, exits and pending questions remain authoritative.
+![Human handoff: prepare, take over, continue](docs/images/02-handoff.png)
 
-The indicators use continuous 2-pixel rails with square screen corners and an 8-pixel glow. Normal working states have no floating badges; handoff, pause and preparation use compact top hints. Content interiors remain transparent. The visual revision preserves state logic and animation timing.
+![Token efficiency: focused observations, batched actions and result readback](docs/images/03-token-efficiency.png)
 
-**1.2.3 automatic fix:** normal installation/update now installs the approval-attribution correction for computer-use calls on affected DSH hosts. No manual host patch is required for those calls. Host approvals and audit remain authoritative; follow the host's restart indication after updating an already loaded plugin. See [1.2.3](docs/RELEASE-1.2.3.md).
+These are **1.3.0 feature illustrations**. Actual token use depends on the task, model and observation strategy. Approvals remain enabled by default; explicit pause, cancellation and exit remain authoritative.
 
-**1.2.1 attention fix:** fixes a missing crypto import that prevented 1.2.0's native `probe` and `raise` requests from reaching the helper. Updating from 1.2.0 is required for this runtime fix; reinstalling 1.2.0 does not fix it. New releases are staged on npm's `next` tag before promotion to `latest`; the market's normal update follows `latest`. See [1.2.1 validation and release status](docs/RELEASE-1.2.1.md).
+**Ready to install.** 18 desktop tools, with native helpers included. No SDK or install-time compilation. Requires Windows, Node.js ≥ 22 and the .NET Framework 4.x included with Windows. An independent community plugin; Codex describes the interaction style.
 
-**1.2.2 GitHub pre-release:** includes a separately deployed DSH host approval-attribution patch and 14 regression cases. Plugin input and approval behavior is retained from 1.2.1. See [release contents and deployment scope](docs/RELEASE-1.2.2.md); GitHub publication does not update npm or the market automatically.
+<details>
+<summary>Current release and compatibility</summary>
+
+**1.3.0** is published on npm's `next` channel. Install the exact `dsh-codex-style-computer-use@1.3.0` spec from the host's plugin manager. Default market updates follow `latest`, currently 1.2.3; the two can differ before promotion. Follow the host's restart indication when updating a loaded version. See [1.3.0](docs/RELEASE-1.3.0.md) and [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases).
+
+Version 1.3.0 also releases desktop control when work ends while the chat continues. Thin edge rails and a soft glow meet at the screen corners, keeping the content area transparent.
+
+Earlier fixes: [1.2.3 approval attribution](docs/RELEASE-1.2.3.md) · [1.2.1 native attention](docs/RELEASE-1.2.1.md) · [standalone host patch](docs/RELEASE-1.2.2.md).
+
+</details>
 
 ## What it does
 
@@ -41,9 +50,9 @@ under `$DSH_HOME/data/computer-use/`.
 
 ## Install and update in dsh-market
 
-Once the catalog submission is merged and synced, search **computer-use** and select **dsh-codex-style-computer-use**, by **ltmroberthk915** (npm maintainer: **ltmroberthk**). Click **Install**. Later, use **Update** or **Update all** for versions admitted by the host's release policy. The package includes both native helpers; no PowerShell 7 or build permission is needed.
+Search **computer-use** or **Codex-style** in the market. Look for repository **ltmroberthk915/dsh-computer-use** and npm package **dsh-codex-style-computer-use** (maintainer: **ltmroberthk**), then click **Install**. Use **Update** or **Update all** for stable-channel updates. Both native helpers are included; no PowerShell 7 or build permission is needed.
 
-Before catalog sync, use **Settings → Plugins → Add plugin**. The corrected version is **`dsh-codex-style-computer-use@1.2.1`**; the unversioned name still resolves to 1.2.0 until promotion. Do not paste the GitHub repository URL: that selects the source-download path instead of the small prebuilt npm package. The default non-strict pnpm 11.7.0 configuration can install 1.2.1 immediately; an explicitly strict host policy can require waiting as described below. A newly added bundle can load live on the official Desktop host; check that its tools and skill appear. Restart from the tray when replacing an already loaded version, when the client remains stale, or when DSH reports **restart-required**.
+Alternatively, enter **`dsh-codex-style-computer-use`** in **Settings → Plugins → Add plugin** for the current stable channel, or **`dsh-codex-style-computer-use@1.3.0`** for the version illustrated here. Enter the npm package spec directly. Your host may apply a waiting period to fresh versions; follow its indication. A newly added bundle can load live on supported hosts; check that its tools and skill appear. Restart from the tray when replacing a loaded version, when the client remains stale, or when DSH reports **restart-required**.
 
 ### Releases less than 24 hours old
 

@@ -1,27 +1,35 @@
-# dsh-codex-style-computer-use · Codex 风格桌面操控
+# Codex 风格 Computer Use
 
-**让 DeepSeek 看得见，也点得动。**
+**更接近 Codex 的电脑操控体验，带到 DeepSeek Harness。**
 
-把 Windows 应用里的重复操作交给 AI：看屏幕、找控件、点鼠标、敲键盘。AI 实际操控前提示 1.5 秒，非操控期间你可以正常使用电脑；操控中接管后，AI 等待交回并接续原任务。默认保留操作审批。
+你描述目标，AI 看屏幕、找控件、点鼠标、敲键盘，再检查结果。让原生 Windows 应用里的工作，也能在对话中完成。
 
-给 **DeepSeek Harness** 用的 Windows 桌面操控插件：18 个桌面工具加一个 Agent 激活入口，通过一个 C# worker
-观察并驱动原生 Windows 应用。发布包已包含编译好的原生组件，无需安装 PowerShell 7、SDK 或执行编译命令。
+[English](README.md) | 中文 · [安装](#在-dsh-market-安装和更新) · [版本记录](CHANGELOG.md)
 
-[English](README.md) | 中文
+![Codex 风格 Windows 桌面操控：观察、操作、验证](docs/images/01-codex-style.png)
 
-仅支持 Windows（`os: win32`）。需要 Node.js ≥ 22 与 Windows 自带的 .NET Framework 4.x。
+- **看得准，也点得动。** 截图、控件树与编号定位配合使用，支持点击、输入、拖拽、滚动和窗口操作。
+- **你接手，AI 等待，再接着做。** 1.3.0 提供 1.5 秒操作预告；非实际操控期间正常使用电脑，交回后重新观察并接续原任务。
+- **更少往返，更省 Token。** 控件增量观察、区域与降采样截图，加上连续动作批量执行，减少重复观察和模型往返。
 
-**1.3.0 桌面控制周期升级：**实际操控与深蓝色指示同步；鼠标轻微抖动有 16 像素容差；紫色操作前提示持续 1.5 秒；接管后返回必须继续任务的断点；同一时间只有一个 agent/worker 拥有控制周期。桌面工作和验证结束后调用 `computer_ctrl {action:"release"}` 即可释放，聊天继续，同一轮后来仍可重新开始。正常收尾自动释放，不再弹出结束确认选项单。人工暂停、明确退出和待回答的问题保持有效。
+![人工接管与续接：先提醒、可接管、再继续](docs/images/02-handoff.png)
 
-灯效统一为贴合屏幕直角的 2 像素光线和最多 8 像素柔光，四角没有圆弧缺口。普通工作状态不显示悬浮文字牌；让出、暂停和预告使用紧凑提示，正文区域保持透明。此次美工调整不改变状态逻辑或闪烁节奏。
+![Token 效率：聚焦观察、合并操作、回读验证](docs/images/03-token-efficiency.png)
 
-**1.2.3 自动修复：**正常安装或更新插件，即会为受影响宿主中的 computer-use 调用安装审批归因修正，无需手工修改宿主。审批决定与审计仍由宿主处理；更新已加载插件后按宿主提示重启。详见 [1.2.3](docs/RELEASE-1.2.3.md)。
+上图为 **1.3.0 功能示意**。实际 Token 用量取决于任务、模型和观察方式。默认保留操作审批；明确暂停、取消和退出始终有效。
 
-**1.2.1 提醒修复：**补齐 crypto 导入，修复 1.2.0 原生 `probe` / `raise` 请求还未发送就抛错的问题。这次是运行时代码修复，需要从 1.2.0 更新；重复安装 1.2.0 无效。新版本先发布到 npm 的 `next`，再提升为 `latest`，市场普通更新跟随 `latest`。详见 [1.2.1 验证和发布状态](docs/RELEASE-1.2.1.md)。
+**安装即用。** 18 个桌面工具，原生组件随包提供，无需 SDK 或安装时编译。支持 Windows、Node.js ≥ 22 和系统自带的 .NET Framework 4.x。独立社区插件；Codex 用于说明交互风格。
 
-宿主在禁用审批弹窗时仍提示“用户拒绝工具”的问题，详见 [DSH 审批归因补丁与回归测试](docs/APPROVAL-ATTRIBUTION.md)。
+<details>
+<summary>当前版本与兼容性</summary>
 
-**1.2.2 GitHub 预发布：**收录独立部署的宿主审批归因补丁和 14 项回归测试。插件输入与审批行为延续 1.2.1，详见 [发布内容及部署范围](docs/RELEASE-1.2.2.md)。GitHub 发布不会自动更新 npm 或市场版本。
+**1.3.0** 已发布到 npm 的 `next` 频道，可在插件管理中指定 `dsh-codex-style-computer-use@1.3.0` 安装。默认市场更新跟随 `latest`，当前稳定频道为 1.2.3；正式提升前两者可能不同。更新已加载的旧版本后，按宿主提示重启。详见 [1.3.0](docs/RELEASE-1.3.0.md) 与 [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases)。
+
+1.3.0 同时改进控制周期与灯效：工具用完可主动释放，聊天继续；正常收尾自动退出。细边线与柔光贴合屏幕四角，内容内区透明。
+
+历史兼容修复：[1.2.3 审批归因](docs/RELEASE-1.2.3.md) · [1.2.1 原生提醒](docs/RELEASE-1.2.1.md) · [独立宿主补丁](docs/RELEASE-1.2.2.md)。
+
+</details>
 
 ## 它能做什么
 
@@ -39,9 +47,9 @@
 
 ## 在 dsh-market 安装和更新
 
-市场收录同步后，搜索 **computer-use**，选择 **dsh-codex-style-computer-use**，作者 **ltmroberthk915**（npm 维护者 **ltmroberthk**），点击**安装**。以后通过市场的**更新**或**全部更新**安装符合宿主发布策略的版本。两份原生组件都已随包提供，无需 PowerShell 7、SDK 或构建白名单。
+在市场搜索 **computer-use** 或 **Codex-style**，认准仓库 **ltmroberthk915/dsh-computer-use**、npm 包 **dsh-codex-style-computer-use**（维护者 **ltmroberthk**），点击**安装**。以后通过市场的**更新**或**全部更新**获取正式频道版本。两份原生组件都已随包提供，无需 PowerShell 7、SDK 或构建白名单。
 
-目录尚未同步时，在 **设置 → 插件 → 添加插件** 输入修复版 **`dsh-codex-style-computer-use@1.2.1`**。正式标签提升前，省略版本号仍会装到 1.2.0。这里填 npm 包名即可；填写 GitHub 仓库网址会转为下载源码，容易受 GitHub 下载线路影响。默认非严格 pnpm 11.7.0 配置可以直接安装 1.2.1；宿主显式启用严格策略时，才可能需要等待冷却。首次新增 bundle 在官方桌面端可热加载；确认工具与 skill 已出现即可使用。替换已经加载的版本、客户端界面未刷新或界面明确提示 **restart-required / 需要重启** 时，再从托盘完整退出 DSH 并重新打开。
+也可在 **设置 → 插件 → 添加插件** 输入 **`dsh-codex-style-computer-use`**，安装当前正式频道；要体验本页展示的 1.3.0，输入 **`dsh-codex-style-computer-use@1.3.0`**。这里填 npm 包名即可。宿主可能对新版本设置等待期，以界面提示为准。首次新增 bundle 可在支持的宿主中热加载；确认工具与 skill 已出现即可使用。替换已经加载的版本、客户端界面未刷新或界面提示 **restart-required / 需要重启** 时，从托盘完整退出 DSH 并重新打开。
 
 ### 发布未满 24 小时
 
