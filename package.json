@@ -10,6 +10,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
+    "icon.svg",
     "lib",
     "mcp",
     "skills",
@@ -84,5 +85,6 @@
   "homepage": "https://github.com/ltmroberthk915/dsh-computer-use#readme",
   "bugs": {
     "url": "https://github.com/ltmroberthk915/dsh-computer-use/issues"
-  }
+  },
+  "icon": "./icon.svg"
 }
