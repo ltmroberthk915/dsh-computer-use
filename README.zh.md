@@ -23,9 +23,9 @@
 <details>
 <summary>当前版本与兼容性</summary>
 
-**1.3.0** 已发布到 npm 的 `next` 频道，可在插件管理中指定 `dsh-codex-style-computer-use@1.3.0` 安装。默认市场更新跟随 `latest`，当前稳定频道为 1.2.3；正式提升前两者可能不同。更新已加载的旧版本后，按宿主提示重启。详见 [1.3.0](docs/RELEASE-1.3.0.md) 与 [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases)。
+**1.3.1** 是 npm `latest` 频道的当前版本：`dsh-codex-style-computer-use@1.3.1`。新增 worker 侧 OCR（逐词坐标）、可定位变化与识别光标闪烁的等待、UAC/锁屏感知与自动续接、以及绕过 IME 的剪贴板文本通道。更新已加载的旧版本后，按宿主提示重启。详见 [1.3.1](docs/RELEASE-1.3.1.md) 与 [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases)。
 
-1.3.0 同时改进控制周期与灯效：工具用完可主动释放，聊天继续；正常收尾自动退出。细边线与柔光贴合屏幕四角，内容内区透明。
+1.3.1 可直接从屏幕读字定位控件，察觉 Windows 安全桌面并在其结束后自动续接；所有颜色共用同一条按 DPI 换算的边缘光环，呼吸谷值保持可见。1.3.0 起工具用完可主动释放，聊天继续；正常收尾自动退出。
 
 历史兼容修复：[1.2.3 审批归因](docs/RELEASE-1.2.3.md) · [1.2.1 原生提醒](docs/RELEASE-1.2.1.md) · [独立宿主补丁](docs/RELEASE-1.2.2.md)。
 

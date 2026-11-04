@@ -26,6 +26,11 @@ public static class Fixture {
   public static void Main() {
     var f = new KickoffFocus();
     Check(!Allowed(f), "new cycle must identify and activate before capturing");
+    string missing = f.CaptureProblem(true, false, false, true, 10, 100, false);
+    Check(missing.Contains("this worker has no confirmed target") && missing.Contains("hwnd=10, pid=100"), "current foreground identity is evidence for explicit reactivation after restart");
+    Check(f.Target == 0 && !Allowed(f), "reporting a foreground candidate cannot confirm a target");
+    Check(!f.CaptureProblem(true, false, false, true, 10, 100, true).Contains("hwnd="), "host is never reported as a recovery candidate");
+    Check(!f.CaptureProblem(true, false, false, false, 0, 0, false).Contains("hwnd="), "no identity hint for an unknown foreground");
     Check(!Allowed(f, host: true), "agent desktop is not kickoff orientation");
     Check(!Allowed(f), "failed activation cannot grant a capture");
     f.Confirm(10, 100);
@@ -72,7 +77,8 @@ assert.ok(capture.lastIndexOf('ValidateKickoffCapture(a)') > capture.indexOf('Na
 assert.match(capture, /catch \{ managed.Dispose\(\); throw; \}/)
 const activate = section('static Dictionary<string, object> Activate(', 'static bool IsForeground')
 assert.match(activate, /how == null \|\| !Native.IsWindow\(h\) \|\| !IsForeground\(h\)/)
-assert.match(activate, /else\s*\{\s*SetSticky\(h\);\s*_kickoffFocus.Confirm\(h.ToInt64\(\), PidOf\(h\)\)/)
+assert.match(activate, /else\s*\{\s*SetSticky\(h\);\s*_kickoffFocus.Confirm\(h.ToInt64\(\), confirmedPid\)/)
+assert.match(activate, /"pid", confirmedPid == 0 \? null : \(object\)confirmedPid/)
 const light = section('public static bool TryLightCycle(', 'static bool RecordIsNewerThanProcess')
 assert.match(light, /if \(!CycleLit\) Program.ResetKickoffFocus\(\);/)
 const focus = section('static Dictionary<string, object> FocusReport(', 'static Dictionary<string, object> WindowOp(')

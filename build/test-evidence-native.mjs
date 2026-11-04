@@ -12,7 +12,10 @@ if (process.env.DSH_CU_DESKTOP_TESTS !== '1') {
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsh-evidence-fixture-'))
 const win=process.env.WINDIR||'C:/Windows',gac=path.join(win,'Microsoft.NET/assembly/GAC_MSIL')
 const refs=['System.dll','System.Core.dll','System.Drawing.dll','System.Web.Extensions.dll','System.Windows.Forms.dll',...['UIAutomationClient','UIAutomationTypes','WindowsBase'].map(n=>path.join(gac,n,'v4.0_4.0.0.0__31bf3856ad364e35',n+'.dll'))]
-const exe=path.join(dir,'probe.exe'),source=process.env.DSH_EVIDENCE_SOURCE||path.join(import.meta.dirname,'../lib/core/worker.cs')
+
+refs.push(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/System.Runtime.dll'),
+  path.join(gac, 'System.Runtime.WindowsRuntime/v4.0_4.0.0.0__b77a5c561934e089/System.Runtime.WindowsRuntime.dll'),
+  path.resolve(import.meta.dirname, '../lib/core/winmd/Windows.winmd'));const exe=path.join(dir,'probe.exe'),source=process.env.DSH_EVIDENCE_SOURCE||path.join(import.meta.dirname,'../lib/core/worker.cs')
 execFileSync(path.join(win,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:exe','/platform:x64','/optimize+','/main:EvidenceProbe','/out:'+exe,...refs.map(r=>'/r:'+r),source,path.join(import.meta.dirname,'evidence-native-fixture.cs')],{windowsHide:true,timeout:30000})
 const env={...process.env,DSH_HOME:path.join(dir,'home'),DSH_COMPUTER_USE_STOP_FILE:path.join(dir,'STOP'),DSH_COMPUTER_USE_EXIT_FILE:path.join(dir,'EXITED'),DSH_COMPUTER_USE_AUDIT_LOG:path.join(dir,'audit.jsonl'),DSH_COMPUTER_USE_OWNER_FILE:path.join(dir,'desktop.owner')}
 delete env.DSH_CU_HOST_PID;delete env.DSH_CU_HOST_EXE

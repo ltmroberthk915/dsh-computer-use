@@ -49,6 +49,10 @@ class GlowVisualFixture
             int[] values = { capture.X, capture.Y, capture.Width, capture.Height };
             for (int i = 0; i < names.Length; i++) GlowType.GetField(names[i], PrivateStatic).SetValue(null, values[i]);
         }
+        // Offscreen painting has no overlay window, so the painter falls back to 96 dpi;
+        // measure the rail it actually drew rather than re-deriving the number here.
+        int rail = (int)GlowType.GetMethod("EdgeRailThickness", PrivateStatic).Invoke(null, null);
+        if (rail < 8) throw new Exception("edge rail thinner than the legacy eight pixels");
         IntPtr bits = Marshal.AllocHGlobal(w * h * 4);
         try
         {
@@ -61,6 +65,7 @@ class GlowVisualFixture
             Rectangle region = capture.IsEmpty ? new Rectangle(0, 0, w, h) : Rectangle.Intersect(capture, new Rectangle(0, 0, w, h));
             int edgeHoles = 0, outsidePixels = 0, invalidPremultiplied = 0;
             int contentMinX = w, contentMinY = h, contentMaxX = -1, contentMaxY = -1, contentPixels = 0;
+            int hintMinX = w, hintMinY = h, hintMaxX = -1, hintMaxY = -1, hintPixels = 0;
             int minCornerAlpha = 255, maxInteriorAlpha = 0;
             foreach (Point p in new Point[] { new Point(region.Left, region.Top), new Point(region.Right - 1, region.Top),
                 new Point(region.Left, region.Bottom - 1), new Point(region.Right - 1, region.Bottom - 1) })
@@ -73,12 +78,23 @@ class GlowVisualFixture
                 if (!inside) { if (a != 0) outsidePixels++; continue; }
                 int edgeDistance = Math.Min(Math.Min(x - region.Left, region.Right - 1 - x), Math.Min(y - region.Top, region.Bottom - 1 - y));
                 if (edgeDistance == 0 && a == 0) edgeHoles++;
-                if (edgeDistance >= 8 && a != 0)
+                if (edgeDistance >= rail && a != 0)
                 {
                     contentPixels++;
                     contentMinX = Math.Min(contentMinX, x); contentMinY = Math.Min(contentMinY, y);
                     contentMaxX = Math.Max(contentMaxX, x); contentMaxY = Math.Max(contentMaxY, y);
                     maxInteriorAlpha = Math.Max(maxInteriorAlpha, a);
+                }
+                // The state hint now sits ON the widened rail, so "pixels beyond the rail"
+                // can no longer see it. Every hint element (chip fill 222, card 224,
+                // outline 110, text 238-255) is denser than any rail ring from row 2 on
+                // (<=94), and the two bright core rings live at rows 0-1 / columns 0-1,
+                // outside this band on both axes.
+                if (y >= 8 && y < 120 && x >= rail && x < w - rail && a > 100)
+                {
+                    hintPixels++;
+                    hintMinX = Math.Min(hintMinX, x); hintMinY = Math.Min(hintMinY, y);
+                    hintMaxX = Math.Max(hintMaxX, x); hintMaxY = Math.Max(hintMaxY, y);
                 }
             }
             string stem = name + "-" + w + "x" + h;
@@ -98,8 +114,8 @@ class GlowVisualFixture
             }
             Results.Add(new { name, width = w, height = h, edgeHoles, minCornerAlpha, outsidePixels,
                 invalidPremultiplied, contentPixels, maxInteriorAlpha,
-                contentBounds = contentPixels == 0 ? null : new { x = contentMinX, y = contentMinY,
-                    width = contentMaxX - contentMinX + 1, height = contentMaxY - contentMinY + 1 } });
+                contentBounds = hintPixels == 0 ? null : new { x = hintMinX, y = hintMinY,
+                    width = hintMaxX - hintMinX + 1, height = hintMaxY - hintMinY + 1 } });
         }
         finally { Marshal.FreeHGlobal(bits); }
     }

@@ -86,6 +86,28 @@ static class HumanHandoffFixture
             s.Record(0x41, true, false, 3200); Check(!s.Active, "held during idle is still allowed");
             s.SetActing(true, 3210); Check(s.Active, "new action waits for a physically held key");
         });
+        Case("deliberate pointer move yields even between actuations (human spec 2026-11-04)", delegate {
+            var s = new HumanInputState(); s.Enable(true, 0);   // live cycle, but NO actuation: the gap between injections
+            s.Record(0x41, true, false, 10); s.Record(0x41, false, true, 15);
+            Check(!s.Active, "a gap keystroke still does not yield (legacy rule unchanged)");
+            s.Record(0, false, false, 20, true); Check(s.Active && s.Revision == 1, "a deliberate 16px move in the gap yields and lights the rail");
+            s.Tick(3019); Check(s.Active, "the yield holds through the quiet interval");
+            s.Tick(3020); Check(!s.Active, "quiet returns control");
+            s.Record(0, false, false, 4000, false); Check(!s.Active && s.Revision == 1, "a non-deliberate gap move still does nothing");
+        });
+        Case("secure-desktop watch confirms over three misses and clears on first success (UAC, human spec 2026-11-04)", delegate {
+            var w = new SecureDesktopWatch();
+            Check(!w.Observe(true), "already clear needs no transition");
+            Check(!w.Active && !w.Observe(false), "a single miss is a hiccup, not a secure desktop");
+            Check(!w.Active && !w.Observe(false), "two misses still not active");
+            Check(w.Observe(false) && w.Active, "the third consecutive miss engages");
+            Check(!w.Observe(false), "staying engaged is not a new transition");
+            Check(w.Observe(true) && !w.Active, "one success clears immediately (auto-continue)");
+            Check(!w.Observe(true), "clearing twice reports nothing");
+            w.Observe(false); w.Observe(false);
+            Check(!w.Active, "the success RESET the miss counter — two stale misses do not engage");
+            Check(w.Observe(false) && w.Active, "re-engagement takes three fresh misses");
+        });
         Case("pointer jitter cancels while deliberate movement reaches the 16 pixel boundary", delegate {
             var p = new PointerHandoffTolerance(); p.Reset(100, 100);
             for (int i = 0; i < 100; i++) Check(!p.Record(100 + i % 2, 100, true, true, false, i), "one pixel tremor ignored");
@@ -144,7 +166,7 @@ static class HumanHandoffFixture
         Case("gentle yellow gradient stays bounded and smooth", delegate {
             int last = Glow.HumanYieldAlpha(0);
             for (int t = 16; t < 8400; t += 16) {
-                int a = Glow.HumanYieldAlpha(t); Check(a >= 48 && a <= 108, "bounded alpha");
+                int a = Glow.HumanYieldAlpha(t); Check(a >= 90 && a <= 160, "bounded alpha");
                 Check(Math.Abs(a - last) <= 2, "no abrupt flicker"); last = a;
             }
         });

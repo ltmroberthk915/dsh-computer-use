@@ -1,3 +1,15 @@
+# 1.3.1 — worker-side grounding, UAC awareness and IME-safe text
+
+- Add `computer_ocr`: text with per-word absolute-pixel boxes from the inbox Windows OCR engine (zero external dependencies; the union `Windows.winmd` ships in the package). Locate controls by name in zero-UIA applications instead of spending a screenshot.
+- `computer_wait` mode `change` now returns `changeBounds` — where the change landed. Mode `stable` reports `caretSteady` when the only motion is a blinking caret (~1-2 Hz), instead of burning the full timeout.
+- `computer_marks` accepts `uiaOnly` to pin identity by window and geometry when an animated neighbour keeps invalidating the sampled pixel signature; the click-time occlusion check still applies.
+- Detect the Windows secure desktop (UAC prompt or lock screen) through an input-desktop probe: refuse to dispatch while it stands, notify the human in Chinese and English, and resume automatically once the normal desktop returns.
+- Fix a measured IME incident: when the clipboard holds private formats the preservation lease could not snapshot (WeChat format 49161), paste was refused and the fallback re-typed CJK text through the IME, sending a garbled message. The worker now pastes without restoring and reports `clipboardRestore:"skipped-unpreservable-clipboard"` plus a warning.
+- Indicators: every colour uses the same 1.6 cm DPI-derived rail (about 106 px at 175% scaling, up from a fixed 8 px). Breathing bands never go dark: thinking/asking 50..140, human handoff 90..160; deep blue remains steady. The pre-operation notice is now 1.2 s.
+- A deliberate 16-pixel pointer move between actuations yields keyboard/mouse ownership for the whole live cycle, not only while an injection is in flight.
+- Reduce false-positive and blind-retry noise: hide this worker's own overlay from `computer_state` windows, name the actual foreground (hwnd/pid/title) in `KICKOFF-FOCUS-REQUIRED`, name the offending `action[i]`/combo in high-risk batch refusals, and explain that a no-change click on an already-focused editor is expected.
+- Reorganise the computer-use skill: generalised zero-UIA guidance, IME and clipboard rules at the top level with the measured WeChat case in `skills/computer-use/references/zero-uia-apps.md`.
+
 # 1.3.0 — desktop lifecycle and indicators
 
 - Allow ordinary user input outside actual actuation; align the deep-blue indicator with that boundary and remove its timed tail. Tolerate 16 pixels of pointer jitter during actuation.

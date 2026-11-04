@@ -179,7 +179,7 @@ const CHECKS = [
       if (!/case "calm":\s*if \(!Panic\.TryEndCycle\(\)\)/.test(s)) return 'calm bypasses the guarded cycle ending'
       const end = sliceRange(s, 'public static bool TryEndCycle()', CS_END)
       if (!end) return 'guarded cycle-ending method is missing'
-      const required = ['lock (SyncLock)', 'if (_engaged || _stopped || PauseRequested) return false;',
+      const required = ['lock (SyncLock)', 'if (_engaged || _stopped || PauseRequested || ExitRequested) return false;',
         'CycleLit = false;', 'Disarm();', 'Glow.Kill();', 'Program.ReleaseOwnedInputs();', 'Program.ReleaseDesktopOwnership();']
       let at = -1
       for (const token of required) { const next = end.text.indexOf(token, at + 1); if (next < 0) return `cycle ending loses ordered boundary: ${token}`; at = next }
@@ -188,7 +188,7 @@ const CHECKS = [
     brks: [
       [/if \(!Panic\.TryEndCycle\(\)\)/, 'if (false)'],
       { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'Disarm();', with: 'DisarmX();' },
-      { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'if (_engaged || _stopped || PauseRequested) return false;', with: '' },
+      { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'if (_engaged || _stopped || PauseRequested || ExitRequested) return false;', with: '' },
       { scope: 'public static bool TryEndCycle()', end: CS_END, find: 'Program.ReleaseOwnedInputs();', with: '' },
     ],
   },
@@ -221,12 +221,12 @@ const CHECKS = [
     file: 'worker',
     fn: (s) => {
       const body = sliceRange(s, 'static IntPtr MouseHookCallback(', CS_END);
-      if (!body || !body.text.includes('RecordHumanInput(key, down, up);')) return 'physical mouse events must reach handoff';
+      if (!body || !body.text.includes('RecordHumanInput(key, down, up, deliberate);')) return 'physical mouse events must reach handoff with their deliberate flag (gap moves yield too, human spec 2026-11-04)';
       if (/\bEngage\(/.test(body.text)) return 'ordinary mouse input must not latch a STOP';
       if (/HumanLegPx|WheelNotches|MOVE_BUDGET/.test(s)) return 'removed travel/wheel thresholds are live again';
       return null;
     },
-    brks: [[/if \(activity\) RecordHumanInput\(key, down, up\);/, 'if (activity) { RecordHumanInput(key, down, up); Engage("mouse"); }']],
+    brks: [[/if \(activity\) RecordHumanInput\(key, down, up, deliberate\);/, 'if (activity) { RecordHumanInput(key, down, up, deliberate); Engage("mouse"); }']],
   },
   {
     name: 'only physical exact Ctrl+Esc requests manual keyboard pause',

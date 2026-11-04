@@ -9,9 +9,8 @@ import { execFileSync } from 'node:child_process'
 
 const source = path.resolve(import.meta.dirname, '../lib/core/worker.cs')
 const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
-// Frozen functional candidate 47a01d7f021999aacf0ff04695afe9c0eeb549715598e37a66d3b8ff1209cc28.
-// Mask only the painting block and two approved, optional capture-presentation
-// additions; every other control/state/timing/input byte must remain identical.
+// Functional baseline includes the overlay recovery, physical hotkey and kickoff changes.
+// Mask only the painting block and the two optional capture-presentation additions.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -19,9 +18,9 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  'a12994da713534fe9d9d4d02246c72c0dd6bc034a101cbeda12d66626eb4f538',
-  'visual-only increment preserves all control logic, state transitions, timing and window interaction styles')
-assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 48 + (int)Math.Round(30 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
+  '25666785229b8df67d70db3a3b9b649c38e0377f1e11f62ced390637147de1c8',
+  'painting changes preserve the reviewed control logic, timing and window interaction styles')
+assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')
 const exclusion = worker.slice(worker.indexOf('        static void TryExcludeOverlayFromCapture('), worker.indexOf('        static void PaintBlue('))
 assert.match(exclusion, /number >= 19041\)\s*SetWindowDisplayAffinity\(hwnd, 0x00000011\);/)
@@ -36,7 +35,10 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-glow-visual-'))
 try {
   const win = process.env.WINDIR || 'C:/Windows', gac = path.join(win, 'Microsoft.NET/assembly/GAC_MSIL')
   const refs = ['System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll', 'System.Windows.Forms.dll',
-    ...['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase'].map(n => path.join(gac, n, 'v4.0_4.0.0.0__31bf3856ad364e35', n + '.dll'))]
+    ...['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase'].map(n => path.join(gac, n, 'v4.0_4.0.0.0__31bf3856ad364e35', n + '.dll')),
+    path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/System.Runtime.dll'),
+    path.join(gac, 'System.Runtime.WindowsRuntime/v4.0_4.0.0.0__b77a5c561934e089/System.Runtime.WindowsRuntime.dll'),
+    path.resolve(import.meta.dirname, '../lib/core/winmd/Windows.winmd')]
   const exe = path.join(temp, 'fixture.exe')
   execFileSync(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),
     ['/nologo', '/target:exe', '/platform:x64', '/main:GlowVisualFixture', '/out:' + exe, ...refs.map(r => '/r:' + r), source, path.join(import.meta.dirname, 'glow-visual-fixture.cs')],
@@ -52,7 +54,7 @@ try {
     assert.equal(m.outsidePixels, 0, label + ': capture decoration stays within requested rectangle')
     assert.equal(m.invalidPremultiplied, 0, label + ': alpha is valid for UpdateLayeredWindow')
     if (m.name.startsWith('capture') || m.name === 'thinking' || m.name === 'acting')
-      assert.equal(m.contentPixels, 0, label + ': interior beyond 8px is transparent')
+      assert.equal(m.contentPixels, 0, label + ': interior beyond the 1.6cm edge rail is transparent')
     else {
       assert(m.contentBounds, label + ': compact state hint remains visible')
       const b = m.contentBounds

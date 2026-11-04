@@ -23,9 +23,9 @@ These are **1.3.0 feature illustrations**. Actual token use depends on the task,
 <details>
 <summary>Current release and compatibility</summary>
 
-**1.3.0** is published on npm's `next` channel. Install the exact `dsh-codex-style-computer-use@1.3.0` spec from the host's plugin manager. Default market updates follow `latest`, currently 1.2.3; the two can differ before promotion. Follow the host's restart indication when updating a loaded version. See [1.3.0](docs/RELEASE-1.3.0.md) and [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases).
+**1.3.1** is the current release on npm's `latest` channel: `dsh-codex-style-computer-use@1.3.1`. It adds worker-side OCR with per-word coordinates, change/caret-aware waits, UAC and lock-screen awareness with automatic continuation, and IME-safe clipboard text. Follow the host's restart indication when updating a loaded version. See [1.3.1](docs/RELEASE-1.3.1.md) and [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases).
 
-Version 1.3.0 also releases desktop control when work ends while the chat continues. Thin edge rails and a soft glow meet at the screen corners, keeping the content area transparent.
+Version 1.3.1 reads text from the screen by name, notices the Windows secure desktop and resumes on its own, and keeps every colour on the same DPI-derived edge rail with a visible breathing floor. Version 1.3.0 releases desktop control when work ends while the chat continues.
 
 Earlier fixes: [1.2.3 approval attribution](docs/RELEASE-1.2.3.md) · [1.2.1 native attention](docs/RELEASE-1.2.1.md) · [standalone host patch](docs/RELEASE-1.2.2.md).
 

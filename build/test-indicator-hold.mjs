@@ -49,9 +49,9 @@ for (const [signature, before, after] of [
 const moving = body(code, 'static void AnimatedMove(int tx, int ty, int durationMs)')
 assert.ok(ordered(moving, 'Glow.InputBegin()', 'Thread.Sleep(stepMs)', 'finally { Glow.InputEnd(); }'), 'animated sequence includes inter-step gaps')
 const warning = body(code, 'static void PrepareActuation(string op, Dictionary<string, object> request)')
-assert.ok(ordered(warning, 'Glow.Prepare(true)', 'while (!Glow.PreparationVisible)', 'while (timer.ElapsedMilliseconds < Glow.PreparationMs)',
+assert.ok(ordered(warning, 'Glow.Prepare(true)', 'while (!Glow.PreparationVisible)', 'while (timer.ElapsedMilliseconds < Glow.PreparationMs || !Glow.PreparationComplete)',
   'finally { Glow.Prepare(false); }'), 'warning duration starts after visibility and clears on failure')
-assert.ok(/public const int PreparationMs = 1500;/.test(code), 'warning lasts 1.5 seconds')
+assert.ok(/public const int PreparationMs = 1200;/.test(code), 'warning lasts 1.2 seconds')
 assert.ok(!warning.includes('BeginActuation()'), 'warning does not claim physical input')
 assert.ok(ordered(body(code, 'static Dictionary<string, object> Click(Dictionary<string, object> a)'),
   'if (i < clicks - 1) Thread.Sleep(gap)', 'EndActuationForReadback()', 'verifyDelayMs', 'FocusReport(a, false)'),
@@ -61,4 +61,4 @@ assert.ok(ordered(body(code, 'static Dictionary<string, object> UiaAct(Dictionar
   'UIA releases real control before its settling/readback phase')
 assert.ok(code.includes('"acting", Glow.Acting') && code.includes('"preparing", Glow.Preparing') && code.includes('"injecting", Glow.Injecting'),
   'probe exposes observable actuation, preparation and injection facts')
-console.log('ok test-indicator-hold — actual-scope cue, balanced injection, no timed tail, visible 1.5s preparation and cleanup guards')
+console.log('ok test-indicator-hold — actual-scope cue, balanced injection, no timed tail, visible 1.2s preparation and cleanup guards')

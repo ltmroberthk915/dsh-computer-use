@@ -329,7 +329,7 @@ const CHECKS = [
       const body = m[0];
       if (!/case 0x20A: case 0x20E:/.test(body)) return 'vertical and horizontal wheel must be observed';
       if (!body.includes('PhysicalEvent(m.dwExtraInfo, m.flags, 3)')) return 'injected wheel must not impersonate physical input';
-      if (!body.includes('RecordHumanInput(key, down, up);')) return 'wheel input must reach human ownership';
+      if (!body.includes('RecordHumanInput(key, down, up, deliberate);')) return 'wheel input must reach human ownership';
       if (/\bEngage\(/.test(body)) return 'wheel input must not write a STOP record';
       return null;
     },
@@ -377,25 +377,25 @@ const CHECKS = [
     brk: [/try \{ Glow\.Ask\(false\); \} catch \{ \}/, '/* no ask reset */'],
   },
   {
-    name: 'every breathing border swings the FULL 0..100 and is not eased away',
+    name: 'every breathing border swings 50..140 (raised floor, never dark) and is not eased away',
     file: 'worker',
-    // Twice-asked-for spec. The trough must actually reach 0 and the peak 100, AND the breathing
-    // frames must bypass the shared ~430 ms ease — a 1250 ms pulse pushed through that smoothing
-    // shows up as a border that barely moves, which is what the human saw and rejected.
+    // Human spec 2026-11-04, raised the same day after review: the first floor (25) still read
+    // as too dim at the trough, so the whole band moved up to 50..140. The trough must never
+    // approach 0 and the breathing frames still bypass the shared ~430 ms ease.
     fn: (s) => {
       const bands = [...s.matchAll(/target = (\d+) \+ \(int\)\(Math\.Sin\((\w+) \* 2 \* Math\.PI\) \* (\d+)\);/g)]
       if (bands.length < 2) return `found ${bands.length} breathing band(s), expected 2 (thinking + ask)`
       for (const b of bands) {
         const mid = Number(b[1]), amp = Number(b[3])
-        if (mid !== 50 || amp !== 50) return `a breathing band is ${mid - amp}..${mid + amp}, not the full 0..100 the human asked for`
+        if (mid !== 95 || amp !== 45) return `a breathing band is ${mid - amp}..${mid + amp}, not the 50..140 the human asked for (raised floor, unchanged swing)`
       }
       if (!/flashFrame \|\| breathFrame\) alpha = target/.test(s)) {
         return 'breathing still eases towards its target, which damps the very pulse it is meant to show'
       }
       return null
     },
-    brk: [/target = 50 \+ \(int\)\(Math\.Sin\(askPhase \* 2 \* Math\.PI\) \* 50\);/,
-      'target = 150 + (int)(Math.Sin(askPhase * 2 * Math.PI) * 52);'],
+    brk: [/target = 95 \+ \(int\)\(Math\.Sin\(askPhase \* 2 \* Math\.PI\) \* 45\);/,
+      'target = 170 + (int)(Math.Sin(askPhase * 2 * Math.PI) * 52);'],
   },
 
   // ---------------------------------------------------------------- E. the agent's own Ctrl+Alt+Q

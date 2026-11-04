@@ -6,11 +6,14 @@ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dsh-handoff-owned-'));
 const source=path.resolve(import.meta.dirname,'../lib/core/worker.cs');
 const win=process.env.WINDIR||'C:/Windows',gac=path.join(win,'Microsoft.NET/assembly/GAC_MSIL');
 const refs=['System.dll','System.Core.dll','System.Drawing.dll','System.Web.Extensions.dll','System.Windows.Forms.dll',...['UIAutomationClient','UIAutomationTypes','WindowsBase'].map(n=>path.join(gac,n,'v4.0_4.0.0.0__31bf3856ad364e35',n+'.dll'))];
+refs.push(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/System.Runtime.dll'),
+  path.join(gac, 'System.Runtime.WindowsRuntime/v4.0_4.0.0.0__b77a5c561934e089/System.Runtime.WindowsRuntime.dll'),
+  path.resolve(import.meta.dirname, '../lib/core/winmd/Windows.winmd'));
 const exe=path.join(dir,'fixture.exe');
 try { execFileSync(path.join(win,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:exe','/platform:x64','/optimize+','/main:HumanHandoffFixture','/out:'+exe,...refs.map(r=>'/r:'+r),source,path.join(import.meta.dirname,'human-handoff-fixture.cs')],{windowsHide:true,timeout:30000,encoding:'utf8'}); }
 catch(error){console.error(error.stdout,error.stderr);throw error}
 const native=JSON.parse(execFileSync(exe,[],{windowsHide:true,timeout:15000,encoding:'utf8',env:{...process.env,DSH_HOME:path.join(dir,'home'),DSH_COMPUTER_USE_STOP_FILE:path.join(dir,'STOP'),DSH_COMPUTER_USE_EXIT_FILE:path.join(dir,'EXITED'),DSH_COMPUTER_USE_AUDIT_LOG:path.join(dir,'audit.log')}}));
-assert.equal(native.passed,21);
+assert.equal(native.passed,23);
 const js=[];
 const fresh=()=>new ComputerUse({workerExe:'X:/NOT-STARTED.exe'});
 const event=(cu,phase,revision=1)=>cu.onLine(JSON.stringify({event:'handoff',cooperation:{phase,active:phase!=='idle',revision}}));
@@ -19,6 +22,12 @@ const tick=()=>new Promise(r=>setImmediate(r));
 await test('handoff is separate from manual pause; caches invalidated',async()=>{
  const cu=fresh();cu.lastMarks=[{id:'M1'}];cu.maps.set('77',{});event(cu,'yielding');
  assert.equal(cu.stopped,false);assert.equal(cu.exited,false);assert.equal(cu.cooperation.active,true);assert.equal(cu.lastMarks.length,0);assert.equal(cu.maps.size,0);
+});
+await test('secure-desktop events mirror state without touching cycle flags',async()=>{
+ const cu=fresh();assert.equal(cu.secureDesktop||false,false);
+ cu.onLine(JSON.stringify({event:'secure',why:'active'}));assert.equal(cu.secureDesktop,true);
+ assert.equal(cu.stopped,false);assert.equal(cu.exited,false);assert.equal(cu.cooperation.active,false);
+ cu.onLine(JSON.stringify({event:'secure',why:'cleared'}));assert.equal(cu.secureDesktop,false);
 });
 await test('local wait ends with re-observation; zero model or native polling',async()=>{
  const cu=fresh();event(cu,'waiting');let calls=0;cu.call=async()=>{calls++};

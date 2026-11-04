@@ -47,7 +47,11 @@ $refs = @(
     '/r:System.Web.Extensions.dll', '/r:System.Windows.Forms.dll',
     "/r:$gac\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll",
     "/r:$gac\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll",
-    "/r:$gac\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll"
+    "/r:$gac\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll",
+    # Inbox OCR (2026-11-04): union winmd ships in the package next to this script.
+    "/r:$env:windir\Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll",
+    "/r:$gac\System.Runtime.WindowsRuntime\v4.0_4.0.0.0__b77a5c561934e089\System.Runtime.WindowsRuntime.dll",
+    "/r:$PSScriptRoot\winmd\Windows.winmd"
 )
 
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null

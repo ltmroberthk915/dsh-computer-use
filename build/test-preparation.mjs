@@ -11,6 +11,9 @@ const win = process.env.WINDIR || 'C:/Windows'
 const gac = path.join(win, 'Microsoft.NET/assembly/GAC_MSIL')
 const refs = ['System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll', 'System.Windows.Forms.dll',
   ...['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase'].map(name => path.join(gac, name, 'v4.0_4.0.0.0__31bf3856ad364e35', name + '.dll'))]
+  refs.push(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/System.Runtime.dll'),
+    path.join(gac, 'System.Runtime.WindowsRuntime/v4.0_4.0.0.0__b77a5c561934e089/System.Runtime.WindowsRuntime.dll'),
+    path.resolve(import.meta.dirname, '../lib/core/winmd/Windows.winmd'))
 const exe = path.join(dir, 'preparation.exe')
 try {
   execFileSync(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),

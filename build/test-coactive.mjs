@@ -5,6 +5,9 @@ const source=path.join(import.meta.dirname,'../lib/core/worker.cs');
 const fixture=path.join(import.meta.dirname,'coactive-fixture.cs');
 const win=process.env.WINDIR||'C:/Windows',gac=path.join(win,'Microsoft.NET/assembly/GAC_MSIL');
 const refs=['System.dll','System.Core.dll','System.Drawing.dll','System.Web.Extensions.dll','System.Windows.Forms.dll',...['UIAutomationClient','UIAutomationTypes','WindowsBase'].map(n=>path.join(gac,n,'v4.0_4.0.0.0__31bf3856ad364e35',n+'.dll'))];
+refs.push(path.join(win, 'Microsoft.NET/Framework64/v4.0.30319/System.Runtime.dll'),
+  path.join(gac, 'System.Runtime.WindowsRuntime/v4.0_4.0.0.0__b77a5c561934e089/System.Runtime.WindowsRuntime.dll'),
+  path.resolve(import.meta.dirname, '../lib/core/winmd/Windows.winmd'));
 const exe=path.join(dir,'probe.exe');
 try {
  execFileSync(path.join(win,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),['/nologo','/target:exe','/platform:x64','/optimize+','/main:CoactiveFixture','/out:'+exe,...refs.map(r=>'/r:'+r),source,fixture],{windowsHide:true,timeout:30000,encoding:'utf8'});

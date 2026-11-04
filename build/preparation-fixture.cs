@@ -32,6 +32,9 @@ static class PreparationFixture
             Thread.Sleep(delay);
             Set(typeof(Glow), "_preparationStart", Environment.TickCount);
             Set(typeof(Glow), "_presentedPreparation", Get(typeof(Glow), "_preparationSerial"));
+            // The logic fixture stubs both renderer acknowledgements. The private
+            // desktop guard exercises their ordering with actual presented pixels.
+            Set(typeof(Glow), "_completedPreparation", Get(typeof(Glow), "_preparationSerial"));
             if (after != null) after();
         });
         thread.IsBackground = true; thread.Start(); return thread;
@@ -62,9 +65,9 @@ static class PreparationFixture
         var present = Present(120, null); var watch = Stopwatch.StartNew();
         Invoke("PrepareActuation", "key", Request("one")); duration = watch.ElapsedMilliseconds;
         present.Join();
-        Check(duration >= 1600 && duration < 4000, "cold presentation does not consume the 1500ms warning");
+        Check(duration >= 1300 && duration < 4000, "cold presentation does not consume the 1200ms warning");
         Check(!Glow.Preparing && !Glow.Acting, "preparation never claims input and is cleared");
-        cases.Add("full 1500ms starts after first visible frame; preparation is not actuation");
+        cases.Add("full 1200ms starts after first visible frame; preparation is not actuation");
 
         watch.Restart(); Invoke("PrepareActuation", "key", Request("one"));
         Check(watch.ElapsedMilliseconds < 200, "same batch does not announce each primitive");
