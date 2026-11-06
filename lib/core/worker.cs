@@ -20,6 +20,7 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
@@ -36,19 +37,34 @@ using Windows.Graphics.Imaging;
 
 namespace DshComputerUse.Worker
 {
-    // A live cycle observes physical holds, but only actual actuation can start a handoff.
+    // On-demand cadence: one monotonic timestamp, no timer, history list or disk writes.
+    // Only a successfully displayed cue advances the sliding three-minute window.
+    public sealed class PreparationCadence
+    {
+        public const int FullMs = 1000, RepeatMs = 100, RepeatWindowMs = 180000;
+        long lastShown = -1;
+        public int Duration(long now)
+        { long previous = Interlocked.Read(ref lastShown); return previous >= 0 && now >= previous && now - previous < RepeatWindowMs ? RepeatMs : FullMs; }
+        public void Presented(long now) { Interlocked.Exchange(ref lastShown, now); }
+    }
+
+    // A live cycle observes physical holds; actuation or an explicit scene hold can start a handoff.
     // Once yielded, three quiet seconds with no held input returns control to the agent.
     public sealed class HumanInputState
     {
         public const int SustainedMs = 2000, IdleMs = 3000;
         readonly object sync = new object();
         readonly HashSet<int> held = new HashSet<int>();
+        readonly Dictionary<int, int> releasedSamples = new Dictionary<int, int>();
+        readonly HashSet<int> injectedTouched = new HashSet<int>();
         bool enabled, acting, seen;
         string phase = "idle", lastKind = "none";
-        long first, last, revision, burst;
+        long first, last, revision, burst, stateSeq;
+        int reconciledReleases;
         public string Phase { get { lock (sync) { return phase; } } }
         public long Revision { get { lock (sync) { return revision; } } }
         public bool Active { get { lock (sync) { return phase != "idle"; } } }
+        public bool HasHeld { get { lock (sync) { return held.Count != 0; } } }
         public string LastKind { get { lock (sync) { return lastKind; } } }
         public bool Held(int vk)
         {
@@ -69,7 +85,7 @@ namespace DshComputerUse.Worker
             lock (sync)
             {
                 if (enabled == on) return;
-                enabled = on;
+                enabled = on; stateSeq++;
                 if (!on) { phase = "idle"; acting = false; }
             }
         }
@@ -77,30 +93,30 @@ namespace DshComputerUse.Worker
         {
             lock (sync)
             {
-                acting = on;
+                if (acting != on) { acting = on; stateSeq++; }
                 // Do not replay earlier ordinary activity. A key/button still physically
                 // held does need ownership before we can inject a conflicting chord.
                 if (on && enabled && phase == "idle" && held.Count > 0)
-                { last = now; revision++; Start(now); }
+                { last = now; revision++; stateSeq++; Start(now); }
             }
         }
         void Start(long now) { phase = "yielding"; first = now; if (!seen) last = now; burst++; }
         public void Record(int key, bool down, bool up, long now) { Record(key, down, up, now, false); }
-        /// A DELIBERATE pointer move (the 16-px tolerance in PointerHandoffTolerance has already
-        /// filtered jitter and agent motion) yields even BETWEEN actuations. Human spec
-        /// 2026-11-04: while a cycle is live, the human reaching for the mouse is a takeover no
-        /// matter whether an injection happens to be in flight at that instant — the old gate
-        /// (`idle && !acting`) only lit the yield during the few dozen milliseconds of each
-        /// click, so an interruption in the gaps showed no light at all.
+        /// Pointer jitter is filtered before this call. The protection flag includes both
+        /// actual injection and a retained scene hold; free observation never takes ownership.
         public void Record(int key, bool down, bool up, long now, bool deliberate)
         {
             lock (sync)
             {
                 bool continued = held.Count > 0 || (seen && now - last < IdleMs);
+                stateSeq++;
                 lastKind = key == 0 ? "pointer-or-wheel" : key <= 6 ? "button" : "keyboard";
-                if (key != 0) { if (down) held.Add(key); if (up) held.Remove(key); }
+                if (key != 0) {
+                    if (down) held.Add(key); if (up) held.Remove(key);
+                    releasedSamples.Remove(key); injectedTouched.Remove(key);
+                }
                 seen = true; last = now;
-                if (!enabled || (phase == "idle" && !acting && !deliberate)) return;
+                if (!enabled || (phase == "idle" && !acting)) return;
                 revision++;
                 if (phase == "idle" || !continued) Start(now);
                 if (now - first >= SustainedMs) phase = "waiting";
@@ -111,17 +127,75 @@ namespace DshComputerUse.Worker
             lock (sync)
             {
                 if (!enabled || phase == "idle") return;
-                if (held.Count == 0 && now - last >= IdleMs) { phase = "idle"; return; }
-                if (held.Count > 0 && now - first >= SustainedMs) phase = "waiting";
+                if (held.Count == 0 && now - last >= IdleMs) { phase = "idle"; stateSeq++; return; }
+                if (held.Count > 0 && now - first >= SustainedMs && phase != "waiting") { phase = "waiting"; stateSeq++; }
+            }
+        }
+        public void NoteInjected(int key)
+        {
+            // An injected UP can make async state look released while a human
+            // still physically holds the same key. Never reconcile that case.
+            lock (sync) {
+                foreach (int tracked in held)
+                    if (tracked == key || ModifierFamily(tracked) != 0 && ModifierFamily(tracked) == ModifierFamily(key) ||
+                        (tracked == 1 || tracked == 2) && (key == 1 || key == 2))
+                    { injectedTouched.Add(tracked); releasedSamples.Remove(tracked); }
+            }
+        }
+        static int ModifierFamily(int key)
+        { return key == 0x10 || key == 0xA0 || key == 0xA1 ? 0x10 : key == 0x11 || key == 0xA2 || key == 0xA3 ? 0x11 : key == 0x12 || key == 0xA4 || key == 0xA5 ? 0x12 : 0; }
+        public static bool AsyncButtonMayBeDown(int key, bool swapped, Func<int, bool> isDown)
+        {
+            // Async state names PHYSICAL buttons. With swapped primary/secondary
+            // semantics, require BOTH physical buttons up before repairing either
+            // history entry; never infer the low-level hook's mapping from a UI label.
+            return swapped && (key == 1 || key == 2) ? isDown(1) || isDown(2) : isDown(key);
+        }
+        public int ReconcileReleased(Func<int, bool> isDown, bool trusted, long now)
+        {
+            lock (sync) {
+                if (!trusted) { releasedSamples.Clear(); return 0; }
+                int removed = 0;
+                foreach (int key in held.ToArray()) {
+                    if (injectedTouched.Contains(key) || isDown(key)) { releasedSamples.Remove(key); continue; }
+                    int count; releasedSamples.TryGetValue(key, out count);
+                    if (++count < 3) { releasedSamples[key] = count; continue; }
+                    held.Remove(key); releasedSamples.Remove(key); removed++;
+                }
+                if (removed > 0) {
+                    // This is fresh release evidence, not permission from elapsed
+                    // time: still require the full quiet interval after this point.
+                    last = now; seen = true; lastKind = "reconciled-release";
+                    reconciledReleases += removed; revision++; stateSeq++;
+                }
+                return removed;
             }
         }
         public object Snapshot(long now)
         {
             lock (sync) return Program.Dict("phase", phase, "active", phase != "idle",
-                "revision", revision, "burst", burst, "heldCount", held.Count, "lastKind", lastKind,
+                "revision", revision, "stateSeq", stateSeq, "burst", burst, "heldCount", held.Count, "lastKind", lastKind,
+                "reconciledReleaseCount", reconciledReleases,
                 "quietRemainingMs", phase == "idle" ? 0 : held.Count > 0 ? IdleMs : Math.Max(0, IdleMs - (now - last)),
                 "sustainedMs", SustainedMs, "idleMs", IdleMs);
         }
+    }
+
+    // Domain ownership survives renderer failures and visibility changes. Glow
+    // only reads this state; cycle/operation lifecycle explicitly changes it.
+    public static class SceneControl
+    {
+        static volatile bool acting, holding;
+        public static bool Acting { get { return acting; } }
+        public static bool Holding { get { return holding; } }
+        public static void SetHolding(bool on)
+        {
+            holding = on && Panic.CycleLit && !Panic.Exited && !Panic.Stopped && !Panic.Engaged;
+            Panic.UpdateInputProtection();
+        }
+        public static void BeginActuation() { acting = true; SetHolding(true); }
+        public static void EndActuation() { acting = false; Panic.UpdateInputProtection(); }
+        public static void Reset() { acting = holding = false; Panic.UpdateInputProtection(); }
     }
 
     // The UAC secure desktop (and the lock screen) is the ONE surface automation must never
@@ -447,6 +521,10 @@ namespace DshComputerUse.Worker
         public static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr token);
         [DllImport("advapi32.dll", SetLastError = true)]
         public static extern bool GetTokenInformation(IntPtr token, int cls, out uint info, uint len, out uint ret);
+        [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+        public static extern bool GetTokenInformationBuffer(IntPtr token, int cls, IntPtr info, uint len, out uint ret);
+        [DllImport("advapi32.dll")] public static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+        [DllImport("advapi32.dll")] public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
         public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, TOKEN_QUERY = 0x0008;
         public const int TokenElevation = 20;
         [DllImport("user32.dll")]
@@ -473,6 +551,8 @@ namespace DshComputerUse.Worker
         public static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO bmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
         [DllImport("user32.dll")]
         public static extern bool GetCursorInfo(ref CURSORINFO pci);
+        [DllImport("user32.dll", EntryPoint = "LoadCursorW")]
+        public static extern IntPtr LoadCursor(IntPtr instance, IntPtr resource);
         [DllImport("user32.dll")]
         public static extern bool DrawIconEx(IntPtr hdc, int xLeft, int yTop, IntPtr hIcon, int cxWidth, int cyHeight, int istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
         [DllImport("user32.dll")]
@@ -484,6 +564,10 @@ namespace DshComputerUse.Worker
         public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
         [DllImport("user32.dll")]
         public static extern bool CloseDesktop(IntPtr h);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetThreadDesktop(uint threadId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool GetUserObjectInformation(IntPtr obj, int index, StringBuilder info, int length, out int needed);
 
         // ---- low-level keyboard hook: the human's emergency brake ----
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -572,7 +656,6 @@ namespace DshComputerUse.Worker
         [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
 
         static Thread _thread;
-        static volatile bool _acting;
         static volatile bool _preparing;
         static volatile int _preparationStart;
         static int _preparationSerial, _presentedPreparation, _completedPreparation;
@@ -595,9 +678,12 @@ namespace DshComputerUse.Worker
                 "lastSuccessAgeMs", Volatile.Read(ref _presentSuccesses) == 0 ? (object)null : unchecked((uint)(now - _lastPresentTick)),
                 "lastFailedSerial", Volatile.Read(ref _lastFailedSerial), "lastFailedWant", Volatile.Read(ref _lastFailedWant),
                 "lastWin32Error", Volatile.Read(ref _lastFailedSerial) < 0 ? (object)null : _lastFailedError,
-                "rebuiltSerial", Volatile.Read(ref _rebuiltSerial));
+                "rebuiltSerial", Volatile.Read(ref _rebuiltSerial), "pointerFault", AgentPointer.Fault);
         }
-        public const int PreparationMs = 1200;   // human spec 2026-11-04: shortened from 1500 after review
+        static readonly Stopwatch PreparationClock = Stopwatch.StartNew();
+        static readonly PreparationCadence PreparationFrequency = new PreparationCadence();
+        static volatile int _preparationMs = PreparationCadence.FullMs;
+        public static int PreparationMs { get { return _preparationMs; } }
         static volatile bool _enabled = true;
         static volatile string _label = "AI 正在操控此电脑 · 监听中";
 
@@ -605,22 +691,36 @@ namespace DshComputerUse.Worker
         public static void Touch(int holdMs)
         {
             if (!_enabled) return;
+            _sceneVisible = true;
             _thinking = true;
             EnsureStarted();
         }
-        public static void Off() { _acting = false; _preparing = false; _thinking = false; }
-        public static bool Acting { get { return _acting; } }
+        // Renderer visibility is deliberately separate from scene ownership.
+        // Hiding the indicator must neither release the scene nor resurrect it
+        // on the next frame solely because the authoritative hold is still true.
+        static volatile bool _sceneVisible = true;
+        public static void Off() { _sceneVisible = false; _preparing = false; _thinking = false; }
+        public static bool Acting { get { return SceneControl.Acting; } }
+        public static bool Holding { get { return SceneControl.Holding; } }
         public static bool Preparing { get { return _preparing; } }
         public static bool PreparationVisible { get { return _preparing && Volatile.Read(ref _presentedPreparation) == Volatile.Read(ref _preparationSerial); } }
         public static bool PreparationComplete { get { return _preparing && Volatile.Read(ref _completedPreparation) == Volatile.Read(ref _preparationSerial); } }
-        public static void ActuationBegin() { _acting = true; EnsureStarted(); }
-        public static void ActuationEnd() { _acting = false; }
+        public static void ActuationBegin() { _sceneVisible = true; EnsureStarted(); }
+        public static void ActuationEnd() { }
         public static void Prepare(bool on)
         {
             if (!on) { _preparing = false; return; }
             _preparationStart = 0;
+            _preparationMs = PreparationFrequency.Duration(PreparationClock.ElapsedMilliseconds);
             Interlocked.Increment(ref _preparationSerial);
-            _preparing = true; _enabled = true; EnsureStarted();
+            _preparing = true; _enabled = true; _sceneVisible = true; EnsureStarted();
+        }
+
+        public static void PreparationPresented(int serial)
+        {
+            _preparationStart = Environment.TickCount;
+            PreparationFrequency.Presented(PreparationClock.ElapsedMilliseconds);
+            Volatile.Write(ref _presentedPreparation, serial);
         }
 
         // Nested injection sequences stay observable across drag/key/typing gaps.
@@ -629,7 +729,7 @@ namespace DshComputerUse.Worker
         public static void InputBegin() { Interlocked.Increment(ref _injecting); }
         public static void InputEnd() { if (Interlocked.Decrement(ref _injecting) < 0) _injecting = 0; }
         public static bool Injecting { get { return _injecting > 0; } }
-        public static void KeepActing() { /* Actual operation scope owns the cue, with no trailing hold. */ }
+        public static void KeepActing() { /* Solid blue follows actual input; the separate scene hold survives it. */ }
 
         // Emergency stop must LOOK like one. The normal fade is a slow ease (~1.6 s) which,
         // during a panic, reads as "nothing happened" — so this snaps the overlay to zero on
@@ -637,7 +737,7 @@ namespace DshComputerUse.Worker
         static volatile bool _killNow = false;
         public static void Kill()
         {
-            _acting = false; _preparing = false; _thinking = false; _flashStart = 0;
+            _sceneVisible = false; _preparing = false; _thinking = false; _flashStart = 0;
             _killNow = true;
         }
 
@@ -653,6 +753,7 @@ namespace DshComputerUse.Worker
         public static void Thinking(int holdMs)
         {
             if (!_enabled) return;
+            _sceneVisible = true;
             _thinking = true;
             EnsureStarted();
         }
@@ -689,7 +790,8 @@ namespace DshComputerUse.Worker
         public static int DeriveWant(bool flashOn, int committed)
         {
             if (Panic.Exited) return 0;
-            return _askMode ? 5 : (_stoppedMode ? 4 : (Panic.HumanActive ? 6 : (_preparing ? 7 : (Acting ? 1 : (flashOn ? 2 : committed)))));
+            bool sceneVisible = _enabled && _sceneVisible;
+            return _askMode ? 5 : (_stoppedMode ? 4 : (Panic.HumanActive ? 6 : (_preparing ? 7 : (Acting && sceneVisible ? 1 : (Holding && sceneVisible ? 8 : (flashOn ? 2 : committed))))));
         }
         /// The title states the same fact as the light, derived the same way (an ended session must
         /// not advertise "已暂停 · Ctrl+Alt+R 继续" in the window list).
@@ -697,7 +799,7 @@ namespace DshComputerUse.Worker
         {
             if (Panic.Exited) return "AI 已停止操控 · 未监听";
             return _askMode ? "AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）"
-                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : Panic.HumanActive ? "已让出键鼠 · 等待人操作 · 静默 3 秒后继续" : _preparing ? "即将开始操作，请暂停键鼠 · 1.2 秒准备" : label);
+                : (_stoppedMode ? "已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出" : Panic.HumanActive ? "已让出键鼠 · 等待人操作 · 静默 3 秒后继续" : _preparing ? "即将开始操作，请暂停键鼠 · " + (PreparationMs / 1000.0).ToString("0.0") + " 秒准备" : Acting ? "AI 正在操作 · 请暂勿移动键鼠" : Holding ? "AI 正在检查 · 请保持页面与鼠标位置" : ThinkingActive ? "可自由使用键鼠 · AI 未占用现场" : label);
         }
         static volatile string _shownTitle = null;
         // What the indicator is ACTUALLY rendering right now, readable from outside via `probe`.
@@ -763,7 +865,7 @@ namespace DshComputerUse.Worker
 
         /// Force the overlay into existence. Used when a stop is ADOPTED from another process:
         /// the red border must be visible even though this process never actuated anything.
-        public static void Reveal() { _enabled = true; EnsureStarted(); }
+        public static void Reveal() { _enabled = true; _sceneVisible = true; EnsureStarted(); }
 
         static void EnsureStarted()
         {
@@ -853,6 +955,7 @@ namespace DshComputerUse.Worker
             }
             finally
             {
+                AgentPointer.Dispose();
                 _hwnd = IntPtr.Zero; _shownTitle = null;
                 if (oldBmp != IntPtr.Zero && oldBmp != new IntPtr(-1)) SelectObject(memDc, oldBmp);
                 if (dib != IntPtr.Zero) DeleteObject(dib);
@@ -880,9 +983,9 @@ namespace DshComputerUse.Worker
                 _lastLoopTick = Environment.TickCount;
                 _rendererStage = "rendering";
                 Interlocked.Increment(ref _frames);
-                // Ownership and deep blue use the same actual action scope. There is no
-                // delayed onset or lingering tail during reading, thinking or preparation.
-                bool acting = _enabled && Acting;
+                // Solid blue is actual input; breathing blue retains the scene between
+                // steps. Cyan is reserved for an explicitly free desktop.
+                bool acting = _enabled && _sceneVisible && Acting;
                 bool thinking = ThinkingActive;
                 bool flashOn = _flashStart != 0 && unchecked(Environment.TickCount - _flashStart) < _flashMs;
 
@@ -893,6 +996,7 @@ namespace DshComputerUse.Worker
                 int preparationSerial = Volatile.Read(ref _preparationSerial);
                 int want = DeriveWant(flashOn, committed);
                 _want = want;            // publish it: the state the light is showing, as a fact
+                AgentPointer.Update(want == 1 || want == 8, want == 8);
 
                 // Keep the overlay's WINDOW TITLE in sync with the state, from the render loop.
                 // When the title was only written by Stopped(), a process that INHERITED a stop
@@ -912,6 +1016,7 @@ namespace DshComputerUse.Worker
                 if (_killNow)
                 {
                     _killNow = false;
+                    AgentPointer.Hide();
                     alpha = 0;
                     if (visible) { ShowWindow(hwnd, SW_HIDE); visible = false; }
                     curBitmap = 0; committed = 0; paintedFlash = 0;
@@ -921,7 +1026,7 @@ namespace DshComputerUse.Worker
                 }
                 // want: 0 idle | 1 acting (deep blue) | 3 thinking (pale blue) | 2 flash (yellow)
                 //       4 emergency-stopped (RED, steady — the session is dead until re-armed)
-                int needBitmap = want == 7 ? 6 : want == 6 ? 5 : want == 2 ? 2 : (want == 0 ? curBitmap : (want == 1 ? 3 : (want == 4 || want == 5 ? 4 : 1)));
+                int needBitmap = want == 7 ? 6 : want == 6 ? 5 : want == 2 ? 2 : (want == 0 ? curBitmap : ((want == 1 || want == 8) ? 3 : (want == 4 || want == 5 ? 4 : 1)));
                 // A REPAINT MUST REACH THE SCREEN EVEN WHEN ALPHA DOES NOT MOVE.
                 //
                 // The present below used to be gated on `diff != 0` alone, while the flash snaps
@@ -961,6 +1066,7 @@ namespace DshComputerUse.Worker
                     flashFrame = true;
                 }
                 else if (want == 1) { target = FULL; breathFrame = true; }
+                else if (want == 8) { target = HoldingAlpha(Environment.TickCount); breathFrame = true; }
                 else if (want == 7) { target = 255; breathFrame = true; }
                 else if (want == 4) target = FULL;         // steady red, no breathing
                 else if (want == 6)
@@ -1051,8 +1157,7 @@ namespace DshComputerUse.Worker
                         }
                         if (presented && want == 7 && !PreparationVisible)
                         {
-                            _preparationStart = Environment.TickCount;
-                            Volatile.Write(ref _presentedPreparation, preparationSerial);
+                            PreparationPresented(preparationSerial);
                         }
                         if (presented && want == 7 && preparationElapsed >= PreparationMs)
                             Volatile.Write(ref _completedPreparation, preparationSerial);
@@ -1153,6 +1258,9 @@ namespace DshComputerUse.Worker
             }
             catch { /* display preference only; never changes control or capture behavior */ }
         }
+
+        public static int HoldingAlpha(int tick)
+        { return 120 + (int)Math.Round(42 * (1 - Math.Cos((unchecked((uint)tick) % 2500) * 2 * Math.PI / 2500.0))); }
 
         static void PaintBlue(IntPtr bits, int w, int h, bool intense)
         {
@@ -1449,6 +1557,7 @@ namespace DshComputerUse.Worker
                 CycleLit = false;             // R2: the cycle is dead and must not be revived by anyone
                 _controlsReleased = true;
                 Disarm();                     // ... and its monitors die WITH it, not at the next turn
+                SceneControl.Reset();
                 try { Glow.Kill(); } catch { }
                 try { Glow.Ask(false); } catch { }
                 try { Glow.Stopped(false); } catch { }
@@ -1479,7 +1588,8 @@ namespace DshComputerUse.Worker
                 // is what made the first signed op hide a brake the human had already set.
                 if (_engaged || _stopped)
                 {
-                    try { Glow.Kill(); } catch { }
+                    SceneControl.Reset();
+                try { Glow.Kill(); } catch { }
                     try { Glow.Stopped(true); } catch { }
                     // START the overlay too: `Thinking()` was the only thing that ever did, so a
                     // cycle whose FIRST call arrives with a brake already standing painted nothing at
@@ -1902,7 +2012,8 @@ namespace DshComputerUse.Worker
                             bool showRed = !_exited && CycleLit;
                             if (showRed)
                             {
-                                try { Glow.Kill(); } catch { }
+                                SceneControl.Reset();
+                try { Glow.Kill(); } catch { }
                                 try { Glow.Stopped(true); } catch { }
                                 try { Glow.Reveal(); } catch { }
                             }
@@ -2053,6 +2164,12 @@ namespace DshComputerUse.Worker
                     if (m.dwExtraInfo != OwnMagic) Interlocked.Increment(ref _externalInput);
                     bool physical = PhysicalEvent(m.dwExtraInfo, m.flags, 3);
                     int message = wParam.ToInt32();
+                    if (!physical) {
+                        Interlocked.Exchange(ref _lastInjectedInputAt, HumanClock.ElapsedMilliseconds);
+                        int injectedKey = message == 0x201 || message == 0x202 ? 1 : message == 0x204 || message == 0x205 ? 2 :
+                            message == 0x207 || message == 0x208 ? 4 : message == 0x20B || message == 0x20C ? (((m.mouseData >> 16) & 0xFFFF) == 1 ? 5 : 6) : 0;
+                        if (injectedKey != 0) Handoff.NoteInjected(injectedKey);
+                    }
                     // Significant idle motion invalidates observations, but does not yield.
                     bool movement = message == 0x200 && PointerMotion.Record(m.pt.X, m.pt.Y, physical,
                         true, Handoff.Active, HumanClock.ElapsedMilliseconds);
@@ -2094,6 +2211,10 @@ namespace DshComputerUse.Worker
                     bool down = m == Native.WM_KEYDOWN_ || m == Native.WM_SYSKEYDOWN_;
                     bool up = m == Native.WM_KEYUP_ || m == Native.WM_SYSKEYUP_;
                     bool human = ClassifyAndTrackKey(k.vkCode, down, up, k.dwExtraInfo, k.flags);
+                    if (!human && (down || up)) {
+                        Interlocked.Exchange(ref _lastInjectedInputAt, HumanClock.ElapsedMilliseconds);
+                        Handoff.NoteInjected((int)k.vkCode);
+                    }
                     if (human && (down || up))
                     {
                         RecordHumanInput((int)k.vkCode, down, up);
@@ -2283,6 +2404,7 @@ namespace DshComputerUse.Worker
         public static bool Armed { get { return _armed; } }
         public static bool Exited { get { return _exited; } }
         static readonly Stopwatch HumanClock = Stopwatch.StartNew();
+        static long _lastInjectedInputAt;
         static readonly HumanInputState Handoff = new HumanInputState();
         static readonly object HandoffPublishLock = new object();
         static string _publishedHandoff = "idle";
@@ -2296,6 +2418,7 @@ namespace DshComputerUse.Worker
         {
             var state = (Dictionary<string, object>)Handoff.Snapshot(HumanClock.ElapsedMilliseconds);
             state["inputEpoch"] = InputEpoch; state["mouseTolerancePx"] = PointerHandoffTolerance.DistancePx;
+            state["workerGeneration"] = Program.WorkerGeneration;
             return state;
         }
         static void ResetMonitorRun() { /* Manual recovery must not erase physical input history. */ }
@@ -2307,6 +2430,18 @@ namespace DshComputerUse.Worker
             IntPtr desktop = Native.OpenInputDesktop(0, false, 0x0001);   // DESKTOP_READOBJECT
             if (desktop != IntPtr.Zero) { Native.CloseDesktop(desktop); return true; }
             return false;
+        }
+        static bool OnNormalInputDesktop()
+        {
+            // Async state may fail when the caller lacks desktop hook access.
+            IntPtr desktop = Native.OpenInputDesktop(0, false, 0x0001 | 0x0008);
+            if (desktop == IntPtr.Zero) return false;
+            try {
+                var current = new StringBuilder(256); var input = new StringBuilder(256); int needed;
+                return Native.GetUserObjectInformation(Native.GetThreadDesktop(Native.GetCurrentThreadId()), 2, current, 512, out needed) &&
+                    Native.GetUserObjectInformation(desktop, 2, input, 512, out needed) &&
+                    String.Equals(current.ToString(), input.ToString(), StringComparison.OrdinalIgnoreCase);
+            } finally { Native.CloseDesktop(desktop); }
         }
         /// Polled from the monitor thread. Audits and notifies TRANSITIONS only.
         static void PollSecureDesktop()
@@ -2330,19 +2465,17 @@ namespace DshComputerUse.Worker
             throw error;
         }
         public static void Arm() { _armed = true; Handoff.Enable(CycleLit && !_exited, HumanClock.ElapsedMilliseconds); }
-        public static void Disarm() { _armed = false; Handoff.Enable(false, HumanClock.ElapsedMilliseconds); PublishHandoff(); }
+        public static void Disarm() { _armed = false; SceneControl.Reset(); Handoff.Enable(false, HumanClock.ElapsedMilliseconds); PublishHandoff(); }
         public static void AgentActed() { _agentActAt = Environment.TickCount; }
         public static void BeginActuation()
         {
             POINT point; if (Native.GetCursorPos(out point)) PointerMotion.Reset(point.X, point.Y);
-            Glow.ActuationBegin();
+            SceneControl.BeginActuation(); Glow.ActuationBegin();
             Handoff.SetActing(true, HumanClock.ElapsedMilliseconds);
         }
-        public static void EndActuation()
-        {
-            Handoff.SetActing(false, HumanClock.ElapsedMilliseconds);
-            Glow.ActuationEnd();
-        }
+        public static void EndActuation() { SceneControl.EndActuation(); Glow.ActuationEnd(); }
+        public static void UpdateInputProtection()
+        { Handoff.SetActing(SceneControl.Acting || SceneControl.Holding, HumanClock.ElapsedMilliseconds); }
         static bool IsBareModifier(uint vk)
         {
             return vk == Native.VK_SHIFT || vk == Native.VK_CONTROL || vk == Native.VK_MENU ||
@@ -2375,7 +2508,12 @@ namespace DshComputerUse.Worker
                 _publishedInputEpoch = epoch;
                 if (!ControlListenersEnabled && !CycleLit && phase == "idle") return;
                 if (phase != "idle") Glow.HumanYield();
-                if (changed) Program.AuditRecord("HUMAN-HANDOFF", "phase=" + phase + "; revision=" + HumanRevision + "; kind=" + Handoff.LastKind);
+                if (changed) {
+                    var state = (Dictionary<string, object>)CooperationState();
+                    Program.AuditRecord("HUMAN-HANDOFF", "phase=" + phase + "; revision=" + state["revision"] +
+                        "; kind=" + state["lastKind"] + "; heldCount=" + state["heldCount"] +
+                        "; quietRemainingMs=" + state["quietRemainingMs"] + "; inputEpoch=" + state["inputEpoch"]);
+                }
                 Notify("handoff", phase);
             }
         }
@@ -2386,14 +2524,37 @@ namespace DshComputerUse.Worker
             PollSecureDesktop();
             long now = HumanClock.ElapsedMilliseconds;
             Handoff.Enable(_armed && CycleLit && !_exited, now);
+            IntPtr sampleForeground = IntPtr.Zero;
+            bool trusted = Handoff.HasHeld && CanReconcileHeld(_hooksReady, _thread != null && _thread.IsAlive, SecureDesktopActive,
+                SceneControl.Acting, Glow.Injecting, now - Interlocked.Read(ref _lastInjectedInputAt), OnNormalInputDesktop()) &&
+                Program.CanObserveAsyncKeys(out sampleForeground);
+            bool swapped = Native.GetSystemMetrics(23) != 0; // SM_SWAPBUTTON
+            int reconciled = Handoff.ReconcileReleased(delegate(int key) {
+                bool down = HumanInputState.AsyncButtonMayBeDown(key, swapped,
+                    delegate(int physical) { return (Native.GetAsyncKeyState(physical) & 0x8000) != 0; });
+                // A foreground/desktop switch during the sample makes zero unknown,
+                // never evidence of release. The next tick checks the new token.
+                return down || Native.GetForegroundWindow() != sampleForeground || !OnNormalInputDesktop();
+            }, trusted, now);
+            if (reconciled > 0) Program.AuditRecord("HUMAN-RELEASE-RECONCILED", "count=" + reconciled + "; source=three-normal-desktop-async-up-samples; quietMs=" + HumanInputState.IdleMs);
             Handoff.Tick(now);
             if (Handoff.Active) Program.ReleaseOwnedInputs();
             PublishHandoff();
         }
+        static bool CanReconcileHeld(bool hooksReady, bool hookAlive, bool secure, bool acting, bool injecting, long sinceInjected, bool inputDesktop)
+        { return hooksReady && hookAlive && !secure && !acting && !injecting && sinceInjected >= 300 && inputDesktop; }
 
         static RecoveryPermit _temporary;
         static long _externalInput;
         public static string TemporaryPauseId { get { lock (SyncLock) { return _temporary == null ? "" : _temporary.Id; } } }
+        public static string EventPauseId(string kind)
+        {
+            // Handoff events are serialized under HandoffPublishLock. Lifecycle
+            // transitions take SyncLock then publish, so their notification must
+            // not take SyncLock in the reverse order. These two observation events
+            // neither own nor consume temporary-pause credentials.
+            return kind == "handoff" || kind == "secure" ? "" : TemporaryPauseId;
+        }
         public static void ObserveTemporary(string id)
         {
             lock (SyncLock) { if (_temporary != null && _temporary.Id == id) _temporary.Observed = true; }
@@ -2469,6 +2630,7 @@ namespace DshComputerUse.Worker
                         InputVersion = Interlocked.Read(ref _externalInput), InputTick = Native.LastInputTick() };
                     WriteStopFile(why + "\nsource=agent-temporary\npauseId=" + _temporary.Id);
                 }
+                SceneControl.Reset();
                 try { Glow.Kill(); } catch { }
                 try { Glow.Stopped(true); } catch { }   // red border + red badge: unmistakable
                 // THE BRAKE IS A STATE CHANGE, SO IT GETS A LINE (2026-09-14). This is the record the
@@ -2531,6 +2693,7 @@ namespace DshComputerUse.Worker
                 Program.AuditRecord("ENGAGE-ASK", "source=agent" +
                     "; askPid=" + Process.GetCurrentProcess().Id +
                     "; cycleLit=" + (CycleLit ? 1 : 0) + "; why=" + why);
+                SceneControl.Reset();
                 try { Glow.Kill(); } catch { }
                 try { Glow.Ask(true); } catch { }        // fast-breathing RED, not the steady stop
                 announce = true;
@@ -2963,6 +3126,51 @@ namespace DshComputerUse.Worker
         }
     }
 
+    // Only complete window-management chords may change their own foreground receiver.
+    // Every down still passes the ordinary receiver guard. After the final accepted down,
+    // only this chord's owned releases may bypass that guard; human/pause/cancel still win.
+    public static class WindowManagementChord
+    {
+        public static bool IsExact(string canonical)
+        {
+            switch (canonical)
+            {
+                case "alt+tab": case "alt+shift+tab": case "alt+esc": case "alt+shift+esc":
+                case "win+d": case "win+tab": case "win+left": case "win+right": case "win+up": case "win+down":
+                case "rwin+d": case "rwin+tab": case "rwin+left": case "rwin+right": case "rwin+up": case "rwin+down":
+                    return true;
+                default: return false;
+            }
+        }
+
+        public static void Run(IList<ushort> keys, Action<ushort, bool> send,
+            Action<ushort> release, Func<ushort, bool> isDown, Action hold,
+            Action checkContinuation, Action invalidateTarget)
+        {
+            int acceptedDowns = 0;
+            try
+            {
+                KeyboardChord.Run(keys, delegate(ushort key, bool up) {
+                    if (up && acceptedDowns == keys.Count)
+                    {
+                        checkContinuation();
+                        release(key); // ledger-backed: never releases someone else's key
+                    }
+                    else
+                    {
+                        send(key, up);
+                        if (!up) acceptedDowns++;
+                    }
+                }, release, isDown, hold);
+            }
+            finally
+            {
+                // Even a partial chord can open system UI. No stale sticky/refocus continuation.
+                if (acceptedDowns > 0) invalidateTarget();
+            }
+        }
+    }
+
     public sealed class ClipboardBytes
     {
         public uint Format;
@@ -3163,6 +3371,16 @@ namespace DshComputerUse.Worker
 
     static class Program
     {
+        public const int ProtocolVersion = 2;
+        public static readonly string WorkerGeneration = Guid.NewGuid().ToString("N");
+        static Dictionary<string, object> RuntimeIdentity()
+        {
+            return Dict("packageVersion", Environment.GetEnvironmentVariable("DSH_CU_PACKAGE_VERSION") ?? "unreported",
+                "buildId", Environment.GetEnvironmentVariable("DSH_CU_BUILD_ID") ?? "unreported",
+                "sourceHash", Environment.GetEnvironmentVariable("DSH_CU_SOURCE_HASH") ?? "unreported",
+                "binaryHash", Environment.GetEnvironmentVariable("DSH_CU_BINARY_HASH") ?? "unreported",
+                "protocolVersion", ProtocolVersion, "workerGeneration", WorkerGeneration);
+        }
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
         static int _reqId = 0;
         static readonly object OutLock = new object();   // responses AND unsolicited events share stdout
@@ -3225,6 +3443,33 @@ namespace DshComputerUse.Worker
             return Native.SendInput((uint)inputs.Length, inputs, InputCbSize);
         };
         internal static Func<IntPtr> PreparationForeground = delegate { return Native.GetForegroundWindow(); };
+        internal static Func<IntPtr> InputForeground = delegate { return TopLevel(Native.GetForegroundWindow()); };
+        internal static Func<IntPtr> InputPointReceiver = delegate {
+            POINT p; return Native.GetCursorPos(out p) ? TopLevel(Native.WindowFromPoint(p)) : IntPtr.Zero;
+        };
+        internal static Func<IntPtr, bool> InputWindowExists = delegate(IntPtr h) { return Native.IsWindow(h); };
+        internal static Func<IntPtr, uint> InputWindowPid = delegate(IntPtr h) { return PidOf(h); };
+        [ThreadStatic] static Action _receiverCheck;
+        sealed class ReceiverScope : IDisposable
+        {
+            readonly Action previous;
+            public ReceiverScope(Action check) { previous = _receiverCheck; check(); _receiverCheck = check; }
+            public void Dispose() { _receiverCheck = previous; }
+        }
+        static string InputReceiverProblem(long expected, uint expectedPid, bool exists, uint livePid, long actual)
+        {
+            if (expected == 0 || !exists || livePid != expectedPid) return "observed target disappeared or changed identity";
+            if (actual != expected) return "input receiver changed from hwnd=" + expected + " to hwnd=" + actual;
+            return null;
+        }
+        static IDisposable GuardReceiver(IntPtr expected, uint pid, bool keyboard)
+        {
+            return new ReceiverScope(delegate {
+                IntPtr actual = keyboard ? InputForeground() : InputPointReceiver();
+                string problem = InputReceiverProblem(expected.ToInt64(), pid, InputWindowExists(expected), InputWindowPid(expected), actual.ToInt64());
+                if (problem != null) throw InputInterrupted("INPUT_TARGET_CHANGED", problem + ". Remaining input was refused; inspect any partial effect before retrying.");
+            });
+        }
 
         static Exception InputInterrupted(string code, string message)
         {
@@ -3321,11 +3566,31 @@ namespace DshComputerUse.Worker
         }
         public static bool CancelInput(int requestId)
         {
-            if (requestId <= 0 || requestId <= _lastCompletedRequestId) return false;
-            CancelledRequests[requestId] = true;
-            if (_activeRequestId == requestId)
-            { Interlocked.Increment(ref _cancelGeneration); ReleaseOwnedInputs(); }
-            return true;
+            return GetB(CancelInputStatus(requestId), "cancelled", false);
+        }
+        static Dictionary<string, object> CancelInputStatus(int requestId)
+        {
+            bool valid = requestId > 0;
+            bool completed = valid && requestId <= _lastCompletedRequestId;
+            if (valid && !completed) CancelledRequests[requestId] = true;
+            bool active = valid && _activeRequestId == requestId;
+            if (active) Interlocked.Increment(ref _cancelGeneration);
+            bool cleanup = false; int owned = -1; string state = valid ? "input-lock-busy" : "invalid-request";
+            // The reader must remain responsive even if SendInput/provider work
+            // owns InputLock. Failure to obtain it is uncertainty, not clean-up.
+            if (valid && Monitor.TryEnter(InputLock, 200)) {
+                try {
+                    // Never release a newer request's accepted input on behalf
+                    // of an older cancellation.
+                    if (_activeRequestId == requestId) ReleaseOwnedInputs();
+                    owned = OwnedUps.Count;
+                    cleanup = owned == 0;
+                    state = cleanup ? "no-owned-input" : "owned-input-remains";
+                } finally { Monitor.Exit(InputLock); }
+            }
+            return Dict("requestId", requestId, "cancelled", valid && !completed,
+                "cleanupConfirmed", cleanup, "ownedInputCount", owned, "cleanupState", state,
+                "workerGeneration", WorkerGeneration);
         }
         static string InputKey(INPUT input, out bool up, out INPUT release, out int physical)
         {
@@ -3366,6 +3631,8 @@ namespace DshComputerUse.Worker
                     string key = InputKey(inputs[0], out isUp, out release, out physical);
                     if (isUp && key != null && !OwnedUps.ContainsKey(key)) return 1;
                 }
+                if (_receiverCheck != null) _receiverCheck();
+                CheckHumanInput();
                 uint sent = InputSender(inputs);
                 if (sent > 0) _operationDispatched = true;
                 for (int i = 0; i < Math.Min(sent, inputs.Length); i++)
@@ -3509,6 +3776,16 @@ namespace DshComputerUse.Worker
         [STAThread]
         static int Main(string[] args)
         {
+            // The cursor guardian owns only the temporary visual-hide lease. It
+            // must never install input hooks, open a control cycle or emit worker
+            // protocol messages into the parent's inherited output stream.
+            if (args.Length > 0 && args[0] == "--pointer-guardian")
+            {
+                int ownerPid; long ownerStartTicks;
+                if (args.Length != 4 || !Int32.TryParse(args[2], out ownerPid) ||
+                    !Int64.TryParse(args[3], out ownerStartTicks)) return 2;
+                return PointerVisibilityLease.GuardianMain(args[1], ownerPid, ownerStartTicks);
+            }
             // DPI awareness first: it decides the coordinate space of everything below
             // (GetSystemMetrics, GetCursorPos, capture pixels, UIA rects AND the
             // interpretation of SendInput's absolute coordinates). Record which call won.
@@ -3537,8 +3814,9 @@ namespace DshComputerUse.Worker
                     // lives; the consumer can read the fields and draw no conclusion the worker did
                     // not record itself.
                     string hint;
-                    if (kind == "panic" && !string.IsNullOrEmpty(Panic.TemporaryPauseId))
-                        hint = "Agent temporary diagnostic pause. Inspect the current target, then use checked recover only if the blocker is resolved. Credential: " + Panic.TemporaryPauseId;
+                    string pauseId = Panic.EventPauseId(kind);
+                    if (kind == "panic" && !string.IsNullOrEmpty(pauseId))
+                        hint = "Agent temporary diagnostic pause. Inspect the current target, then use checked recover only if the blocker is resolved. Credential: " + pauseId;
                     else if (kind == "panic")
                         hint = "STOPPED (brake engaged). The machine is stopped: nothing that drives it runs " +
                                "until a human resumes with Ctrl+Alt+R. WRAP UP NOW: one short summary of what " +
@@ -3563,7 +3841,7 @@ namespace DshComputerUse.Worker
                     WriteLine(Json.Serialize(Dict(
                         "event", kind,
                         "why", why,
-                        "pauseId", Panic.TemporaryPauseId,
+                        "pauseId", pauseId,
                         "cooperation", Panic.CooperationState(),
                         "ts", NowMs(),
                         "hint", hint)));
@@ -3600,6 +3878,8 @@ namespace DshComputerUse.Worker
             Dictionary<string, object> hello = Dict(
                 "event", "ready",
                 "pid", Process.GetCurrentProcess().Id,
+                "protocolVersion", ProtocolVersion, "workerGeneration", WorkerGeneration,
+                "runtime", RuntimeIdentity(),
                 // COLD-START STATE, REPORTED AS A FACT (cold-start bug, 2026-09-13): this process has
                 // already adopted any STOP/EXITED record that was on disk before it existed, so the
                 // core can start from the machine's real state instead of "not stopped" — the two
@@ -3624,9 +3904,9 @@ namespace DshComputerUse.Worker
                             {
                                 object argsValue;
                                 var cancelArgs = request.TryGetValue("args", out argsValue) ? argsValue as Dictionary<string, object> : null;
-                                bool cancelled = cancelArgs != null && CancelInput(GetI(cancelArgs, "requestId", 0));
+                                var cancellation = CancelInputStatus(cancelArgs == null ? 0 : GetI(cancelArgs, "requestId", 0));
                                 WriteLine(parser.Serialize(Dict("id", GetI(request, "id", 0), "ok", true,
-                                    "data", Dict("cancelled", cancelled))));
+                                    "data", cancellation)));
                                 continue;
                             }
                         } catch { /* Main loop reports malformed requests in the normal format. */ }
@@ -3893,7 +4173,7 @@ namespace DshComputerUse.Worker
                         // Is a real injection sequence in flight RIGHT NOW? The ACTING light is driven
                         // by the actual action scope, so both are reported as observable facts.
                         "injecting", Glow.Injecting,
-                        "acting", Glow.Acting, "preparing", Glow.Preparing, "preparationMs", Glow.PreparationMs,
+                        "acting", Glow.Acting, "holding", Glow.Holding, "preparing", Glow.Preparing, "preparationMs", Glow.PreparationMs,
                         "title", Glow.ShownTitle == null ? "" : Glow.ShownTitle);
                     // EVENTS THE OS ACTUALLY INSERTED (not the plan): 0 after a plain pause with
                     // nothing held is the observable form of "no ghost right-click / Alt menu".
@@ -4090,6 +4370,7 @@ namespace DshComputerUse.Worker
             IntPtr old = Native.SelectObject(mem, dib);
             // SRCCOPY | CAPTUREBLT so layered windows are included
             Native.BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020 | 0x40000000);
+            long capturedAt = NowMs();
             bool cursorDrawn = false;
             int cursorFlags = 0, cursorAtX = 0, cursorAtY = 0;
             if (withCursor)
@@ -4152,13 +4433,16 @@ namespace DshComputerUse.Worker
                 ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, q);
                 outBmp.Save(ms, codec, ep);
             }
+            int imageWidth = outBmp.Width, imageHeight = outBmp.Height;
             outBmp.Dispose();
             POINT cp2; Native.GetCursorPos(out cp2);
             Dictionary<string, object> res = Dict(
                 "image", Convert.ToBase64String(ms.ToArray()),
                 "mime", mime,
                 "region", Dict("x", x, "y", y, "width", w, "height", h),
-                "scaledTo", maxWidth > 0 ? maxWidth : w,
+                "scaledTo", imageWidth,
+                "imageSize", new int[] { imageWidth, imageHeight },
+                "capturedAt", capturedAt,
                 "cursor", PtDict(cp2.X, cp2.Y),
                 "ts", NowMs());
             if (withCursor)
@@ -4170,7 +4454,8 @@ namespace DshComputerUse.Worker
                 res["cursorDrawn"] = cursorDrawn;
                 res["cursorFlags"] = cursorFlags;
                 res["cursorScreenPos"] = PtDict(cursorAtX, cursorAtY);
-                res["cursorInImage"] = PtDict(cursorAtX - x, cursorAtY - y);
+                res["cursorInImage"] = Dict("x", (cursorAtX - x) * (double)imageWidth / w,
+                    "y", (cursorAtY - y) * (double)imageHeight / h);
                 res["cursorNote"] = cursorDrawn
                     ? "pointer burned into the image at cursorInImage"
                     : ((cursorFlags & 1) == 0
@@ -4316,6 +4601,46 @@ namespace DshComputerUse.Worker
             SendInputChecked(new INPUT[] { inp });
         }
 
+        internal static string StandardCursorShape(IntPtr cursor, Func<int, IntPtr> load)
+        {
+            if (cursor == IntPtr.Zero) return "unknown";
+            int[] ids = { 32644, 32645, 32643, 32642, 32646, 32512, 32513, 32649, 32514, 32515, 32648, 32650, 32651 };
+            string[] names = { "resize-ew", "resize-ns", "resize-nesw", "resize-nwse", "move", "arrow", "ibeam", "hand", "wait", "cross", "not-allowed", "app-starting", "help" };
+            for (int i = 0; i < ids.Length; i++) if (load(ids[i]) == cursor) return names[i];
+            return "unknown"; // Custom/browser-drawn cursors do not reveal a CSS value.
+        }
+
+        static bool CursorMatches(string expected, string actual, bool visible)
+        {
+            if (String.IsNullOrEmpty(expected)) return true;
+            if (!visible || actual == "unknown") return false;
+            return expected == "resize" ? actual.StartsWith("resize-", StringComparison.Ordinal) : expected == actual;
+        }
+
+        static Dictionary<string, object> CursorEvidence(bool available, bool visible, IntPtr cursor, Func<int, IntPtr> load)
+        {
+            visible = available && visible;
+            string shape = visible ? StandardCursorShape(cursor, load) : "unknown";
+            string classification = !available ? "unavailable" : !visible ? "not-visible" : shape == "unknown" ? "unrecognized" : "standard";
+            var result = Dict("available", available, "visible", visible, "shape", shape,
+                "classification", classification, "source", "win32-standard-cursor");
+            if (classification == "unrecognized")
+                result["note"] = "Visible cursor handle does not match a supported Windows standard cursor. Browser col-resize/row-resize and custom cursors may be unrecognized; this does not prove a hit or a miss on a draggable handle.";
+            return result;
+        }
+
+        static Dictionary<string, object> CursorSnapshot()
+        {
+            CURSORINFO ci = new CURSORINFO();
+            ci.cbSize = (uint)Marshal.SizeOf(typeof(CURSORINFO));
+            bool available = Native.GetCursorInfo(ref ci);
+            bool visible = available && (ci.flags & Native.CURSOR_SHOWING) != 0;
+            var result = CursorEvidence(available, visible, ci.hCursor,
+                delegate(int id) { return Native.LoadCursor(IntPtr.Zero, new IntPtr(id)); });
+            result["screenPos"] = available ? (object)PtDict(ci.ptScreenPos.X, ci.ptScreenPos.Y) : null;
+            return result;
+        }
+
         static Dictionary<string, object> Move(Dictionary<string, object> a)
         {
             int x = GetI(a, "x", int.MinValue), y = GetI(a, "y", int.MinValue);
@@ -4337,11 +4662,75 @@ namespace DshComputerUse.Worker
                 Native.GetCursorPos(out p);
             }
             CheckHumanInput();
-            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections);
+            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections, "cursor", CursorSnapshot());
+        }
+
+        static Rectangle ClickSampleRegion(int x, int y, Rectangle desktop)
+        {
+            int width = Math.Min(340, desktop.Width), height = Math.Min(340, desktop.Height);
+            if (width <= 0 || height <= 0) return Rectangle.Empty;
+            int left = (int)Math.Min(Math.Max((long)x - width / 2, desktop.Left), (long)desktop.Right - width);
+            int top = (int)Math.Min(Math.Max((long)y - height / 2, desktop.Top), (long)desktop.Bottom - height);
+            return new Rectangle(left, top, width, height);
+        }
+
+        static int VerificationNumber(Dictionary<string, object> rectangle, string key)
+        {
+            object raw;
+            if (!rectangle.TryGetValue(key, out raw) || !(raw is int || raw is long || raw is double || raw is float || raw is decimal))
+                throw new ArgumentException("missing integer " + key);
+            double n = Convert.ToDouble(raw);
+            if (Double.IsNaN(n) || Double.IsInfinity(n) || n != Math.Truncate(n) || n <= Int32.MinValue || n > Int32.MaxValue)
+                throw new ArgumentException("invalid integer " + key);
+            return (int)n;
+        }
+        static Rectangle VerificationSampleRegion(Dictionary<string, object> a, int x, int y, Rectangle desktop)
+        {
+            if (!a.ContainsKey("verificationRegion")) return ClickSampleRegion(x, y, desktop);
+            try {
+                var box = a["verificationRegion"] as Dictionary<string, object>;
+                if (box == null) throw new ArgumentException("expected rectangle object");
+                int rx = VerificationNumber(box, "x"), ry = VerificationNumber(box, "y");
+                int rw = VerificationNumber(box, "width"), rh = VerificationNumber(box, "height");
+                if (rw <= 0 || rh <= 0 || (long)rw * rh > 16777216 ||
+                    (long)rx + rw > Int32.MaxValue || (long)ry + rh > Int32.MaxValue)
+                    throw new ArgumentException("positive size, 16M pixel maximum, non-overflowing edges required");
+                Rectangle requested = new Rectangle(rx, ry, rw, rh);
+                Rectangle visible = Rectangle.Intersect(requested, desktop);
+                if (visible.Width <= 0 || visible.Height <= 0) throw new ArgumentException("region is outside the virtual desktop");
+                return visible;
+            } catch (Exception error) {
+                var refusal = new ArgumentException("INVALID_VERIFICATION_REGION: " + error.Message + "; no input was dispatched.");
+                refusal.Data["code"] = "INVALID_VERIFICATION_REGION"; refusal.Data["outcome"] = "not-dispatched";
+                throw refusal;
+            }
+        }
+        static void AddPixelVerification(Dictionary<string, object> result, Dictionary<string, object> args,
+            Rectangle region, byte[] before, byte[] after)
+        {
+            result["effectVerified"] = false;
+            result["verificationAvailable"] = before != null && after != null && before.Length > 0 && before.Length == after.Length;
+            result["verificationSource"] = args.ContainsKey("verificationRegion") ? "requested-region" : "click-neighborhood";
+            result["verificationRegion"] = Dict("x", region.X, "y", region.Y, "width", region.Width, "height", region.Height);
+            if (args.ContainsKey("verificationRegion")) result["requestedVerificationRegion"] = args["verificationRegion"];
+            if (!(bool)result["verificationAvailable"]) {
+                result["verificationNote"] = "Pixel samples unavailable; input completion does not establish the intended effect.";
+                return;
+            }
+            double changed = Math.Round(SigDiffPct(before, after, 8), 2);
+            result["changedPct"] = changed;
+            result["verificationNote"] = "Sampled pixel difference only, not semantic verification. Inspect the expected result before replaying input.";
+            if (changed < 0.15 && !args.ContainsKey("verify"))
+                result["warning"] = "No sampled change in the " + (args.ContainsKey("verificationRegion") ? "requested witness region" : "click neighborhood") +
+                    ". This is expected for an already-focused or already-satisfied control; an effect may also be delayed or elsewhere. " +
+                    "Check the intended state and focus/receiver before retrying.";
         }
 
         static Dictionary<string, object> Click(Dictionary<string, object> a)
         {
+            Rectangle sampleRegion = VerificationSampleRegion(a, GetI(a, "x", 0), GetI(a, "y", 0), new Rectangle(
+                Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN),
+                Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN)));
             string btn = GetS(a, "button", "left");
             int clicks = Math.Max(1, Math.Min(3, GetI(a, "clicks", 1)));
             int gap = GetI(a, "intervalMs", 60);
@@ -4471,41 +4860,33 @@ namespace DshComputerUse.Worker
                 // The window under the click point becomes the sticky target for later typing.
                 try { SetSticky(under); } catch { }
             }
-            // POST-condition, general: did ANYTHING change where we clicked? A click that changes
-            // nothing within a quarter second did not reach its target (dead UI, disabled control,
-            // missed pixel, wrong element) — and "no change" is exactly the silent failure that
-            // used to be indistinguishable from success. Region sampling is ~1700 pixels, cheaper
-            // than a screenshot by three orders of magnitude.
-            int vsW = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
-            int vsH = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            // A cheap pixel witness, not a business-success condition. The caller may
+            // identify an effect elsewhere (e.g. a player bar), independently of the click.
             bool verify = (tx != int.MinValue) && GetB(a, "verify", true);
-            int half = 170, margin = 90;
-            int bx = Math.Min(Math.Max(tx - half, margin), Math.Max(margin, vsW - margin - 2 * half));
-            int by = Math.Min(Math.Max(ty - half, margin), Math.Max(margin, vsH - margin - 2 * half));
-            int bw = Math.Min(2 * half, Math.Max(16, vsW - 2 * margin));
-            int bh = Math.Min(2 * half, Math.Max(16, vsH - 2 * margin));
+            int bx = sampleRegion.X, by = sampleRegion.Y, bw = sampleRegion.Width, bh = sampleRegion.Height;
             byte[] before = verify ? FrameSignatureRect(bx, by, bw, bh, 8) : null;
 
             // Re-ask at the moment of injection: the pointer has travelled since the precondition
             // above, and the only promise that matters is about the pixel the button is really
             // pressed on. Cheap (one WindowFromPoint) and it closes the window between check and use.
             if (tx != int.MinValue) HostGuardPoint(tx, ty, "click");
+            if (under == IntPtr.Zero) under = InputPointReceiver();
 
             uint down = Native.MOUSEEVENTF_LEFTDOWN, up = Native.MOUSEEVENTF_LEFTUP;
             if (btn == "right") { down = Native.MOUSEEVENTF_RIGHTDOWN; up = Native.MOUSEEVENTF_RIGHTUP; }
             else if (btn == "middle") { down = Native.MOUSEEVENTF_MIDDLEDOWN; up = Native.MOUSEEVENTF_MIDDLEUP; }
-            for (int i = 0; i < clicks; i++)
-            {
-                SendMouse(down, 0, 0, 0); Thread.Sleep(30); SendMouse(up, 0, 0, 0);
-                if (i < clicks - 1) Thread.Sleep(gap);
+            using (GuardReceiver(under, InputWindowPid(under), false)) {
+                for (int i = 0; i < clicks; i++) {
+                    SendMouse(down, 0, 0, 0); Thread.Sleep(30); SendMouse(up, 0, 0, 0);
+                    if (i < clicks - 1) Thread.Sleep(gap);
+                }
             }
             EndActuationForReadback();
-            double changedPct = -1;
+            byte[] after = null;
             if (verify && before != null)
             {
                 Thread.Sleep(GetI(a, "verifyDelayMs", 240));
-                byte[] after = FrameSignatureRect(bx, by, bw, bh, 8);
-                if (after != null) changedPct = Math.Round(SigDiffPct(before, after, 8), 2);
+                after = FrameSignatureRect(bx, by, bw, bh, 8);
             }
             POINT fp; Native.GetCursorPos(out fp);
             Dictionary<string, object> clickFocus = FocusReport(a, false);
@@ -4515,16 +4896,56 @@ namespace DshComputerUse.Worker
             if (coveredBy != null) clickOut["coveredBy"] = coveredBy;
             if (under != IntPtr.Zero)
                 clickOut["receiver"] = Short(WinTitleOf(under), 40) + " (pid " + PidOf(under) + ")";
-            if (changedPct >= 0)
-            {
-                clickOut["changedPct"] = changedPct;
-                if (changedPct < 0.15 && !a.ContainsKey("verify"))
-                    clickOut["warning"] = "nothing changed near the click point within ~240ms. This is EXPECTED when the " +
-                        "click lands on an already-focused editor or a control already in the desired state (a caret blink " +
-                        "alone sits below the threshold — test report 2026-11-04); it can also mean a dead/disabled control " +
-                        "or a wrong pixel. Read focus/receiver above and only retry if they disagree with the intent.";
-            }
+            if (verify) AddPixelVerification(clickOut, a, sampleRegion, before, after);
             return clickOut;
+        }
+
+        static Exception DragPrecondition(string code, string detail)
+        {
+            var error = InputInterrupted(code, detail + " No drag button was pressed; earlier focus or pointer movement may have occurred.");
+            error.Data["dragStarted"] = false;
+            return error;
+        }
+
+        static Dictionary<string, object> CheckDragCursor(string expected, Dictionary<string, object> actual)
+        {
+            expected = (expected ?? "").Trim().ToLowerInvariant();
+            string shape = (string)actual["shape"];
+            string classification = (string)actual["classification"];
+            string status = expected.Length == 0 ? "not-requested" : CursorMatches(expected, shape, (bool)actual["visible"])
+                ? "matched" : classification == "standard" ? "mismatched" : "unverifiable";
+            var check = Dict("status", status, "expected", expected.Length == 0 ? null : (object)expected, "observed", shape);
+            if (status == "mismatched" || status == "unverifiable") {
+                string detail = status == "mismatched"
+                    ? "Expected " + expected + ", observed standard cursor " + shape + ". Re-observe the intended handle before retrying."
+                    : "Cannot verify expected cursor " + expected + ": classification=" + classification + ". An unknown/unavailable cursor is not proof of an incorrect target. Browser col-resize/row-resize may use nonstandard cursors. If fresh independent geometry and hit-testing confirm the handle, the optional expectCursor may be omitted; verify the application result afterward.";
+                // Keep the existing error code for callers; cursorCheck distinguishes a known
+                // shape disagreement from missing evidence. Neither is converted to a match.
+                var error = DragPrecondition("CURSOR_MISMATCH", detail);
+                error.Data["expectedCursor"] = expected;
+                error.Data["actualCursor"] = actual;
+                error.Data["cursorCheck"] = check;
+                throw error;
+            }
+            return check;
+        }
+
+        static IntPtr CheckDragStart(Dictionary<string, object> a, int x, int y)
+        {
+            HostGuardPoint(x, y, "drag");
+            POINT point; point.X = x; point.Y = y;
+            IntPtr under = TopLevel(Native.WindowFromPoint(point));
+            IntPtr want = a.ContainsKey("expectHwnd") ? new IntPtr(GetI(a, "expectHwnd", 0)) : _stickyHwnd;
+            if (under == IntPtr.Zero) throw DragPrecondition("DRAG_START_UNREACHABLE", "No window owns the drag start pixel.");
+            if (want != IntPtr.Zero) {
+                if (!Native.IsWindow(want) || Native.IsIconic(want) || IsOffScreen(want))
+                    throw DragPrecondition("DRAG_TARGET_UNAVAILABLE", "The expected drag window is gone, minimized or off-screen.");
+                if (under != want && PidOf(under) != PidOf(want))
+                    throw DragPrecondition("DRAG_START_COVERED", "The start pixel belongs to hwnd=" + under.ToInt64() + ", not expected hwnd=" + want.ToInt64() + ". Re-observe the target.");
+            }
+            if (ProcessElevated(PidOf(under)) && !SelfElevated())
+                throw DragPrecondition("DRAG_START_ELEVATED", "The drag receiver is elevated and this worker cannot inject into it.");
+            return under;
         }
 
         static Dictionary<string, object> Drag(Dictionary<string, object> a)
@@ -4541,9 +4962,22 @@ namespace DshComputerUse.Worker
             int durMs = Math.Max(50, GetI(a, "durationMs", 350));
             AgentActing(a, "drag");
             CheckHumanInput();
+            if (a.ContainsKey("expectHwnd")) {
+                HostGuardNamed(a, "drag");
+                FocusReport(a, true);
+            }
+            CheckDragStart(a, fx, fy);
             AnimatedMove(fx, fy, GetI(a, "moveDurationMs", 250));
             Thread.Sleep(80);
-            SendMouse(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
+            CheckHumanInput();
+            POINT startPoint;
+            if (!Native.GetCursorPos(out startPoint) || Dist(startPoint, fx, fy) > 2)
+                throw DragPrecondition("DRAG_START_MISSED", "The pointer did not reach the measured drag start within two screen pixels.");
+            IntPtr startWindow = CheckDragStart(a, startPoint.X, startPoint.Y);
+            Dictionary<string, object> startCursor = CursorSnapshot();
+            Dictionary<string, object> cursorCheck = CheckDragCursor(GetS(a, "expectCursor", ""), startCursor);
+            using (GuardReceiver(startWindow, InputWindowPid(startWindow), false))
+                SendMouse(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
             Thread.Sleep(80);
             POINT probe0; Native.GetCursorPos(out probe0);
             if (Dist(probe0, fx, fy) > 24)
@@ -4572,7 +5006,9 @@ namespace DshComputerUse.Worker
             SendMouse(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0);
             POINT p; Native.GetCursorPos(out p);
             CheckHumanInput();
-            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections);
+            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections,
+                "dragStarted", true, "startCursor", startCursor, "cursorCheck", cursorCheck, "startHwnd", startWindow.ToInt64(),
+                "effectVerified", false, "note", "Input sequence completed. Cursor/window checks do not prove that a handle moved; verify the intended UI change.");
         }
 
         static Dictionary<string, object> Scroll(Dictionary<string, object> a)
@@ -4587,10 +5023,14 @@ namespace DshComputerUse.Worker
             else HostGuardCursor("scroll");
             AgentActing(a, "scroll");
             if (a.ContainsKey("x") && a.ContainsKey("y")) Move(a);
-            for (int i = 0; i < lines; i++)
-            {
-                SendMouse(flag, 0, 0, unchecked((uint)(sign * (int)Native.WHEEL_DELTA)));
-                Thread.Sleep(25);
+            IntPtr scrollTarget = InputPointReceiver();
+            if (_stickyHwnd != IntPtr.Zero && scrollTarget != _stickyHwnd && InputWindowPid(scrollTarget) != InputWindowPid(_stickyHwnd))
+                throw InputInterrupted("INPUT_TARGET_CHANGED", "Scroll receiver differs from the observed target. No wheel input was sent.");
+            using (GuardReceiver(scrollTarget, InputWindowPid(scrollTarget), false)) {
+                for (int i = 0; i < lines; i++) {
+                    SendMouse(flag, 0, 0, unchecked((uint)(sign * (int)Native.WHEEL_DELTA)));
+                    Thread.Sleep(25);
+                }
             }
             POINT p; Native.GetCursorPos(out p);
             return PtDict(p.X, p.Y);
@@ -4634,6 +5074,14 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Indicator(Dictionary<string, object> a)
         {
+            if (a.ContainsKey("hold"))
+            {
+                SceneControl.SetHolding(GetB(a, "hold", false));
+                if (SceneControl.Holding) Glow.Reveal();
+                if (Panic.CycleLit && !Panic.Exited) Glow.Thinking(0);
+                return Dict("holding", Glow.Holding, "cycleActive", Panic.CycleLit && !Panic.Exited,
+                    "indicator", Glow.Holding ? "holding" : "free");
+            }
             bool on = GetB(a, "on", true);
             bool soft = GetB(a, "soft", false);
             if (on) { Glow.Enabled = true; Glow.Touch(GetI(a, "ms", 30000)); }
@@ -4717,20 +5165,38 @@ namespace DshComputerUse.Worker
         {
             int x = GetI(a, "x", int.MinValue), y = GetI(a, "y", int.MinValue);
             if (x == int.MinValue || y == int.MinValue) throw new Exception("x,y required");
+            Rectangle witness = VerificationSampleRegion(a, x, y, new Rectangle(
+                Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN),
+                Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN)));
             HostGuardPoint(x, y, "shiftClick");
+            POINT targetPoint; targetPoint.X = x; targetPoint.Y = y;
+            IntPtr targetWindow = TopLevel(Native.WindowFromPoint(targetPoint));
+            if (targetWindow == IntPtr.Zero) throw InputInterrupted("INPUT_TARGET_CHANGED", "Shift-click target is unavailable; no input sent.");
+            uint targetPid = InputWindowPid(targetWindow);
             int clicks = Math.Max(1, Math.Min(3, GetI(a, "clicks", 1)));
             AgentActing(a, "shiftClick");
             CheckHumanInput();
             AnimatedMove(x, y, Math.Max(60, GetI(a, "moveDurationMs", 200)));
             Thread.Sleep(GetI(a, "settleMs", 90));
-            SendKey(0x10, false);            // VK_SHIFT down
-            Thread.Sleep(40);
-            ClickTimes(clicks);
-            Thread.Sleep(40);
-            SendKey(0x10, true);             // VK_SHIFT up
+            byte[] before = a.ContainsKey("verificationRegion") ? FrameSignatureRect(witness.X, witness.Y, witness.Width, witness.Height, 8) : null;
+            using (GuardReceiver(targetWindow, targetPid, false)) {
+                SendKey(0x10, false);            // VK_SHIFT down
+                Thread.Sleep(40);
+                ClickTimes(clicks);
+                Thread.Sleep(40);
+                SendKey(0x10, true);             // VK_SHIFT up
+            }
             Thread.Sleep(GetI(a, "settleMs", 90));
             CheckHumanInput();
-            return Dict("x", x, "y", y, "clicks", clicks);
+            var result = Dict("x", x, "y", y, "clicks", clicks);
+            if (a.ContainsKey("verificationRegion")) {
+                EndActuationForReadback();
+                Thread.Sleep(240);
+                byte[] after = FrameSignatureRect(witness.X, witness.Y, witness.Width, witness.Height, 8);
+                CheckHumanInput();
+                AddPixelVerification(result, a, witness, before, after);
+            }
+            return result;
         }
 
         static void ClickTimes(int n)
@@ -4819,7 +5285,11 @@ namespace DshComputerUse.Worker
             IntPtr dib = Native.CreateDIBSection(screen, ref bmi, 0, out bits, IntPtr.Zero, 0);
             if (dib == IntPtr.Zero) { Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen); return null; }
             IntPtr old = Native.SelectObject(mem, dib);
-            Native.BitBlt(mem, 0, 0, rw, rh, screen, rx, ry, 0x00CC0020 | 0x40000000);
+            if (!Native.BitBlt(mem, 0, 0, rw, rh, screen, rx, ry, 0x00CC0020 | 0x40000000)) {
+                Native.SelectObject(mem, old);
+                Native.DeleteObject(dib); Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen);
+                return null;
+            }
             int n = ((rw - 1) / step + 1) * ((rh - 1) / step + 1);
             byte[] sig = new byte[n];
             int k = 0;
@@ -5242,6 +5712,35 @@ namespace DshComputerUse.Worker
             }
             throw new Exception("unknown key: " + k);
         }
+        static string NormalizeKeyCombo(string combo)
+        {
+            if (String.IsNullOrWhiteSpace(combo)) throw new Exception("key combo required");
+            var ordered = new List<string>(); var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string raw in combo.Split('+')) {
+                string key = raw.Trim().ToLowerInvariant();
+                if (key.Length == 0) throw new Exception("key combo contains an empty token; use plus for the + key");
+                switch (key) {
+                    case "control": key = "ctrl"; break;
+                    case "lwin": case "windows": case "meta": key = "win"; break;
+                    case "return": key = "enter"; break;
+                    case "escape": key = "esc"; break;
+                    case "bksp": key = "backspace"; break;
+                    case "del": key = "delete"; break;
+                    case "ins": key = "insert"; break;
+                    case "pageup": key = "pgup"; break;
+                    case "pagedown": key = "pgdn"; break;
+                    case "capslock": key = "caps"; break;
+                    case "printscreen": key = "prtsc"; break;
+                }
+                VkOf(key); // parser and native dispatch accept the same key set
+                if (seen.Add(key)) ordered.Add(key);
+            }
+            var result = new List<string>();
+            foreach (string modifier in new string[] { "ctrl", "alt", "shift", "win", "rwin" })
+                if (seen.Contains(modifier)) { result.Add(modifier); ordered.Remove(modifier); }
+            result.AddRange(ordered);
+            return String.Join("+", result);
+        }
 
         static void SendKey(ushort vk, bool up)
         {
@@ -5281,11 +5780,11 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Key(Dictionary<string, object> a)
         {
+            if (_receiverCheck != null) _receiverCheck(); // nested paste may not silently repair a stolen receiver
             string combo = GetS(a, "combo", null);
             if (combo == null) throw new Exception("combo required (e.g. 'ctrl+shift+t', 'enter')");
-            List<string> keys = new List<string>();
-            foreach (string s in combo.Split('+')) { string t = s.Trim().ToLowerInvariant(); if (t.Length > 0) keys.Add(t); }
-            if (keys.Count == 0) throw new Exception("empty combo");
+            combo = NormalizeKeyCombo(combo);
+            List<string> keys = new List<string>(combo.Split('+'));
             AgentActing(a, "key");
             // Keyboard input goes to the FOREGROUND window — re-assert the window the agent is
             // working in, and report which window actually received the keys.
@@ -5300,18 +5799,38 @@ namespace DshComputerUse.Worker
             HostGuardForeground("key");
             List<ushort> vks = new List<ushort>();
             foreach (string k in keys) { ushort vk = VkOf(k); if (!vks.Contains(vk)) vks.Add(vk); }
-            KeyboardChord.Run(vks, SendKey, ReleaseKeyForCleanup,
-                delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
-                delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); });
+            bool windowManagement = WindowManagementChord.IsExact(combo);
+            using (GuardReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true))
+            {
+                if (windowManagement)
+                    WindowManagementChord.Run(vks, SendKey, ReleaseKeyForCleanup,
+                        delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
+                        delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); },
+                        delegate { WaitForKeyHold(0); }, InvalidateKeyboardTarget);
+                else
+                    KeyboardChord.Run(vks, SendKey, ReleaseKeyForCleanup,
+                        delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
+                        delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); });
+            }
             EndActuationForReadback();
             Thread.Sleep(30);
-            Dictionary<string, object> keyOut = Dict("combo", combo, "focus", focus);
+            Dictionary<string, object> keyOut = AddFocusReadback(Dict("combo", combo), a, focus);
+            if (windowManagement)
+            {
+                var after = (Dictionary<string, object>)keyOut["focusAfter"];
+                keyOut["receiverChanged"] = Convert.ToInt64(focus["hwnd"]) != Convert.ToInt64(after["hwnd"]) ||
+                    Convert.ToUInt32(focus["pid"]) != Convert.ToUInt32(after["pid"]);
+                keyOut["reobserveRequired"] = true;
+                keyOut["effectVerified"] = false;
+                keyOut["hint"] = KeyboardReobserveHint;
+            }
             if (_lastRefocus != null) keyOut["refocused"] = _lastRefocus;
             return keyOut;
         }
 
         static Dictionary<string, object> Type(Dictionary<string, object> a)
         {
+            if (_receiverCheck != null) _receiverCheck();
             string text = GetS(a, "text", null);
             if (text == null) throw new Exception("text required");
             AgentActing(a, "type");
@@ -5320,6 +5839,7 @@ namespace DshComputerUse.Worker
             HostGuardNamed(a, "type");
             Dictionary<string, object> focus = FocusReport(a, true);
             HostGuardForeground("type");   // same rule as `key`: the foreground window is the victim
+            using (GuardReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true)) {
             // ...and whether whatever owns the focus can hold text at all. Typing into a control
             // with no editable pattern is silently discarded, or interpreted as shortcuts.
             string typeWarn = null;
@@ -5372,7 +5892,7 @@ namespace DshComputerUse.Worker
                             downgraded["clipboardWarning"] = "The previous clipboard could not be preserved (private or oversized formats) and was overwritten by this paste. Restore it manually if it mattered.";
                             if (typeWarn != null) downgraded["warning"] = typeWarn;
                             if (_lastRefocus != null) downgraded["refocused"] = _lastRefocus;
-                            return downgraded;
+                            return AddFocusReadback(downgraded, a, focus);
                         }
                         Exception inputError = null;
                         try
@@ -5406,7 +5926,7 @@ namespace DshComputerUse.Worker
                     pr["clipboardWarning"] = "Clipboard changed or could not be restored. Verify the target value before repeating input.";
                 if (typeWarn != null) pr["warning"] = typeWarn;
                 if (_lastRefocus != null) pr["refocused"] = _lastRefocus;
-                return pr;
+                return AddFocusReadback(pr, a, focus);
             }
             int charDelay = GetI(a, "charDelayMs", 8);
             foreach (char ch in text)
@@ -5430,10 +5950,17 @@ namespace DshComputerUse.Worker
                 SendInputChecked(new INPUT[] { down, up });
                 Thread.Sleep(charDelay);
             }
-            Dictionary<string, object> tr = Dict("mode", "unicode", "chars", text.Length, "focus", focus);
+            Dictionary<string, object> tr = Dict("mode", "unicode", "chars", text.Length);
             if (typeWarn != null) tr["warning"] = typeWarn;
             if (_lastRefocus != null) tr["refocused"] = _lastRefocus;
-            return tr;
+            return AddFocusReadback(tr, a, focus);
+            }
+        }
+        static Dictionary<string, object> AddFocusReadback(Dictionary<string, object> result, Dictionary<string, object> args, Dictionary<string, object> before)
+        {
+            var after = FocusReport(args, false);
+            result["focusBefore"] = before; result["focusAfter"] = after; result["focus"] = after;
+            return result;
         }
 
         // ---------- clipboard ----------
@@ -5492,7 +6019,34 @@ namespace DshComputerUse.Worker
                 list.Add(WinDict(h));
                 return true;
             }, IntPtr.Zero);
-            return Dict("windows", list);
+            return Dict("windows", list, "virtualScreen", VirtualScreenDict(),
+                "cooperation", Panic.CooperationState(), "indicator", IndicatorSnapshot());
+        }
+
+        static string IndicatorStateName(int want)
+        {
+            switch (want) {
+                case 0: return "idle";
+                case 1: return "acting";
+                case 2: return "capture";
+                case 3: return "thinking";
+                case 4: return "paused";
+                case 5: return "asking";
+                case 6: return "human-handoff";
+                case 7: return "preparing";
+                case 8: return "reserved";
+                default: return "unknown";
+            }
+        }
+
+        static Dictionary<string, object> IndicatorSnapshot()
+        {
+            // Want/title describe the last rendered frame, not a prediction that
+            // an input will run. The cooperation record supplies the handoff cause.
+            int want = Glow.Want;
+            return Dict("state", IndicatorStateName(want), "want", want,
+                "title", Glow.ShownTitle ?? "", "injecting", Glow.Injecting,
+                "acting", Glow.Acting, "preparing", Glow.Preparing, "holding", Glow.Holding);
         }
 
         static IntPtr FindHwnd(Dictionary<string, object> a)
@@ -5557,6 +6111,7 @@ namespace DshComputerUse.Worker
                 _kickoffFocus.Confirm(h.ToInt64(), confirmedPid);
             }
             CheckHumanInput();
+            if (how != "failed") _keyboardReobserveRequired = false;
             return Dict("activated", how != "failed", "activatedVia", how,
                         "hwnd", h.ToInt64(), "pid", confirmedPid == 0 ? null : (object)confirmedPid,
                         "hint", how == "failed"
@@ -5578,6 +6133,22 @@ namespace DshComputerUse.Worker
         //   2. if that window belongs to an ELEVATED process while we are not, UIPI silently
         //      drops every event — say so loudly instead of reporting a successful no-op.
         static IntPtr _stickyHwnd = IntPtr.Zero;
+        static volatile bool _keyboardReobserveRequired;
+        const string KeyboardReobserveHint = "A window-management chord was dispatched; this is not proof that a switch succeeded. " +
+            "Inspect computer_state {windows:true}, then use computer_window {hwnd:...,op:'activate'} and require activated:true before further keyboard input.";
+        static void InvalidateKeyboardTarget()
+        {
+            _stickyHwnd = IntPtr.Zero;
+            ResetKickoffFocus();
+            _keyboardReobserveRequired = true;
+        }
+        static void CheckKeyboardReobserve()
+        {
+            if (!_keyboardReobserveRequired) return;
+            var error = NotDispatched("INPUT_REOBSERVE_REQUIRED", "INPUT_REOBSERVE_REQUIRED: " + KeyboardReobserveHint);
+            error.Data["reobserveRequired"] = true;
+            throw error;
+        }
         static readonly KickoffFocus _kickoffFocus = new KickoffFocus();
         public static void ResetKickoffFocus() { _kickoffFocus.Reset(); }
         public static long RecoveryTarget(out uint pid)
@@ -6170,6 +6741,45 @@ namespace DshComputerUse.Worker
             catch { return false; }
         }
 
+        static int ProcessIntegrityLevel(uint pid)
+        {
+            if (pid == 0) return -1;
+            IntPtr proc = IntPtr.Zero, token = IntPtr.Zero, buffer = IntPtr.Zero;
+            try {
+                proc = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (proc == IntPtr.Zero || !Native.OpenProcessToken(proc, Native.TOKEN_QUERY, out token)) return -1;
+                uint needed;
+                Native.GetTokenInformationBuffer(token, 25, IntPtr.Zero, 0, out needed); // TokenIntegrityLevel
+                if (needed < IntPtr.Size || needed > 4096) return -1;
+                buffer = Marshal.AllocHGlobal((int)needed);
+                if (!Native.GetTokenInformationBuffer(token, 25, buffer, needed, out needed)) return -1;
+                IntPtr sid = Marshal.ReadIntPtr(buffer);
+                if (sid == IntPtr.Zero) return -1;
+                IntPtr countPointer = Native.GetSidSubAuthorityCount(sid);
+                if (countPointer == IntPtr.Zero) return -1;
+                byte count = Marshal.ReadByte(countPointer);
+                if (count == 0 || count > 15) return -1;
+                IntPtr rid = Native.GetSidSubAuthority(sid, (uint)(count - 1));
+                return rid == IntPtr.Zero ? -1 : Marshal.ReadInt32(rid);
+            } catch { return -1; }
+            finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (token != IntPtr.Zero) Native.CloseHandle(token);
+                if (proc != IntPtr.Zero) Native.CloseHandle(proc);
+            }
+        }
+        static bool AsyncKeyIntegrityAllows(int self, int foreground)
+        { return self >= 0 && foreground >= 0 && foreground <= self; }
+        internal static bool CanObserveAsyncKeys(out IntPtr foreground)
+        {
+            foreground = Native.GetForegroundWindow();
+            if (foreground == IntPtr.Zero) return false;
+            uint pid = PidOf(foreground);
+            // Unknown is NOT unelevated. GetAsyncKeyState reports zero for UIPI
+            // failures too, so only known same/lower integrity is usable evidence.
+            return AsyncKeyIntegrityAllows(ProcessIntegrityLevel((uint)Process.GetCurrentProcess().Id), ProcessIntegrityLevel(pid)) &&
+                Native.GetForegroundWindow() == foreground && PidOf(foreground) == pid;
+        }
         static bool ProcessElevated(uint pid)
         {
             if (pid == 0) return false;
@@ -6309,6 +6919,7 @@ namespace DshComputerUse.Worker
         /// reach because of integrity levels.
         static Dictionary<string, object> FocusReport(Dictionary<string, object> a, bool refocus)
         {
+            if (refocus) CheckKeyboardReobserve(); // explicit old expectHwnd is not fresh authorization
             IntPtr want = IntPtr.Zero;
             if (a != null && a.ContainsKey("expectHwnd")) want = new IntPtr(GetI(a, "expectHwnd", 0));
             else if (a != null && a.ContainsKey("hwnd")) want = new IntPtr(GetI(a, "hwnd", 0));
@@ -6386,6 +6997,43 @@ namespace DshComputerUse.Worker
         }
 
         // ---------- UIA ----------
+        static void AddUiGeometry(Dictionary<string, object> d, System.Windows.Rect? bounds,
+            bool? offscreen, Rectangle virtualScreen)
+        {
+            bool valid = false;
+            if (bounds.HasValue) {
+                System.Windows.Rect r = bounds.Value;
+                // Empty UIA rectangles contain infinities. Casting these to int
+                // manufactured INT32_MIN coordinates that looked like real layout.
+                valid = !r.IsEmpty && r.Width > 0 && r.Height > 0 &&
+                    !Double.IsNaN(r.X) && !Double.IsNaN(r.Y) &&
+                    !Double.IsNaN(r.Width) && !Double.IsNaN(r.Height) &&
+                    r.X > Int32.MinValue && r.Y > Int32.MinValue &&
+                    r.Right < Int32.MaxValue && r.Bottom < Int32.MaxValue &&
+                    r.Width < Int32.MaxValue && r.Height < Int32.MaxValue;
+                if (valid) {
+                    long left = (long)Math.Floor(r.Left), top = (long)Math.Floor(r.Top);
+                    long right = (long)Math.Ceiling(r.Right), bottom = (long)Math.Ceiling(r.Bottom);
+                    valid = left > Int32.MinValue && top > Int32.MinValue &&
+                        right - left <= Int32.MaxValue && bottom - top <= Int32.MaxValue;
+                    if (valid) {
+                        d["rect"] = Dict("x", (int)left, "y", (int)top, "width", (int)(right - left), "height", (int)(bottom - top));
+                        d["intersectsVirtualScreen"] = r.Right > virtualScreen.Left && r.Left < virtualScreen.Right &&
+                            r.Bottom > virtualScreen.Top && r.Top < virtualScreen.Bottom;
+                    }
+                }
+            }
+            d["rectValid"] = valid;
+            d["isOffscreen"] = offscreen.HasValue ? (object)offscreen.Value : null;
+            if (!valid) {
+                d["rect"] = null;
+                d["intersectsVirtualScreen"] = null;
+                d["rectInvalidReason"] = bounds.HasValue ? "empty-or-invalid-provider-bounds" : "provider-bounds-unavailable";
+            }
+            // Neither a valid rectangle nor IsOffscreen=false proves that this
+            // element owns a pixel; use the point probe for occlusion/hit testing.
+        }
+
         static Dictionary<string, object> ElemDict(AutomationElement e)
         {
             Dictionary<string, object> d = new Dictionary<string, object>();
@@ -6395,10 +7043,15 @@ namespace DshComputerUse.Worker
             string ctype = "";
             try { if (e.Current.ControlType != null) ctype = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); }
             catch { }
-            System.Windows.Rect r = e.Current.BoundingRectangle;
             d["name"] = name;
             d["role"] = ctype;
-            d["rect"] = Dict("x", (int)r.X, "y", (int)r.Y, "width", (int)r.Width, "height", (int)r.Height);
+            System.Windows.Rect? bounds = null;
+            bool? offscreen = null;
+            try { bounds = e.Current.BoundingRectangle; } catch { }
+            try { offscreen = e.Current.IsOffscreen; } catch { }
+            AddUiGeometry(d, bounds, offscreen, new Rectangle(
+                Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN),
+                Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN)));
             try { d["automationId"] = e.Current.AutomationId; } catch { }
             try { d["className"] = e.Current.ClassName; } catch { }
             try { d["runtimeId"] = String.Join(".", e.GetRuntimeId()); d["pid"] = e.Current.ProcessId; } catch { }
@@ -6424,61 +7077,205 @@ namespace DshComputerUse.Worker
             return d;
         }
 
+        // >>>UIA-QUERY-BUDGET<<<
+        // Cooperative limits between provider calls. A synchronous UIA/COM call
+        // already in progress is NOT interruptible by this traversal budget.
+        internal sealed class UiBudgetStop : Exception { }
+        internal sealed class UiReadBudget
+        {
+            readonly Func<long> clock;
+            readonly long started;
+            readonly List<string> reasons = new List<string>();
+            public readonly int BudgetMs;
+            public int Calls, Scanned;
+            public long MaxCallMs;
+            public UiReadBudget(int budgetMs, Func<long> now)
+            { BudgetMs = Math.Max(100, Math.Min(5000, budgetMs)); clock = now; started = now(); }
+            public long ElapsedMs { get { return Math.Max(0, clock() - started); } }
+            public bool Truncated { get { return reasons.Count > 0; } }
+            public void Mark(string reason) { if (!reasons.Contains(reason)) reasons.Add(reason); }
+            public bool Continue()
+            { if (ElapsedMs < BudgetMs) return true; Mark("deadline"); return false; }
+            public T Read<T>(Func<T> read)
+            {
+                if (!Continue()) throw new UiBudgetStop();
+                long before = clock(); Calls++;
+                try {
+                    T value = read();
+                    if (!Continue()) throw new UiBudgetStop();
+                    return value;
+                } finally { MaxCallMs = Math.Max(MaxCallMs, Math.Max(0, clock() - before)); }
+            }
+            public Dictionary<string, object> Report(int maxNodes, int depth)
+            {
+                return Dict("budgetMs", BudgetMs, "elapsedMs", ElapsedMs, "maxNodes", maxNodes, "depth", depth,
+                    "scanned", Scanned, "providerCalls", Calls, "maxCallMs", MaxCallMs,
+                    "truncatedReasons", reasons.ToArray(), "singleCallInterruptible", false,
+                    "note", "Soft traversal budget checked between provider calls; one synchronous UIA/COM call can exceed it. A partial result cannot prove absence or uniqueness.");
+            }
+        }
+        static long UiClockMs()
+        { return (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency)); }
+        static UiReadBudget NewUiBudget(Dictionary<string, object> a)
+        { return new UiReadBudget(GetI(a, "budgetMs", 1200), UiClockMs); }
+
+        internal static void ValidateUiQueryScope(bool scoped, bool filtered, bool anchored, int depth, int maxNodes)
+        {
+            if (filtered && !scoped)
+                throw new Exception("UIA_SCOPE_REQUIRED: filtered UIA queries require hwnd or an unambiguous window title; use computer_state to identify the window, or computer_uia at for a point probe.");
+            if (!anchored && (depth > 6 || maxNodes > 300))
+                throw new Exception("UIA_ANCHOR_REQUIRED: broad UIA traversal requires an observed anchor point in the requested window; use computer_uia at first, then anchor with depth/maxNodes limits. An exact id does not avoid traversal.");
+        }
+        internal static bool UiAnchorOwned(long requestedTop, uint requestedPid, long actualTop, uint actualPid)
+        { return requestedTop != 0 && requestedPid != 0 && requestedTop == actualTop && requestedPid == actualPid; }
+        static AutomationElement UiQueryRoot(Dictionary<string, object> a, IntPtr root, UiReadBudget budget)
+        {
+            string anchor = GetS(a, "anchor", null);
+            if (String.IsNullOrWhiteSpace(anchor)) return budget.Read(delegate { return AutomationElement.FromHandle(root); });
+            string[] xy = anchor.Split(','); int x, y;
+            if (xy.Length != 2 || !Int32.TryParse(xy[0].Trim(), out x) || !Int32.TryParse(xy[1].Trim(), out y))
+                throw new Exception("UIA_ANCHOR_INVALID: anchor must be physical screen x,y");
+            POINT point; point.X = x; point.Y = y;
+            uint pid = PidOf(root); IntPtr expectedTop = TopLevel(root), hit = Native.WindowFromPoint(point);
+            if (!Native.IsWindow(root) || !UiAnchorOwned(expectedTop.ToInt64(), pid, TopLevel(hit).ToInt64(), PidOf(hit)))
+                throw new Exception("UIA_ANCHOR_MISMATCH: anchor is not currently owned by the requested window and process; no provider query was started");
+            AutomationElement element = budget.Read(delegate { return AutomationElement.FromPoint(new System.Windows.Point(x, y)); });
+            IntPtr afterHit = Native.WindowFromPoint(point);
+            if (element == null || budget.Read(delegate { return element.Current.ProcessId; }) != (int)pid ||
+                PidOf(root) != pid || !UiAnchorOwned(expectedTop.ToInt64(), pid, TopLevel(afterHit).ToInt64(), PidOf(afterHit)))
+                throw new Exception("UIA_ANCHOR_MISMATCH: provider hit or window changed during the point probe; repeat the observation");
+            return element;
+        }
+
+        // Generic only so deterministic fake trees exercise the identical walk.
+        // Child/sibling navigation is incremental: no FindAll collection can be
+        // built before the client-side node/depth/deadline checks run.
+        internal static List<T> UiWalkBounded<T>(T start, int depth, int maxNodes, int limit, UiReadBudget budget,
+            Func<T, bool> matches, Func<T, T> firstChild, Func<T, T> nextSibling) where T : class
+        {
+            var found = new List<T>(); var queue = new Queue<KeyValuePair<T, int>>();
+            if (start == null) return found;
+            // A queue entry is a parent whose direct children form the next BFS
+            // segment. Visit each child before asking for its next sibling: a
+            // wide provider can no longer consume the budget before any match
+            // in that sibling list has been inspected/materialized.
+            queue.Enqueue(new KeyValuePair<T, int>(start, -1));
+            while (queue.Count > 0 && budget.Scanned < maxNodes && budget.Continue())
+            {
+                var segment = queue.Dequeue(); int level = segment.Value + 1;
+                try
+                {
+                    T node = segment.Value < 0 ? segment.Key : budget.Read(delegate { return firstChild(segment.Key); });
+                    while (node != null && budget.Continue())
+                    {
+                        if (budget.Scanned >= maxNodes) { budget.Mark("max-nodes"); return found; }
+                        budget.Scanned++;
+                        try {
+                            if (matches(node)) {
+                                found.Add(node);
+                                if (found.Count >= limit) { budget.Mark("match-limit"); return found; }
+                            }
+                            if (!budget.Continue()) return found;
+                            if (level < depth) queue.Enqueue(new KeyValuePair<T, int>(node, level));
+                            else if (budget.Read(delegate { return firstChild(node); }) != null) budget.Mark("depth");
+                        } catch (UiBudgetStop) { return found; }
+                        catch { budget.Mark("provider-error"); }
+                        if (segment.Value < 0) break;
+                        if (budget.Scanned >= maxNodes) { budget.Mark("max-nodes"); return found; }
+                        T previous = node;
+                        node = budget.Read(delegate { return nextSibling(previous); });
+                    }
+                }
+                catch (UiBudgetStop) { break; }
+                catch { budget.Mark("provider-error"); }
+            }
+            if (queue.Count > 0) budget.Mark(budget.Scanned >= maxNodes ? "max-nodes" : "pending-nodes");
+            return found;
+        }
+        // <<<UIA-QUERY-BUDGET<<<
+
+        static Dictionary<string, object> ElemDictBudgeted(AutomationElement e, UiReadBudget budget)
+        {
+            var d = new Dictionary<string, object>();
+            string name = "", role = ""; System.Windows.Rect? bounds = null; bool? offscreen = null;
+            try { name = budget.Read(delegate { return e.Current.Name; }) ?? ""; } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try { ControlType ct = budget.Read(delegate { return e.Current.ControlType; }); if (ct != null) role = ct.ProgrammaticName.Replace("ControlType.", ""); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            d["name"] = name.Length > 160 ? name.Substring(0, 160) : name; d["role"] = role;
+            try { bounds = budget.Read(delegate { return e.Current.BoundingRectangle; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try { offscreen = budget.Read(delegate { return e.Current.IsOffscreen; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            AddUiGeometry(d, bounds, offscreen, new Rectangle(Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN)));
+            try { d["automationId"] = budget.Read(delegate { return e.Current.AutomationId; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try { d["className"] = budget.Read(delegate { return e.Current.ClassName; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try { d["runtimeId"] = String.Join(".", budget.Read(delegate { return e.GetRuntimeId(); })); d["pid"] = budget.Read(delegate { return e.Current.ProcessId; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try { d["isPassword"] = budget.Read(delegate { return e.Current.IsPassword; }); } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try {
+                var patterns = new List<string>();
+                foreach (AutomationPattern pattern in budget.Read(delegate { return e.GetSupportedPatterns(); })) {
+                    string text = pattern.ProgrammaticName.Replace("PatternIdentifiers", "").Replace("Pattern", "").TrimEnd('.', ' ');
+                    if (text.Length > 0) patterns.Add(text);
+                }
+                d["patterns"] = patterns;
+            } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            try {
+                object value = budget.Read(delegate { object p; return e.TryGetCurrentPattern(ValuePattern.Pattern, out p) ? p : null; });
+                if (value != null) d["value"] = budget.Read(delegate { return ((ValuePattern)value).Current.Value; });
+            } catch (UiBudgetStop) { throw; } catch { budget.Mark("provider-error"); }
+            return d;
+        }
+
         static Dictionary<string, object> Uia(Dictionary<string, object> a)
         {
             IntPtr root = FindHwnd(a);
-            AutomationElement rootEl = root != IntPtr.Zero ? AutomationElement.FromHandle(root) : AutomationElement.RootElement;
             int maxDepth = Math.Max(1, Math.Min(24, GetI(a, "depth", 6)));
-            int maxNodes = Math.Max(10, Math.Min(1200, GetI(a, "maxNodes", 300)));
-            if (GetB(a, "query", false))
+            int maxNodes = Math.Max(10, Math.Min(1200, GetI(a, "maxNodes", 120)));
+            bool query = GetB(a, "query", false), anchored = !String.IsNullOrWhiteSpace(GetS(a, "anchor", null));
+            ValidateUiQueryScope(root != IntPtr.Zero, query, anchored, maxDepth, maxNodes);
+            if (root == IntPtr.Zero) root = Native.GetForegroundWindow();
+            if (root == IntPtr.Zero) throw new Exception("UIA_SCOPE_REQUIRED: no foreground window; specify hwnd");
+            UiReadBudget budget = NewUiBudget(a);
+            AutomationElement rootEl;
+            try { rootEl = UiQueryRoot(a, root, budget); }
+            catch (UiBudgetStop) { return Dict("flat", new List<object>(), "count", 0, "scanned", 0, "truncated", true, "budget", budget.Report(maxNodes, maxDepth), "hwnd", root.ToInt64(), "pid", PidOf(root)); }
+            if (query)
             {
-                int scanned; bool truncated;
-                List<AutomationElement> matches = FindUiMatches(rootEl, GetS(a, "nameContains", null),
-                    GetS(a, "automationId", null), GetS(a, "role", null), maxDepth, maxNodes,
-                    Math.Max(1, Math.Min(80, GetI(a, "limit", 80))), out scanned, out truncated);
                 List<object> selected = new List<object>();
                 string witness = root != IntPtr.Zero && GetB(a, "targets", false) ? UiWindowWitness(root) : null;
                 var ancestorCache = new Dictionary<string, List<object>>();
-                foreach (AutomationElement match in matches)
-                {
-                    try {
-                        var item = ElemDict(match);
+                AutomationElement evidenceRoot = rootEl;
+                if (witness != null && anchored) {
+                    try { evidenceRoot = budget.Read(delegate { return AutomationElement.FromHandle(root); }); }
+                    catch (UiBudgetStop) { evidenceRoot = null; }
+                }
+                string nameFilter = GetS(a, "nameContains", null), idFilter = GetS(a, "automationId", null), roleFilter = GetS(a, "role", null);
+                CacheRequest selectorCache = UiSelectorCache();
+                UiWalkBounded(rootEl, maxDepth, maxNodes, Math.Max(1, Math.Min(80, GetI(a, "limit", 80))), budget,
+                    delegate(AutomationElement match) {
+                        if (!ElementMatchesBudgeted(match, nameFilter, idFilter, roleFilter, budget)) return false;
+                        var item = ElemDictBudgeted(match, budget);
                         if (witness != null) {
-                            try { item["target"] = RememberUiTarget(match, root, witness, rootEl, ancestorCache, item); }
+                            try {
+                                if (evidenceRoot == null) throw new UiBudgetStop();
+                                item["target"] = RememberUiTarget(match, root, witness, evidenceRoot, ancestorCache, item, budget);
+                            }
+                            catch (UiBudgetStop) { item["targetUnavailable"] = true; }
                             catch { item["targetUnavailable"] = true; }
                         }
                         selected.Add(item);
-                    } catch { truncated = true; }
-                }
+                        return true;
+                    },
+                    delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetFirstChild(element, selectorCache); },
+                    delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetNextSibling(element, selectorCache); });
                 if (witness != null && witness != UiWindowWitness(root)) throw new Exception("TARGET_STALE: window changed during observation; retry the query");
-                return Dict("flat", selected, "count", selected.Count, "scanned", scanned, "truncated", truncated,
-                    "hwnd", root.ToInt64(), "pid", root == IntPtr.Zero ? 0 : PidOf(root));
+                return Dict("flat", selected, "count", selected.Count, "scanned", budget.Scanned, "truncated", budget.Truncated,
+                    "hwnd", root.ToInt64(), "pid", PidOf(root), "budget", budget.Report(maxNodes, maxDepth));
             }
             List<object> flat = new List<object>();
-            bool treeTruncated = false;
-            // breadth-first so the first `maxNodes` elements cover the shallow UI evenly
-            Queue<KeyValuePair<AutomationElement, int>> q = new Queue<KeyValuePair<AutomationElement, int>>();
-            q.Enqueue(new KeyValuePair<AutomationElement, int>(rootEl, 0));
-            while (q.Count > 0 && flat.Count < maxNodes)
-            {
-                KeyValuePair<AutomationElement, int> kv = q.Dequeue();
-                try { flat.Add(ElemDict(kv.Key)); }
-                catch { treeTruncated = true; continue; }
-                if (kv.Value < maxDepth)
-                {
-                    try
-                    {
-                        foreach (AutomationElement c in kv.Key.FindAll(TreeScope.Children, Condition.TrueCondition))
-                        {
-                            if (flat.Count + q.Count >= maxNodes) { treeTruncated = true; break; }
-                            q.Enqueue(new KeyValuePair<AutomationElement, int>(c, kv.Value + 1));
-                        }
-                    }
-                    catch { treeTruncated = true; }
-                }
-                else try { if (kv.Key.FindFirst(TreeScope.Children, Condition.TrueCondition) != null) treeTruncated = true; } catch { treeTruncated = true; }
-            }
-            return Dict("root", ElemDict(rootEl), "flat", flat, "count", flat.Count, "truncated", treeTruncated || q.Count > 0);
+            UiWalkBounded(rootEl, maxDepth, maxNodes, maxNodes + 1, budget,
+                delegate(AutomationElement element) { flat.Add(ElemDictBudgeted(element, budget)); return false; },
+                delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetFirstChild(element); },
+                delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetNextSibling(element); });
+            return Dict("root", flat.Count > 0 ? flat[0] : null, "flat", flat, "count", flat.Count,
+                "truncated", budget.Truncated, "budget", budget.Report(maxNodes, maxDepth), "hwnd", root.ToInt64(), "pid", PidOf(root));
         }
 
         // Observed native identities are private to this worker, bounded, and never reconstructed
@@ -6502,31 +7299,35 @@ namespace DshComputerUse.Worker
             return Json.Serialize(new object[] { hwnd.ToInt64(), pid, started, WinTitleOf(hwnd), ClassOf(hwnd), rect.Left, rect.Top, rect.Right, rect.Bottom });
         }
         static string UiText(string text) { return (text ?? "").Normalize(NormalizationForm.FormKC).Trim(); }
-        static object UiSemanticPart(AutomationElement element)
+        static T UiReadMaybe<T>(UiReadBudget budget, Func<T> read)
+        { return budget == null ? read() : budget.Read(read); }
+        static object UiSemanticPart(AutomationElement element, UiReadBudget budget = null)
         {
-            return new object[] { element.Current.ControlType.ProgrammaticName, UiText(element.Current.Name), element.Current.AutomationId, element.Current.ClassName };
+            return new object[] { UiReadMaybe(budget, delegate { return element.Current.ControlType; }).ProgrammaticName,
+                UiText(UiReadMaybe(budget, delegate { return element.Current.Name; })),
+                UiReadMaybe(budget, delegate { return element.Current.AutomationId; }), UiReadMaybe(budget, delegate { return element.Current.ClassName; }) };
         }
-        static string UiTargetEvidence(AutomationElement element, IntPtr hwnd)
+        static string UiTargetEvidence(AutomationElement element, IntPtr hwnd, UiReadBudget budget = null)
         {
-            return UiTargetEvidence(element, AutomationElement.FromHandle(hwnd), new Dictionary<string, List<object>>(), null);
+            return UiTargetEvidence(element, UiReadMaybe(budget, delegate { return AutomationElement.FromHandle(hwnd); }), new Dictionary<string, List<object>>(), null, budget);
         }
-        static string UiTargetEvidence(AutomationElement element, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item)
+        static string UiTargetEvidence(AutomationElement element, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item, UiReadBudget budget = null)
         {
             var ancestors = new List<object>();
-            AutomationElement current = TreeWalker.ControlViewWalker.GetParent(element);
-            string parentId = current == null ? "" : String.Join(".", current.GetRuntimeId());
+            AutomationElement current = UiReadMaybe(budget, delegate { return TreeWalker.ControlViewWalker.GetParent(element); });
+            string parentId = current == null ? "" : String.Join(".", UiReadMaybe(budget, delegate { return current.GetRuntimeId(); }));
             if (parentId.Length == 0 || !cache.TryGetValue(parentId, out ancestors)) {
                 ancestors = new List<object>();
-                bool rooted = Automation.Compare(element, root);
+                bool rooted = UiReadMaybe(budget, delegate { return Automation.Compare(element, root); });
                 for (int depth = 0; current != null && depth < 24; depth++) {
-                    ancestors.Add(UiSemanticPart(current));
-                    if (Automation.Compare(current, root)) { rooted = true; break; }
-                    current = TreeWalker.ControlViewWalker.GetParent(current);
+                    ancestors.Add(UiSemanticPart(current, budget));
+                    if (UiReadMaybe(budget, delegate { return Automation.Compare(current, root); })) { rooted = true; break; }
+                    current = UiReadMaybe(budget, delegate { return TreeWalker.ControlViewWalker.GetParent(current); });
                 }
                 if (!rooted) throw new Exception("TARGET_STALE: control is outside the observed window or ancestry is incomplete");
                 if (parentId.Length > 0) cache[parentId] = ancestors;
             }
-            if (item == null) item = ElemDict(element);
+            if (item == null) item = budget == null ? ElemDict(element) : ElemDictBudgeted(element, budget);
             var patterns = new List<string>();
             object raw;
             if (!item.TryGetValue("patterns", out raw)) throw new Exception("TARGET_STALE: native patterns unavailable");
@@ -6534,14 +7335,14 @@ namespace DshComputerUse.Worker
             patterns.Sort(StringComparer.Ordinal);
             // AutomationId is a separate identity channel, so a unique semantic replacement can
             // still be recognized if a provider regenerates IDs. Ancestor identities remain strict.
-            return Json.Serialize(new object[] { item["role"], UiText(element.Current.Name),
+            return Json.Serialize(new object[] { item["role"], UiText(UiReadMaybe(budget, delegate { return element.Current.Name; })),
                 item["className"], item["isPassword"], patterns, ancestors });
         }
-        static string RememberUiTarget(AutomationElement element, IntPtr hwnd, string witness, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item)
+        static string RememberUiTarget(AutomationElement element, IntPtr hwnd, string witness, AutomationElement root, Dictionary<string, List<object>> cache, Dictionary<string, object> item, UiReadBudget budget = null)
         {
             string runtimeId = GetS(item, "runtimeId", "");
             if (runtimeId.Length == 0) throw new Exception("native control has no runtime identity");
-            string evidence = UiTargetEvidence(element, root, cache, item);
+            string evidence = UiTargetEvidence(element, root, cache, item, budget);
             string autoId = GetS(item, "automationId", "");
             string key = Json.Serialize(new object[] { witness, runtimeId, evidence, autoId });
             string existing; ObservedUiTarget old;
@@ -6550,7 +7351,7 @@ namespace DshComputerUse.Worker
             }
             string token = "T" + Guid.NewGuid().ToString("N");
             var target = new ObservedUiTarget { Token = token, Key = key, Hwnd = hwnd, Witness = witness, RuntimeId = runtimeId,
-                Evidence = evidence, AutoId = autoId, Name = element.Current.Name,
+                Evidence = evidence, AutoId = autoId, Name = UiReadMaybe(budget, delegate { return element.Current.Name; }),
                 Role = GetS(item, "role", ""), Element = element, At = NowMs() };
             UiTargets[token] = target; UiTargetKeys[key] = token; UiTargetOrder.Enqueue(token);
             while (UiTargets.Count > 512) {
@@ -6568,36 +7369,38 @@ namespace DshComputerUse.Worker
                 throw NotDispatched("TARGET_STALE", "TARGET_STALE: window identity, title or bounds changed; query again; no action sent");
             return target;
         }
-        static AutomationElement ResolveUiTarget(ObservedUiTarget target, bool rebind, int depth, int budget, out string mode, out int seen)
+        static AutomationElement ResolveUiTarget(ObservedUiTarget target, bool rebind, int depth, int budget, out string mode, out int seen,
+            UiReadBudget readBudget = null, Dictionary<string, object> scope = null)
         {
+            if (readBudget == null) readBudget = new UiReadBudget(1200, UiClockMs);
             mode = "runtime-id"; seen = 0;
             try {
-                if (String.Join(".", target.Element.GetRuntimeId()) == target.RuntimeId &&
-                    target.Element.Current.AutomationId == target.AutoId && UiTargetEvidence(target.Element, target.Hwnd) == target.Evidence)
+                if (String.Join(".", readBudget.Read(delegate { return target.Element.GetRuntimeId(); })) == target.RuntimeId &&
+                    readBudget.Read(delegate { return target.Element.Current.AutomationId; }) == target.AutoId && UiTargetEvidence(target.Element, target.Hwnd, readBudget) == target.Evidence)
                     return target.Element;
-            } catch { }
+            } catch (UiBudgetStop) { throw; } catch { }
             if (!rebind) throw new Exception("TARGET_STALE: observed control was replaced or changed; query again or explicitly request rebind; no action sent");
-            var start = AutomationElement.FromHandle(target.Hwnd);
+            var start = scope == null ? readBudget.Read(delegate { return AutomationElement.FromHandle(target.Hwnd); }) : UiQueryRoot(scope, target.Hwnd, readBudget);
             bool truncated; int visited;
             List<AutomationElement> candidates = new List<AutomationElement>();
             if (!String.IsNullOrEmpty(target.AutoId)) {
-                candidates = FindUiMatches(start, null, target.AutoId, null, depth, budget, budget, out visited, out truncated);
+                candidates = FindUiMatchesBudgeted(start, null, target.AutoId, null, depth, budget, budget, readBudget, out visited, out truncated);
                 seen += visited;
                 if (truncated) throw new Exception("INCOMPLETE_UIA_SEARCH: cannot prove unique target recovery; no action sent");
                 if (candidates.Count > 1) throw new Exception("AMBIGUOUS_UIA_TARGET: native identity matches multiple controls; no action sent");
                 if (candidates.Count == 1) {
-                    if (UiTargetEvidence(candidates[0], target.Hwnd) != target.Evidence)
+                    if (UiTargetEvidence(candidates[0], target.Hwnd, readBudget) != target.Evidence)
                         throw new Exception("TARGET_SEMANTICS_CHANGED: native ID now names a different control/context; no action sent");
                     mode = "native-identifier";
                 }
             }
             if (candidates.Count == 0) {
                 if (String.IsNullOrWhiteSpace(target.Name)) throw new Exception("TARGET_STALE: target has no usable semantic name; no action sent");
-                var matches = FindUiMatches(start, target.Name, null, target.Role, depth, budget, budget, out visited, out truncated);
+                var matches = FindUiMatchesBudgeted(start, target.Name, null, target.Role, depth, budget, budget, readBudget, out visited, out truncated);
                 seen += visited;
                 if (truncated) throw new Exception("INCOMPLETE_UIA_SEARCH: cannot prove unique semantic recovery; no action sent");
                 foreach (AutomationElement element in matches)
-                    if (UiTargetEvidence(element, target.Hwnd) == target.Evidence) candidates.Add(element);
+                    if (UiTargetEvidence(element, target.Hwnd, readBudget) == target.Evidence) candidates.Add(element);
                 if (candidates.Count > 1) throw new Exception("AMBIGUOUS_UIA_TARGET: semantic recovery matches multiple controls; no action sent");
                 if (candidates.Count == 0) throw new Exception("TARGET_STALE: no control retains the observed identity/context; no action sent");
                 mode = "semantic";
@@ -6615,9 +7418,28 @@ namespace DshComputerUse.Worker
         // button, expanding a dropdown, filling a field.
         static bool ElementMatches(AutomationElement e, string nameFilter, string autoIdFilter, string roleFilter)
         {
-            if (autoIdFilter != null && !String.Equals(e.Current.AutomationId, autoIdFilter, StringComparison.Ordinal)) return false;
-            if (roleFilter != null && !String.Equals(e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""), roleFilter, StringComparison.OrdinalIgnoreCase)) return false;
-            if (nameFilter != null && (e.Current.Name ?? "").IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            return ElementMatchesBudgeted(e, nameFilter, autoIdFilter, roleFilter, null);
+        }
+        static CacheRequest UiSelectorCache()
+        {
+            // Only the current navigated element, never a cached subtree. This
+            // batches the three selector properties into the navigation call.
+            var cache = new CacheRequest(); cache.TreeScope = TreeScope.Element;
+            cache.AutomationElementMode = AutomationElementMode.Full;
+            cache.Add(AutomationElement.NameProperty); cache.Add(AutomationElement.AutomationIdProperty);
+            cache.Add(AutomationElement.ControlTypeProperty); return cache;
+        }
+        static T UiSelectorRead<T>(UiReadBudget budget, Func<T> cached, Func<T> current)
+        {
+            if (budget != null && !budget.Continue()) throw new UiBudgetStop();
+            try { return cached(); }
+            catch (InvalidOperationException) { return UiReadMaybe(budget, current); }
+        }
+        static bool ElementMatchesBudgeted(AutomationElement e, string nameFilter, string autoIdFilter, string roleFilter, UiReadBudget budget)
+        {
+            if (autoIdFilter != null && !String.Equals(UiSelectorRead(budget, delegate { return e.Cached.AutomationId; }, delegate { return e.Current.AutomationId; }), autoIdFilter, StringComparison.Ordinal)) return false;
+            if (roleFilter != null && !String.Equals(UiSelectorRead(budget, delegate { return e.Cached.ControlType; }, delegate { return e.Current.ControlType; }).ProgrammaticName.Replace("ControlType.", ""), roleFilter, StringComparison.OrdinalIgnoreCase)) return false;
+            if (nameFilter != null && (UiSelectorRead(budget, delegate { return e.Cached.Name; }, delegate { return e.Current.Name; }) ?? "").IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) < 0) return false;
             return true;
         }
 
@@ -6626,32 +7448,19 @@ namespace DshComputerUse.Worker
         static List<AutomationElement> FindUiMatches(AutomationElement start, string name, string autoId,
             string role, int depth, int maxNodes, int limit, out int seen, out bool truncated)
         {
-            var matches = new List<AutomationElement>();
-            var q = new Queue<KeyValuePair<AutomationElement, int>>();
-            q.Enqueue(new KeyValuePair<AutomationElement, int>(start, 0));
-            seen = 0; truncated = false;
-            while (q.Count > 0 && seen < maxNodes)
-            {
-                var kv = q.Dequeue(); seen++;
-                try
-                {
-                    if (ElementMatches(kv.Key, name, autoId, role))
-                    {
-                        matches.Add(kv.Key);
-                        if (matches.Count >= limit) { truncated = true; break; }
-                    }
-                    if (kv.Value < depth)
-                        foreach (AutomationElement child in kv.Key.FindAll(TreeScope.Children, Condition.TrueCondition))
-                        {
-                            if (seen + q.Count >= maxNodes) { truncated = true; break; }
-                            q.Enqueue(new KeyValuePair<AutomationElement, int>(child, kv.Value + 1));
-                        }
-                    else if (kv.Key.FindFirst(TreeScope.Children, Condition.TrueCondition) != null)
-                        truncated = true;
-                }
-                catch { truncated = true; }
-            }
-            if (q.Count > 0) truncated = true;
+            return FindUiMatchesBudgeted(start, name, autoId, role, depth, maxNodes, limit,
+                new UiReadBudget(1200, UiClockMs), out seen, out truncated);
+        }
+        static List<AutomationElement> FindUiMatchesBudgeted(AutomationElement start, string name, string autoId,
+            string role, int depth, int maxNodes, int limit, UiReadBudget budget, out int seen, out bool truncated)
+        {
+            int before = budget.Scanned;
+            CacheRequest selectorCache = UiSelectorCache();
+            var matches = UiWalkBounded(start, depth, maxNodes, limit, budget,
+                delegate(AutomationElement element) { return ElementMatchesBudgeted(element, name, autoId, role, budget); },
+                delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetFirstChild(element, selectorCache); },
+                delegate(AutomationElement element) { return TreeWalker.RawViewWalker.GetNextSibling(element, selectorCache); });
+            seen = budget.Scanned - before; truncated = budget.Truncated;
             return matches;
         }
 
@@ -6665,35 +7474,46 @@ namespace DshComputerUse.Worker
             IntPtr root = observed == null ? FindHwnd(a) : observed.Hwnd;
             if (observed != null && a.ContainsKey("hwnd") && FindHwnd(a) != root) throw new Exception("TARGET_STALE: target belongs to another window; no action sent");
             if (root != IntPtr.Zero) HostGuard(root, "uiaAct");
-            AutomationElement start = root != IntPtr.Zero ? AutomationElement.FromHandle(root) : AutomationElement.RootElement;
             string name = GetS(a, "nameContains", null);
             string autoId = GetS(a, "automationId", null);
             string role = GetS(a, "role", null);
             int index = Math.Max(0, GetI(a, "index", 0));
-            int depth = Math.Max(1, Math.Min(24, GetI(a, "depth", 12)));
-            int maxNodes = Math.Max(20, Math.Min(4000, GetI(a, "maxNodes", 2000)));
+            int depth = Math.Max(1, Math.Min(24, GetI(a, "depth", 6)));
+            int maxNodes = Math.Max(20, Math.Min(1200, GetI(a, "maxNodes", 120)));
+            bool rebind = GetB(a, "allowRebind", false);
+            if (observed == null || rebind) ValidateUiQueryScope(root != IntPtr.Zero, true,
+                !String.IsNullOrWhiteSpace(GetS(a, "anchor", null)), depth, maxNodes);
+            UiReadBudget readBudget = NewUiBudget(a);
             bool unique = GetB(a, "requireUnique", !a.ContainsKey("index"));
             List<object> skipped = new List<object>();
             int seen = 0; bool truncated = false; string resolution = null;
-            var matches = observed == null ? FindUiMatches(start, name, autoId, role, depth, maxNodes,
-                unique ? 2 : index + 1, out seen, out truncated) : new List<AutomationElement> {
-                    ResolveUiTarget(observed, GetB(a, "allowRebind", false), depth, maxNodes, out resolution, out seen) };
+            List<AutomationElement> matches;
+            try {
+                matches = observed == null ? FindUiMatchesBudgeted(UiQueryRoot(a, root, readBudget), name, autoId, role, depth, maxNodes,
+                    unique ? 2 : index + 1, readBudget, out seen, out truncated) : new List<AutomationElement> {
+                        ResolveUiTarget(observed, rebind, depth, maxNodes, out resolution, out seen, readBudget, a) };
+            } catch (UiBudgetStop) {
+                throw new Exception("INCOMPLETE_UIA_SEARCH: soft provider-read budget exhausted; no action sent. Observe a narrower point/anchor or refresh once; a synchronous COM call cannot be interrupted by this budget.");
+            }
+            truncated = truncated || readBudget.Truncated;
+            if (!readBudget.Continue())
+                throw new Exception("INCOMPLETE_UIA_SEARCH: provider-read budget exhausted; no action sent; use a narrower point/anchor");
             if (unique && matches.Count > 1)
                 throw new Exception("AMBIGUOUS_UIA_TARGET: multiple controls match; no action sent. Query computer_uia, then specify hwnd and an exact id.");
             if (unique && truncated)
                 throw new Exception("INCOMPLETE_UIA_SEARCH: uniqueness could not be verified; no action sent. Narrow the target window or query with greater depth.");
             AutomationElement found = matches.Count > index ? matches[index] : null;
             if (!unique) for (int i = 0; i < Math.Min(index, matches.Count); i++)
-                try { skipped.Add(ElemDict(matches[i])); } catch { }
+                try { skipped.Add(ElemDictBudgeted(matches[i], readBudget)); }
+                catch (UiBudgetStop) { throw new Exception("INCOMPLETE_UIA_SEARCH: provider-read budget exhausted before action; no action sent"); } catch { }
             if (found == null)
                 throw new Exception("uiaAct: no element matched (nameContains=" + (name ?? "-") +
                     ", automationId=" + (autoId ?? "-") + ", role=" + (role ?? "-") +
                     ", index=" + index + ") among " + seen + " elements");
 
             // A UIA mutation shares the same actual-action boundary and takeover checks.
-            // A selector WITHOUT hwnd searches the whole desktop, so there the element that
-            // actually matched decides the victim - and a host control is never driven through
-            // its automation pattern either.
+            // Scoped selectors and observed targets still need a final process
+            // guard; a host control is never driven through its automation pattern.
             int foundPid = 0;
             try { foundPid = found.Current.ProcessId; } catch { }
             HostGuardPid(foundPid, "uiaAct");
@@ -7027,6 +7847,8 @@ namespace DshComputerUse.Worker
         {
             var result = Err(error.Message);
             if (error.Data["glowHealth"] != null) result["glowHealth"] = error.Data["glowHealth"];
+            foreach (string key in new string[] { "dragStarted", "expectedCursor", "actualCursor", "cursorCheck" })
+                if (error.Data.Contains(key)) result[key] = error.Data[key];
             if (error.Data["code"] != null)
             {
                 result["code"] = (string)error.Data["code"];
@@ -7117,6 +7939,745 @@ namespace DshComputerUse.Worker
                 if (stream == null) return;
                 stream.Dispose(); stream = null;
             }
+        }
+    }
+}
+
+namespace DshComputerUse.Worker
+{
+    /// A small, capture-excluded visual replacement at the native pointer hotspot.
+    /// Native cursor resources remain intact for hit evidence and screenshot burn-in.
+    /// Update/Hide/Dispose are called only by Glow's window-owning render thread.
+    public static class AgentPointer
+    {
+        const int LogicalWidth = KitePointerPainter.LogicalWidth, LogicalHeight = KitePointerPainter.LogicalHeight;
+        const int WS_POPUP = unchecked((int)0x80000000), WS_DISABLED = 0x08000000;
+        const int CompanionStyle = 0x00080000 | 0x00000020 | 0x00000080 | 0x08000000 | 0x00000008;
+        [StructLayout(LayoutKind.Sequential)] struct Pt { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] struct Sz { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] struct Rc { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] struct MonitorInfo { public uint Size; public Rc Monitor, Work; public uint Flags; }
+        [StructLayout(LayoutKind.Sequential)] struct CursorInfo { public uint Size, Flags; public IntPtr Cursor; public Pt Position; }
+        [StructLayout(LayoutKind.Sequential, Pack = 1)] struct Blend { public byte Op, Flags, Alpha, Format; }
+        [StructLayout(LayoutKind.Sequential)] struct BitmapHeader
+        {
+            public uint Size; public int Width, Height; public ushort Planes, BitCount;
+            public uint Compression, SizeImage; public int XPelsPerMeter, YPelsPerMeter;
+            public uint ClrUsed, ClrImportant;
+        }
+        [StructLayout(LayoutKind.Sequential)] struct BitmapInfo { public BitmapHeader Header; public uint Color; }
+        [StructLayout(LayoutKind.Sequential)] struct Msg
+        {
+            public IntPtr Hwnd; public uint Message; public UIntPtr WParam;
+            public IntPtr LParam; public uint Time; public Pt Point; public uint Private;
+        }
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateWindowEx(int ex, string cls, string title, int style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+        [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll", SetLastError = true)] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+        [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CursorInfo info);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(Pt point, uint flags);
+        [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+        [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor, int kind, out uint x, out uint y);
+        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool PeekMessage(out Msg msg, IntPtr hwnd, uint min, uint max, uint remove);
+        [DllImport("user32.dll")] static extern bool ValidateRect(IntPtr hwnd, IntPtr rect);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr DispatchMessage(ref Msg msg);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info, uint use, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport("user32.dll", SetLastError = true)] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dc, ref Pt dest, ref Sz size, IntPtr source, ref Pt origin, int key, ref Blend blend, int flags);
+
+        static IntPtr window, screenDc, memoryDc, dib, oldBitmap, pixels, monitor;
+        static int width, height, lastX = int.MinValue, lastY = int.MinValue, lastFrame = -1;
+        static bool visible, failed, lastHolding;
+        static string lastShape;
+        static float scale = 1;
+        static Rc monitorBounds;
+        static byte[] copy;
+        public static string Fault { get; private set; }
+
+        // Only a protected hold animates. Sixteen brightness steps over 2.5 seconds
+        // avoid a repaint on every Glow tick; active input has a static bitmap.
+        public static int AnimationFrame(bool holding, int tick)
+        {
+            return KitePointerPainter.AnimationFrame(holding, tick);
+        }
+
+        public static void Update(bool show, bool holding)
+        {
+            if (!show || failed) { Hide(); return; }
+            try
+            {
+                CursorInfo cursor = new CursorInfo(); cursor.Size = (uint)Marshal.SizeOf(typeof(CursorInfo));
+                // Follow native cursor visibility, including text-entry apps which hide it.
+                if (!GetCursorInfo(ref cursor) || (cursor.Flags & 1) == 0) { Hide(); return; }
+                IntPtr nextMonitor = MonitorFromPoint(cursor.Position, 2);
+                if (nextMonitor != monitor || window == IntPtr.Zero)
+                {
+                    MonitorInfo info = new MonitorInfo(); info.Size = (uint)Marshal.SizeOf(typeof(MonitorInfo));
+                    if (!GetMonitorInfo(nextMonitor, ref info)) { Hide(); return; }
+                    monitorBounds = info.Monitor; monitor = nextMonitor;
+                    uint dpiX = 96, dpiY = 96;
+                    try { if (GetDpiForMonitor(monitor, 0, out dpiX, out dpiY) != 0) dpiX = 96; }
+                    catch (EntryPointNotFoundException) { dpiX = 96; }
+                    catch (DllNotFoundException) { dpiX = 96; }
+                    scale = Math.Max(1.0f, Math.Min(4.0f, dpiX / 96.0f));
+                    EnsureSurface((int)Math.Ceiling(LogicalWidth * scale), (int)Math.Ceiling(LogicalHeight * scale));
+                    lastFrame = -1;
+                }
+                // The drawn tip IS the native click point. Never flip or clamp the
+                // surface near an edge: that would lie about the actual hotspot.
+                System.Drawing.Point hotspot = KitePointerPainter.Hotspot(scale);
+                int x = cursor.Position.X - hotspot.X, y = cursor.Position.Y - hotspot.Y;
+                string shape = Program.StandardCursorShape(cursor.Cursor,
+                    delegate(int id) { return Native.LoadCursor(IntPtr.Zero, new IntPtr(id)); });
+                int frame = AnimationFrame(holding, Environment.TickCount);
+                if (frame != lastFrame || holding != lastHolding || shape != lastShape)
+                {
+                    using (Bitmap bitmap = RenderPreview(scale, holding, frame, shape))
+                    {
+                        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+                        try
+                        {
+                            if (copy == null || copy.Length != width * height * 4) copy = new byte[width * height * 4];
+                            for (int row = 0; row < height; row++)
+                                Marshal.Copy(IntPtr.Add(data.Scan0, row * data.Stride), copy, row * width * 4, width * 4);
+                            Marshal.Copy(copy, 0, pixels, copy.Length);
+                        }
+                        finally { bitmap.UnlockBits(data); }
+                    }
+                    Pt target = new Pt { X = x, Y = y }, origin = new Pt();
+                    Sz size = new Sz { X = width, Y = height };
+                    Blend blend = new Blend { Alpha = 255, Format = 1 };
+                    if (!UpdateLayeredWindow(window, screenDc, ref target, ref size, memoryDc, ref origin, 0, ref blend, 2))
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                    lastFrame = frame; lastHolding = holding; lastShape = shape; lastX = x; lastY = y;
+                }
+                else if (x != lastX || y != lastY)
+                {
+                    // Moving a cached tiny layered surface does not redraw the desktop.
+                    if (!SetWindowPos(window, new IntPtr(-1), x, y, 0, 0, 0x0001 | 0x0010))
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                    lastX = x; lastY = y;
+                }
+                if (!visible) { ShowWindow(window, 4); visible = true; }
+                if (!IsWindowVisible(window)) throw new InvalidOperationException("replacement pointer surface is not visible");
+                // Publish a short hide lease only AFTER a successful visible paint.
+                // While the independent guardian starts, retain the native cursor.
+                if (!RequestReplacement(true))
+                {
+                    ShowWindow(window, 0); visible = false;
+                    if (PointerVisibilityLease.Fault != null) throw new InvalidOperationException(PointerVisibilityLease.Fault);
+                    return;
+                }
+                Msg msg;
+                for (int n = 0; n < 8 && PeekMessage(out msg, window, 0, 0, 1); n++)
+                {
+                    if (msg.Message == 0x000F) ValidateRect(window, IntPtr.Zero);
+                    else DispatchMessage(ref msg);
+                }
+            }
+            catch (Exception error)
+            {
+                // This presentation is optional. A display failure must never block input,
+                // leak a global cursor, or turn a recoverable Glow frame into a fatal one.
+                Fault = error.GetType().Name + ": " + error.Message; failed = true; Dispose();
+            }
+        }
+
+        static void EnsureSurface(int w, int h)
+        {
+            if (window == IntPtr.Zero)
+            {
+                window = CreateWindowEx(CompanionStyle, "STATIC", "DSH kite pointer", WS_POPUP | WS_DISABLED,
+                    0, 0, w, h, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                if (window == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                // If exclusion is unavailable, omit the decoration rather than paint it
+                // into evidence. WS_DISABLED + TRANSPARENT prevent input interception.
+                if (!SetWindowDisplayAffinity(window, 0x11)) throw new InvalidOperationException("pointer capture exclusion unavailable");
+                screenDc = GetDC(IntPtr.Zero); memoryDc = CreateCompatibleDC(screenDc);
+                if (screenDc == IntPtr.Zero || memoryDc == IntPtr.Zero) throw new InvalidOperationException("pointer DC unavailable");
+            }
+            if (width == w && height == h && dib != IntPtr.Zero) return;
+            ReleaseSurface();
+            BitmapInfo info = new BitmapInfo(); info.Header.Size = (uint)Marshal.SizeOf(typeof(BitmapHeader));
+            info.Header.Width = w; info.Header.Height = -h; info.Header.Planes = 1; info.Header.BitCount = 32;
+            dib = CreateDIBSection(screenDc, ref info, 0, out pixels, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero) throw new InvalidOperationException("pointer surface unavailable");
+            oldBitmap = SelectObject(memoryDc, dib);
+            if (oldBitmap == IntPtr.Zero || oldBitmap == new IntPtr(-1)) throw new InvalidOperationException("pointer bitmap unavailable");
+            width = w; height = h;
+        }
+
+        // Offscreen previews and the live pointer share the exact painter/hotspot.
+        public static Bitmap RenderPreview(float dpiScale, bool holding, int frame, string semantic = "arrow")
+        { return KitePointerPainter.RenderPreview(dpiScale, holding, frame, semantic); }
+
+        // A narrow seam for private-desktop tests; production uses the guardian lease.
+        static bool RequestReplacement(bool show)
+        { if (show) return PointerVisibilityLease.TryHide(); PointerVisibilityLease.Show(); return false; }
+
+        public static void Hide()
+        {
+            RequestReplacement(false);
+            if (window != IntPtr.Zero && visible) ShowWindow(window, 0);
+            visible = false;
+        }
+        static void ReleaseSurface()
+        {
+            if (oldBitmap != IntPtr.Zero && oldBitmap != new IntPtr(-1) && memoryDc != IntPtr.Zero) SelectObject(memoryDc, oldBitmap);
+            oldBitmap = IntPtr.Zero;
+            if (dib != IntPtr.Zero) DeleteObject(dib);
+            dib = IntPtr.Zero; pixels = IntPtr.Zero; width = height = 0; copy = null;
+        }
+        public static void Dispose()
+        {
+            Hide(); ReleaseSurface();
+            PointerVisibilityLease.Dispose();
+            if (memoryDc != IntPtr.Zero) DeleteDC(memoryDc);
+            if (screenDc != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screenDc);
+            if (window != IntPtr.Zero) DestroyWindow(window);
+            memoryDc = screenDc = window = monitor = IntPtr.Zero;
+            lastFrame = -1; lastX = lastY = int.MinValue;
+        }
+    }
+}
+
+namespace DshComputerUse.Worker
+{
+public static class KitePointerPainter
+{
+    public const int LogicalWidth = 39, LogicalHeight = 44;
+    public const float BodyScale = 0.75f, TiltDegrees = -25f;
+    public static readonly PointF LogicalHotspot = new PointF(8, 4);
+    static readonly double Angle = TiltDegrees * Math.PI / 180.0;
+
+    static float Scale(float value)
+    {
+        if (float.IsNaN(value) || float.IsInfinity(value)) return 1f;
+        return Math.Max(1f, Math.Min(4f, value));
+    }
+
+    public static Size CanvasSize(float dpiScale)
+    {
+        float s = Scale(dpiScale);
+        return new Size((int)Math.Ceiling(LogicalWidth * s), (int)Math.Ceiling(LogicalHeight * s));
+    }
+
+    public static Point Hotspot(float dpiScale)
+    {
+        float s = Scale(dpiScale);
+        return new Point((int)Math.Round(LogicalHotspot.X * s, MidpointRounding.AwayFromZero),
+            (int)Math.Round(LogicalHotspot.Y * s, MidpointRounding.AwayFromZero));
+    }
+
+    // Source kite tip is (27,7). Rotation is counterclockwise in screen coordinates:
+    // an upward-pointing head tilts toward the upper-left. Device-pixel H is shared
+    // by the painter and the future cursor hotspot; it never depends on animation.
+    public static PointF Transform(float x, float y, float dpiScale)
+    {
+        float s = Scale(dpiScale);
+        Point h = Hotspot(s);
+        double dx = x - 27, dy = y - 7;
+        return new PointF(h.X + (float)(s * BodyScale * (Math.Cos(Angle) * dx - Math.Sin(Angle) * dy)),
+            h.Y + (float)(s * BodyScale * (Math.Sin(Angle) * dx + Math.Cos(Angle) * dy)));
+    }
+
+    public static int AnimationFrame(bool holding, int tick)
+    {
+        if (!holding) return 16;
+        double phase = (unchecked((uint)tick) % 2500) * 2 * Math.PI / 2500.0;
+        return 7 + (int)Math.Round(4 * (1 - Math.Cos(phase)));
+    }
+
+    static PointF[] Shape(float s, params float[] xy)
+    {
+        PointF[] points = new PointF[xy.Length / 2];
+        for (int i = 0; i < points.Length; i++) points[i] = Transform(xy[2 * i], xy[2 * i + 1], s);
+        return points;
+    }
+
+    public static Bitmap RenderPreview(float dpiScale, bool holding, int frame, string semantic = "arrow")
+    {
+        float s = Scale(dpiScale);
+        Size size = CanvasSize(s);
+        Bitmap bitmap = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
+        float pulse = holding ? Math.Max(0f, Math.Min(1f, (frame - 7) / 8f)) : 1f;
+        int bodyAlpha = holding ? 208 + (int)(36 * pulse) : 248;
+        PointF[] kite = Shape(s, 27, 7, 41, 24, 27, 43, 13, 24);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            // A slim visible string attaches to the lower point. No satellite star,
+            // duplicate arrow, end bead or external status symbol crowds the tip.
+            using (Pen tail = new Pen(Color.FromArgb(holding ? 185 + (int)(35 * pulse) : 230, 39, 118, 224), 1.1f * s))
+            {
+                tail.StartCap = tail.EndCap = LineCap.Round;
+                g.DrawBezier(tail, Transform(27, 43, s), Transform(25, 53, s),
+                    Transform(11, 41, s), Transform(10, 53, s));
+            }
+
+            using (Pen halo = new Pen(Color.FromArgb(holding ? 8 + (int)(20 * pulse) : 28, 54, 132, 255), 2.5f * s))
+                g.DrawPolygon(halo, kite);
+            using (LinearGradientBrush fill = new LinearGradientBrush(Transform(22, 9, s), Transform(33, 43, s),
+                Color.FromArgb(bodyAlpha, holding ? 49 : 57, holding ? 133 : 150, 250),
+                Color.FromArgb(bodyAlpha, 20, 51, holding ? 128 : 151)))
+                g.FillPolygon(fill, kite);
+            using (SolidBrush facet = new SolidBrush(Color.FromArgb(holding ? 78 + (int)(25 * pulse) : 115, 160, 225, 255)))
+                g.FillPolygon(facet, Shape(s, 27, 7, 41, 24, 27, 25));
+            using (SolidBrush shade = new SolidBrush(Color.FromArgb(78, 6, 24, 79)))
+                g.FillPolygon(shade, Shape(s, 27, 25, 41, 24, 27, 43));
+            using (Pen rim = new Pen(Color.FromArgb(242, 191, 231, 255), Math.Max(0.85f, 0.85f * s)))
+            {
+                rim.LineJoin = LineJoin.Miter;
+                g.DrawPolygon(rim, kite);
+            }
+            using (Pen spine = new Pen(Color.FromArgb(72, 213, 242, 255), 0.55f * s))
+                g.DrawLine(spine, Transform(27, 8, s), Transform(27, 42, s));
+
+            // The state mark stays legible at the dimmest hold frame. Geometry and
+            // hotspot remain stationary; only light/alpha changes during breathing.
+            if (NormalizeSemantic(semantic) == "arrow")
+            using (SolidBrush mark = new SolidBrush(Color.FromArgb(245, 236, 249, 255)))
+            {
+                if (holding)
+                {
+                    g.FillPolygon(mark, Shape(s, 23.3f, 20.2f, 25.2f, 20.2f, 25.2f, 28.2f, 23.3f, 28.2f));
+                    g.FillPolygon(mark, Shape(s, 29.1f, 20.2f, 31.0f, 20.2f, 31.0f, 28.2f, 29.1f, 28.2f));
+                }
+                else g.FillPolygon(mark, Shape(s, 24, 19.8f, 31.4f, 24.2f, 24, 28.6f));
+            }
+            DrawSemantic(g, s, semantic);
+        }
+        return bitmap;
+    }
+
+    public static string NormalizeSemantic(string semantic)
+    {
+        if (String.IsNullOrEmpty(semantic)) return "arrow";
+        string value = semantic.Trim().ToLowerInvariant();
+        if (value == "ibeam" || value == "i-beam") return "text";
+        switch (value)
+        {
+            case "arrow": case "text": case "resize-ew": case "resize-ns":
+            case "resize-nwse": case "resize-nesw": case "move": case "hand":
+            case "cross": case "wait": case "app-starting": case "not-allowed": case "help":
+                return value;
+            default: return "unknown";
+        }
+    }
+
+    // Every semantic is a small upright center mark. Neither the canvas, kite,
+    // tail nor hotspot moves; holding keeps the same mark and only breathes.
+    // An unknown native cursor gets a neutral dash, never a guessed resize/text mark.
+    static void DrawSemantic(Graphics g, float s, string semantic)
+    {
+        semantic = NormalizeSemantic(semantic);
+        if (semantic == "arrow") return;
+        PointF center = Transform(27, 25, s);
+        using (GraphicsPath path = new GraphicsPath())
+        using (Matrix matrix = new Matrix(s, 0, 0, s, center.X, center.Y))
+        {
+            if (semantic == "text")
+            {
+                path.AddLine(-2, -4, 2, -4);
+                path.StartFigure(); path.AddLine(0, -4, 0, 4);
+                path.StartFigure(); path.AddLine(-2, 4, 2, 4);
+            }
+            else if (semantic.StartsWith("resize-"))
+            {
+                float angle = semantic == "resize-ns" ? 90 : semantic == "resize-nwse" ? 45 : semantic == "resize-nesw" ? -45 : 0;
+                AddDoubleArrow(path, 4.0f, 1.9f);
+                using (Matrix rotate = new Matrix()) { rotate.Rotate(angle); path.Transform(rotate); }
+            }
+            else if (semantic == "move")
+            {
+                AddDoubleArrow(path, 3.9f, 1.5f);
+                using (GraphicsPath vertical = new GraphicsPath())
+                using (Matrix rotate = new Matrix())
+                {
+                    AddDoubleArrow(vertical, 3.9f, 1.5f); rotate.Rotate(90); vertical.Transform(rotate);
+                    path.AddPath(vertical, false);
+                }
+            }
+            else if (semantic == "cross")
+            {
+                path.AddLine(-4, 0, 4, 0); path.StartFigure(); path.AddLine(0, -4, 0, 4);
+            }
+            else if (semantic == "not-allowed")
+            {
+                path.AddEllipse(-3.6f, -3.6f, 7.2f, 7.2f);
+                path.StartFigure(); path.AddLine(-2.5f, 2.5f, 2.5f, -2.5f);
+            }
+            else if (semantic == "wait")
+            {
+                AddHourglass(path, 0, 0, 2.6f, 3.8f);
+            }
+            else if (semantic == "app-starting")
+            {
+                path.AddLines(new PointF[] { new PointF(-3.5f, 2.7f), new PointF(-3.5f, -3.8f), new PointF(-0.2f, -0.4f) });
+                path.StartFigure(); AddHourglass(path, 1.8f, 1.2f, 1.5f, 2.6f);
+            }
+            else if (semantic == "help")
+            {
+                path.AddBezier(-2.4f, -2.4f, -2.0f, -5.3f, 4.1f, -4.0f, 1.7f, -1.3f);
+                path.AddBezier(1.7f, -1.3f, 0.6f, -0.5f, 0, -0.4f, 0, 1.2f);
+                path.StartFigure(); path.AddLine(0, 3.3f, 0, 3.6f);
+            }
+            else if (semantic == "hand")
+            {
+                path.AddPolygon(new PointF[] { new PointF(-3.7f, 0), new PointF(-2.4f, -1),
+                    new PointF(-1, 0.4f), new PointF(-1, -4.2f), new PointF(0.6f, -4.2f),
+                    new PointF(0.6f, -0.8f), new PointF(1.8f, -1.4f), new PointF(3, -0.5f),
+                    new PointF(3.7f, 0.6f), new PointF(3.1f, 3.6f), new PointF(-0.2f, 3.9f), new PointF(-2, 2) });
+            }
+            else
+            {
+                path.AddLine(-2.1f, 0, 2.1f, 0);
+            }
+            path.Transform(matrix);
+            using (Pen contrast = new Pen(Color.FromArgb(110, 8, 32, 89), 2.0f * s))
+            using (Pen ink = new Pen(Color.FromArgb(semantic == "unknown" ? 180 : 248, 232, 247, 255), 1.0f * s))
+            {
+                contrast.LineJoin = ink.LineJoin = LineJoin.Round;
+                contrast.StartCap = contrast.EndCap = ink.StartCap = ink.EndCap = LineCap.Round;
+                g.DrawPath(contrast, path); g.DrawPath(ink, path);
+            }
+        }
+    }
+
+    static void AddDoubleArrow(GraphicsPath path, float radius, float head)
+    {
+        path.AddLine(-radius, 0, radius, 0); path.StartFigure();
+        path.AddLines(new PointF[] { new PointF(-radius + head, -head), new PointF(-radius, 0), new PointF(-radius + head, head) });
+        path.StartFigure();
+        path.AddLines(new PointF[] { new PointF(radius - head, -head), new PointF(radius, 0), new PointF(radius - head, head) });
+    }
+
+    static void AddHourglass(GraphicsPath path, float x, float y, float width, float height)
+    {
+        path.AddLines(new PointF[] { new PointF(x - width, y - height), new PointF(x + width, y - height),
+            new PointF(x - width, y + height), new PointF(x + width, y + height), new PointF(x - width, y - height) });
+    }
+}
+
+}
+
+namespace DshComputerUse.Worker
+{
+    public static class PointerVisibilityLease
+    {
+        const int Version = 1, Bytes = 128, ReadyOffset = 48, RestoredOffset = 52;
+        const int LeaseMs = 500, RefreshMs = 100, StartupMs = 2000;
+        const string Prefix = "Local\\DSH-CursorLease-";
+        static readonly object Gate = new object();
+        static Session current;
+        static string fault;
+        public static string Fault { get { lock (Gate) return fault; } }
+        internal static long NowMs()
+        { return (long)(System.Diagnostics.Stopwatch.GetTimestamp() * (1000.0 / System.Diagnostics.Stopwatch.Frequency)); }
+
+        sealed class Session
+        {
+            public System.IO.MemoryMappedFiles.MemoryMappedFile Map;
+            public System.IO.MemoryMappedFiles.MemoryMappedViewAccessor View;
+            public System.Diagnostics.Process Guardian;
+            public bool Ready, Revoked, Requested, Finished;
+            public long Sequence, LastRefresh;
+        }
+
+        // Invoke ONLY after the overlay has been successfully presented at the
+        // native hotspot. True means the ready guardian accepted a current lease,
+        // not proof that pixels disappeared. Never blocks waiting for readiness.
+        public static bool TryHide()
+        {
+            lock (Gate)
+            {
+                if (fault != null) return false;
+                if (current != null && current.Finished) current = null;
+                if (current == null)
+                {
+                    current = new Session(); Session launch = current;
+                    System.Threading.ThreadPool.QueueUserWorkItem(delegate { StartAndMonitor(launch); });
+                    return false;
+                }
+                Session s = current;
+                if (s.Revoked || !s.Ready || s.View == null) return false;
+                long now = NowMs();
+                if (!s.Requested || now - s.LastRefresh >= RefreshMs)
+                {
+                    s.Requested = true; // Set before writing: unknown write outcome also needs cleanup.
+                    try { WriteRequest(s, true, false, now); s.LastRefresh = now; }
+                    catch (System.Exception e) { fault = "cursor lease write: " + e.Message; s.Revoked = true; return false; }
+                }
+                return true;
+            }
+        }
+
+        // A nonblocking release request. Guardian observes it within its next
+        // progressing <=20 ms poll; it is not a synchronous compositor fence.
+        public static void Show()
+        {
+            lock (Gate)
+            {
+                Session s = current;
+                if (s == null || s.Finished || s.Revoked) return;
+                s.Revoked = true;
+                if (s.View != null)
+                {
+                    try { WriteRequest(s, false, true, NowMs()); }
+                    catch (System.Exception e) { fault = "cursor lease release: " + e.Message; }
+                }
+            }
+        }
+        public static void Dispose() { Show(); }
+
+        static void WriteRequest(Session s, bool desired, bool revoked, long stamp)
+        {
+            long even = s.Sequence + 2;
+            s.View.Write(16, even - 1); System.Threading.Thread.MemoryBarrier();
+            s.View.Write(24, desired ? 1 : 0); s.View.Write(28, revoked ? 1 : 0); s.View.Write(32, stamp);
+            System.Threading.Thread.MemoryBarrier(); s.View.Write(16, even); s.Sequence = even;
+        }
+        internal sealed class Request
+        {
+            public long Sequence, Stamp;
+            public bool Desired, Revoked;
+            public Request(long sequence, long stamp, bool desired, bool revoked)
+            { Sequence = sequence; Stamp = stamp; Desired = desired; Revoked = revoked; }
+        }
+        internal static Request ReadRequest(System.IO.MemoryMappedFiles.MemoryMappedViewAccessor view)
+        {
+            long first = view.ReadInt64(16);
+            if (first <= 0 || (first & 1) != 0) return null;
+            System.Threading.Thread.MemoryBarrier();
+            int desired = view.ReadInt32(24), revoked = view.ReadInt32(28); long stamp = view.ReadInt64(32);
+            System.Threading.Thread.MemoryBarrier(); long second = view.ReadInt64(16);
+            if (first != second || (desired != 0 && desired != 1) || (revoked != 0 && revoked != 1)) return null;
+            return new Request(second, stamp, desired == 1, revoked == 1);
+        }
+
+        static void StartAndMonitor(Session s)
+        {
+            System.IO.MemoryMappedFiles.MemoryMappedFile map = null;
+            System.IO.MemoryMappedFiles.MemoryMappedViewAccessor view = null;
+            System.Diagnostics.Process child = null;
+            bool restoreNeeded = false, exitConfirmed = false, stopAttempted = false;
+            try
+            {
+                string name = Prefix + System.Guid.NewGuid().ToString("N");
+                using (System.Diagnostics.Process owner = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    map = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateNew(name, Bytes);
+                    view = map.CreateViewAccessor(0, Bytes);
+                    view.Write(0, Version); view.Write(4, owner.Id);
+                    long start = owner.StartTime.ToUniversalTime().Ticks; view.Write(8, start);
+                    lock (Gate)
+                    {
+                        s.Map = map; s.View = view;
+                        if (s.Revoked) return; // No child and no Mag API if released during startup.
+                        WriteRequest(s, false, false, NowMs());
+                    }
+                    var info = new System.Diagnostics.ProcessStartInfo(
+                        System.Reflection.Assembly.GetExecutingAssembly().Location,
+                        "--pointer-guardian " + name + " " + owner.Id + " " + start);
+                    info.UseShellExecute = false; info.CreateNoWindow = true;
+                    info.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+                    child = System.Diagnostics.Process.Start(info);
+                    if (child == null) throw new System.InvalidOperationException("guardian did not start");
+                    lock (Gate) s.Guardian = child;
+                }
+                long began = NowMs();
+                while (!child.WaitForExit(20))
+                {
+                    int status = view.ReadInt32(ReadyOffset);
+                    lock (Gate) s.Ready = status == 1 && !s.Revoked;
+                    if (status == 0 && NowMs() - began > StartupMs)
+                    {
+                        // Only our own Process handle is terminated. It was not
+                        // ready, so TryHide has never authorized a hide request.
+                        stopAttempted = true;
+                        exitConfirmed = ConfirmExit(delegate { return child.HasExited; }, child.Kill, child.WaitForExit);
+                        if (!exitConfirmed) throw new System.TimeoutException("guardian termination unconfirmed after 1000 ms");
+                        throw new System.TimeoutException("guardian startup timeout");
+                    }
+                }
+                exitConfirmed = true;
+                lock (Gate)
+                {
+                    s.Ready = false;
+                    restoreNeeded = s.Requested && view.ReadInt32(RestoredOffset) != 1;
+                    if (!s.Revoked) fault = "pointer guardian ended; native cursor fallback";
+                }
+            }
+            catch (System.Exception e)
+            {
+                lock (Gate) { s.Ready = false; fault = "pointer guardian: " + e.Message; restoreNeeded = s.Requested; }
+                // An alive guardian remains the sole hide writer. Never race an
+                // emergency show against a process that can still issue hide.
+                if (child != null && !exitConfirmed && !stopAttempted)
+                {
+                    stopAttempted = true;
+                    exitConfirmed = ConfirmExit(delegate { return child.HasExited; }, child.Kill, child.WaitForExit);
+                }
+                if (!exitConfirmed)
+                {
+                    restoreNeeded = false;
+                    if (child != null) lock (Gate) fault += "; guardian exit unconfirmed, emergency show suppressed and further leases disabled";
+                }
+            }
+            finally
+            {
+                // Guardian has ended before emergency restoration and before a
+                // subsequent session may start. Old cleanup cannot unhide a new lease.
+                if (restoreNeeded && exitConfirmed) EmergencyShow();
+                lock (Gate)
+                {
+                    s.Ready = false; s.View = null; s.Map = null; s.Guardian = null;
+                    if (view != null) view.Dispose(); if (map != null) map.Dispose();
+                    if (child != null) child.Dispose(); s.Finished = true;
+                }
+            }
+        }
+
+        // Bounded process shutdown, shared with fake process tests. Failure is
+        // explicit: the caller must not race show against a possible late hide.
+        internal static bool ConfirmExit(System.Func<bool> hasExited, System.Action kill, System.Func<int, bool> wait)
+        {
+            try
+            {
+                if (hasExited()) return true;
+                try { kill(); } catch { return hasExited(); }
+                return wait(1000) || hasExited();
+            }
+            catch { return false; }
+        }
+
+        static void EmergencyShow()
+        {
+            var native = new NativeBackend(); bool initialized = false;
+            try { initialized = native.Initialize(); if (!initialized || !native.Show(true)) lock (Gate) fault = "emergency cursor restore API failed"; }
+            catch (System.Exception e) { lock (Gate) fault = "emergency cursor restore: " + e.Message; }
+            finally { if (initialized) try { native.Uninitialize(); } catch { } }
+        }
+
+        internal interface Backend { bool Initialize(); bool Show(bool visible); void Uninitialize(); }
+        sealed class NativeBackend : Backend
+        {
+            [System.Runtime.InteropServices.DllImport("Magnification.dll")] static extern bool MagInitialize();
+            [System.Runtime.InteropServices.DllImport("Magnification.dll")] static extern bool MagShowSystemCursor(bool show);
+            [System.Runtime.InteropServices.DllImport("Magnification.dll")] static extern bool MagUninitialize();
+            public bool Initialize() { return MagInitialize(); }
+            public bool Show(bool visible) { return MagShowSystemCursor(visible); }
+            public void Uninitialize() { MagUninitialize(); }
+        }
+        internal sealed class Outcome
+        { public bool HideAttempted, RestoreConfirmed, Success; public string Reason; }
+
+        // Same loop is used in the actual guardian and deterministic fake-backend
+        // tests. No wall-clock waiting or native API is required in those tests.
+        internal static Outcome RunLease(Backend api, System.Func<Request> read,
+            System.Func<long> now, System.Func<bool> ownerAlive, System.Action pause, System.Action ready)
+        {
+            var result = new Outcome(); bool initialized = false, hidden = false;
+            long started = now(), latestSequence = 0, stamp = started; bool everRequested = false;
+            try
+            {
+                initialized = api.Initialize();
+                if (!initialized) { result.Reason = "initialize-failed"; return result; }
+                ready();
+                while (true)
+                {
+                    if (!ownerAlive()) { result.Reason = "owner-exited"; break; }
+                    // Expiration is terminal even when a newer request has
+                    // arrived while this process was not scheduled.
+                    if (everRequested && now() - stamp >= LeaseMs) { result.Reason = "lease-expired"; break; }
+                    Request request = read(); long currentTime = now();
+                    if (request != null && request.Sequence > latestSequence)
+                    {
+                        latestSequence = request.Sequence;
+                        if (request.Revoked || (!request.Desired && everRequested)) { result.Reason = "released"; break; }
+                        if (request.Desired)
+                        {
+                            if (request.Stamp > currentTime || currentTime - request.Stamp >= LeaseMs)
+                            { result.Reason = "expired-request"; break; }
+                            everRequested = true; stamp = request.Stamp;
+                            if (!hidden)
+                            {
+                                // Re-read the current complete request before the
+                                // sole hide writer acts; queued old commands never apply.
+                                Request newest = read();
+                                if (newest == null || newest.Sequence != request.Sequence) { pause(); continue; }
+                                if (!ownerAlive() || now() - stamp >= LeaseMs) { result.Reason = "expired-before-hide"; break; }
+                                result.HideAttempted = true;
+                                if (!api.Show(false)) { result.Reason = "hide-failed"; break; }
+                                hidden = true;
+                                // A release concurrent with the API is processed
+                                // before sleeping or accepting another lease.
+                                Request after = read();
+                                if (after != null && after.Sequence > latestSequence && (after.Revoked || !after.Desired))
+                                { result.Reason = "released-during-hide"; break; }
+                            }
+                        }
+                    }
+                    if (everRequested && currentTime - stamp >= LeaseMs) { result.Reason = "lease-expired"; break; }
+                    if (!everRequested && currentTime - started >= StartupMs) { result.Reason = "unused"; break; }
+                    pause();
+                }
+                result.Success = result.Reason != "hide-failed";
+            }
+            catch (System.Exception e) { result.Reason = "fault: " + e.Message; }
+            finally
+            {
+                if (initialized)
+                {
+                    if (result.HideAttempted)
+                    {
+                        try { result.RestoreConfirmed = api.Show(true); }
+                        catch { result.RestoreConfirmed = false; }
+                        if (!result.RestoreConfirmed) result.Success = false;
+                    }
+                    try { api.Uninitialize(); } catch { result.Success = false; }
+                }
+            }
+            return result;
+        }
+
+        // Dispatch this at the FIRST line of worker Main, before Panic.Init,
+        // hooks, global brake, protocol stdout, or any other worker lifecycle.
+        public static int GuardianMain(string name, int ownerPid, long ownerStartTicks)
+        {
+            if (System.IntPtr.Size != 8 || name == null || !name.StartsWith(Prefix, System.StringComparison.Ordinal) ||
+                name.Length != Prefix.Length + 32) return 2;
+            try
+            {
+                using (System.Diagnostics.Process owner = System.Diagnostics.Process.GetProcessById(ownerPid))
+                using (System.Diagnostics.Process self = System.Diagnostics.Process.GetCurrentProcess())
+                using (var map = System.IO.MemoryMappedFiles.MemoryMappedFile.OpenExisting(name))
+                using (var view = map.CreateViewAccessor(0, Bytes))
+                {
+                    if (owner.StartTime.ToUniversalTime().Ticks != ownerStartTicks || owner.SessionId != self.SessionId ||
+                        view.ReadInt32(0) != Version || view.ReadInt32(4) != ownerPid || view.ReadInt64(8) != ownerStartTicks) return 3;
+                    Outcome result = RunLease(new NativeBackend(), delegate { return ReadRequest(view); }, NowMs,
+                        delegate { try { return !owner.HasExited; } catch { return false; } },
+                        delegate { System.Threading.Thread.Sleep(20); },
+                        delegate { view.Write(ReadyOffset, 1); });
+                    view.Write(RestoredOffset, result.RestoreConfirmed ? 1 : 0);
+                    System.Threading.Thread.MemoryBarrier(); view.Write(ReadyOffset, result.Success ? 2 : 3);
+                    return result.Success ? 0 : 4;
+                }
+            }
+            catch { return 5; }
         }
     }
 }

@@ -1,0 +1,20 @@
+{
+  "valid": [
+    { "input": "win+r", "combo": "win+r", "risk": true },
+    { "input": " r + WINDOWS ", "combo": "win+r", "risk": true },
+    { "input": "r + rwin", "combo": "rwin+r", "risk": true },
+    { "input": "F4 + ALT + control", "combo": "ctrl+alt+f4", "risk": true },
+    { "input": "escape + SHIFT + CONTROL", "combo": "ctrl+shift+esc", "risk": true },
+    { "input": "ctrl + del", "combo": "ctrl+delete", "risk": true },
+    { "input": "BkSp", "combo": "backspace", "risk": true },
+    { "input": "ctrl+control+shift+A", "combo": "ctrl+shift+a", "risk": false },
+    { "input": "return", "combo": "enter", "risk": false },
+    { "input": "ins+pageup+pagedown+capslock+printscreen", "combo": "insert+pgup+pgdn+caps+prtsc", "risk": false },
+    { "input": "meta+L", "combo": "win+l", "risk": true },
+    { "input": "lwin+D", "combo": "win+d", "risk": true },
+    { "input": "rwin+win+a", "combo": "win+rwin+a", "risk": false },
+    { "input": "f24", "combo": "f24", "risk": false },
+    { "input": "shift+plus", "combo": "shift+plus", "risk": false }
+  ],
+  "invalid": ["", " ", "ctrl++a", "+enter", "enter+", "f25", "command+a", "ctrl+unknown", "ctrl + + delete"]
+}

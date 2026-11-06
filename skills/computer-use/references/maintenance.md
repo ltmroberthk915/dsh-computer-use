@@ -4,6 +4,10 @@
 
 Record the exact model/provider, loaded plugin version, test time and tool calls for each run. Count tools actually reached, including batch substeps; skipped steps and protection refusals are not functional passes. Do not merge an earlier model/build's results into a new run's coverage. A tool receipt proves dispatch/return; verify the intended effect with a readback. Opposite scroll commands do not prove restoration at a scroll boundary.
 
+Use returned `runtime` identity (packageVersion/buildId/sourceHash/protocolVersion/workerGeneration), not the folder name alone. From the source checkout, `node scripts/check-behavior.mjs` runs the reviewed non-interactive gate; `--package <unpacked-package>` tests the actual archive with the checkout's fixtures. Test fixtures are not shipped in the installable package. The report lists exclusions and optional subcases separately. CI uses this archive path. Interactive acceptance and unisolated legacy tests are not silently counted as passes.
+
+Route grounding records live in `lib/feedback-routes.json` and can be overridden with `feedbackRules`. Record adapter version, testedAt and expiresAt; image input capability alone cannot produce a verified-grounding record. An unversioned historical failure may conservatively choose text until its expiry, but cannot certify a new adapter build. Revalidate after adapter changes or expiry.
+
 For vision, use a fresh image whose answer is absent from text, filenames and UIA; check both the image block and the model's answer. A model saying it cannot see is not a transport trace. For marks/stability, distinguish changed pixels from changed geometry and control the suspected animation before assigning a cause. `lastDiffPct` describes the final sample pair, not the whole wait. Read current virtual-screen bounds before diagnosing multi-monitor or off-screen coordinates.
 
 ## Driving the worker from a shell (debugging, calibration)
@@ -25,11 +29,11 @@ already landed, and the model cannot proceed.
 - **Never ship an optional key with an `undefined` value** — the harness rejects the result as
   "value is not lossless JSON". The tool layer normalises every result through a JSON round-trip, so
   this cannot recur; do not rely on it for a tool returning buffers/NaN.
-- **After a JS-layer change, verify BEFORE asking for the host restart:** `node
-  build/verify-tools-schema.mjs` (must exit 0 — it loads the REAL dsh-tools DSL and registers every
-  tool) and `node scripts/measure-tool-tokens.mjs --no-baseline` (tool-definition cost; without
-  `--no-baseline` it overwrites the baseline you are diffing against). Then one real call per new
-  tool.
+- **After a JS-layer change, verify BEFORE asking for the host restart:** from the source checkout,
+  run `node build/verify-tools-schema.mjs <installed-dsh-tools/lib/index.js> <candidate/lib/tools.js>`
+  (must exit 0 — it loads the REAL dsh-tools DSL and registers every tool) and
+  `node scripts/measure-tool-tokens.mjs <candidate/lib/tools.js> --no-baseline` (tool-definition cost,
+  a rough character estimate, not a tokenizer). Then one real call per new tool.
 - Worker (C#) changes load after the resident process is replaced. Verify DSH is idle, back up and
   check the deployed bytes, then stop only the identified idle worker; never interrupt an active task for a build check.
 - The tool definitions are paid for on every request: keep new tools few, parameters fewer, and put

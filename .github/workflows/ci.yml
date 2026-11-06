@@ -17,14 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Check release policy and attention behavior
-        run: |
-          node build/test-approval-attribution.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node build/test-release-channel.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node build/test-attention.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check native source and bundled binary consistency
+        run: node scripts/verify-package.mjs
       - name: Validate the actual npm archive
         shell: pwsh
         run: |
@@ -36,9 +30,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/verify-package.mjs artifact/unpacked/package
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node build/test-approval-attribution.mjs artifact/unpacked/package
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node build/test-attention-native.mjs artifact/unpacked/package
+          node scripts/check-behavior.mjs --package artifact/unpacked/package
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

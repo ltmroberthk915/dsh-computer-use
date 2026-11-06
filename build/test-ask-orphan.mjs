@@ -1,10 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { requirePrivateDesktop } from './private-desktop-test.mjs'
+
+requirePrivateDesktop(import.meta.filename)
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const SCRATCH = path.join(root, 'build', 'iso-ask-orphan')
+const SCRATCH = fs.mkdtempSync(path.join(path.dirname(process.env.DSH_HOME), 'dsh-ask-orphan-'))
 // THE SCRATCH DIRECTORY IS CREATED HERE, NOT ASSUMED (2026-10-01). It used to exist only because a
 // developer's working tree had it, so a FRESH CLONE failed at the first write with
 // `ENOENT ... open 'build/iso-ask-orphan/STOP'` — a guard that cannot run where it is published
@@ -59,15 +63,11 @@ const stop = async (handle) => {
 }
 
 async function main () {
-  const { discoverWorker } = await import(pathToFileURL(path.join(root, 'lib/core/index.js')).href)
-  // THE TARGET IS OVERRIDABLE SO THIS GUARD'S OWN SELF-TEST CAN RUN IT AGAINST ANOTHER BUILD.
-  // Without this the guard cannot be turned red at all: `discoverWorker()` ranks the cache by mtime and
-  // then PING-VERIFIES each candidate, and the just-compiled worker answers first — measured, by
-  // swapping a pre-fix exe into the cache under both a new and an ancient mtime and watching the guard
-  // stay green while the pre-fix binary sat at the path it was told to use. A guard whose failure
-  // cannot be demonstrated is the thing this repo calls a bug, so the mutation needs a seam: point
-  // DSH_CU_TEST_WORKER at the build under test and every case below runs against that one.
-  const exe = process.env.DSH_CU_TEST_WORKER || discoverWorker()
+  const { prepareNativeBinary, workerReferences } = await import('../lib/core/native-runtime.js')
+  // A caller may supply an explicit mutation build. The default verifies the
+  // candidate package source/manifest and prepares it in this test's fresh cache;
+  // no global user cache or previously installed binary is selected.
+  const exe = process.env.DSH_CU_TEST_WORKER || prepareNativeBinary({ source: path.join(root, 'lib/core/worker.cs'), name: 'dsh-computer-use-worker.exe', cache: 'test-worker', references: workerReferences() })
   if (!exe) { console.error('FAIL test-ask-orphan — no compiled worker found'); process.exit(1) }
   const failures = []
   const ok = (cond, why) => { if (!cond) failures.push(why) }

@@ -9,7 +9,7 @@ English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market)
 ![Codex-style Windows desktop control: observe, act, verify](docs/images/01-codex-style.png)
 
 - **See the target. Take the action.** Combine screenshots, UI Automation and numbered targets with mouse, keyboard, drag, scroll and window tools.
-- **Take over. Let the agent wait. Hand back and continue.** Version 1.3.0 adds a 1.5-second notice before input. Use your computer normally outside actual actuation; after handback, the agent re-observes and resumes the original task.
+- **Take over. Let the agent wait. Hand back and continue.** Version 2.0.0 shows a 1-second notice before input, or 0.1 second when the previous notice was less than 3 minutes ago. After handback, the agent re-observes and resumes the original task.
 - **Fewer round trips. More efficient token use.** Incremental control observations, cropped or downsampled screenshots and batches of known actions reduce repeated context and model calls.
 
 ![Human handoff: prepare, take over, continue](docs/images/02-handoff.png)
@@ -18,12 +18,12 @@ English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market)
 
 These are **1.3.0 feature illustrations**. Actual token use depends on the task, model and observation strategy. Approvals remain enabled by default; explicit pause, cancellation and exit remain authoritative.
 
-**Ready to install.** 18 desktop tools, with native helpers included. No SDK or install-time compilation. Requires Windows, Node.js ≥ 22 and the .NET Framework 4.x included with Windows. An independent community plugin; Codex describes the interaction style.
+**Ready to install.** 19 desktop tools, with native helpers included. No SDK or install-time compilation. Requires Windows, Node.js ≥ 22 and the .NET Framework 4.x included with Windows. An independent community plugin; Codex describes the interaction style.
 
 <details>
 <summary>Current release and compatibility</summary>
 
-**1.3.1** is the current release on npm's `latest` channel: `dsh-codex-style-computer-use@1.3.1`. It adds worker-side OCR with per-word coordinates, change/caret-aware waits, UAC and lock-screen awareness with automatic continuation, and IME-safe clipboard text. Follow the host's restart indication when updating a loaded version. See [1.3.1](docs/RELEASE-1.3.1.md) and [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases).
+**2.0.0** is the new major release, initially distributed on npm `next` while the 24-hour release gate runs. See [2.0.0 changes and migration](docs/RELEASE-2.0.0.md). Check registry tags for current stable availability.
 
 Version 1.3.1 reads text from the screen by name, notices the Windows secure desktop and resumes on its own, and keeps every colour on the same DPI-derived edge rail with a visible breathing floor. Version 1.3.0 releases desktop control when work ends while the chat continues.
 
@@ -32,6 +32,12 @@ Earlier fixes: [1.2.3 approval attribution](docs/RELEASE-1.2.3.md) · [1.2.1 nat
 </details>
 
 ## What it does
+
+Version 2.0.0 also uses a compact blue kite pointer during AI operation and scene hold. Its tilted tip marks the click point, with small text/resize symbols inside the kite. A breathing kite means the page and pointer position should stay in place; free mode restores the application's normal cursor. The user's Windows cursor theme is preserved.
+
+Version 2.0.0 bounds UIA traversal and defaults to compact post-action text. Existing image feedback remains available; `feedback: compact|full|none` controls detail, and click `verificationRegion: "x,y,w,h"` names the expected effect area independently of the input point. Compact text normally adds at most 6 KiB to the original action receipt. Complete point evidence can be retained in a bounded, expiring local cache and retrieved on demand. Disk failure falls back to bounded memory; if no retrievable snapshot can be retained, the current evidence is returned inline in full, outside that compact budget, without another observation or input.
+
+Filtered UIA queries require `hwnd`. Defaults are depth 6, 120 nodes and a 1200 ms soft budget. A query deeper than 6 or larger than 300 nodes requires a measured `anchor:"x,y"` in that window; an exact `id` does not bypass this rule. A provider call can exceed the soft budget, and partial results cannot establish absence or uniqueness. After a window-management shortcut, inspect `computer_state {windows:true}`, activate the intended window successfully, then observe it before more keyboard input.
 
 - **Observe** — window list, screenshots (region / JPEG / PNG / downscaled), a Set-of-Marks map of
   clickable elements, and the UI Automation tree with exact `AutomationId`s.
@@ -44,9 +50,10 @@ Earlier fixes: [1.2.3 approval attribution](docs/RELEASE-1.2.3.md) · [1.2.1 nat
 - **A human brake that reaches the model** — a stop is pushed into the running session, so the agent
   learns it was interrupted instead of discovering it on the next turn.
 
-The tools read the desktop; they do not read your files. The only file the plugin writes on its own
-is the Worker binary in `%LOCALAPPDATA%\dsh-computer-use\worker\`, plus the audit log and screenshots
-under `$DSH_HOME/data/computer-use/`.
+The tools observe the desktop rather than crawl user documents. The plugin manages native helpers in
+`%LOCALAPPDATA%\dsh-computer-use\worker\`, and audit logs, screenshots and its own bounded
+`observation-cache` under `$DSH_HOME/data/computer-use/`. `computer_ctrl {action:"clear_cache"}` clears
+this Agent's observation cache; it does not delete screenshots, attachments or user documents.
 
 ## Install and update in dsh-market
 
@@ -112,9 +119,9 @@ The configured GLM 5.3 Max, GLM 5.3 Flash and DeepSeek Flash routes passed a con
 
 ## On-demand controls in 1.1
 
-- **Per-Agent tools:** idle Agents see `computer_use_activate`, `computer_ctrl` and `computer_ask`. A successful computer-use skill load, receipt or activation exposes the 18 existing tools plus the activation entry to that Agent. Other Agents and children activate independently. Native calls and Node `run_code` are supported. Activation does not start control or release a human brake.
+- **Per-Agent tools:** idle Agents see `computer_use_activate`, `computer_ctrl` and `computer_ask`. A successful computer-use skill load, receipt or activation exposes the 19 desktop tools plus the activation entry to that Agent. Other Agents and children activate independently. Native calls and Node `run_code` are supported. Activation does not start control or release a human brake.
 - **Observed UIA targets:** a scoped name/id query returns an opaque target handle. Use it for pattern actions; opt-in `rebind:true` allows unique identity or semantic recovery after replacement in the same window. Changed context, ambiguity and incomplete scans refuse. Broad queries skip recovery handles unless `targets:true`; creating witnesses for a large list costs extra native work.
-- **Incremental observations:** pass the previous observation ID as `since` with the same query. Deltas preserve additions, changes, removals and ordering. Each Agent retains 64 complete snapshots; `snapshot` retrieves an exact historical result. Missing bases, changed scope, incomplete evidence or a larger delta fall back to full output.
+- **Incremental observations:** pass the previous observation ID as `since` with the same query. Deltas preserve additions, changes, removals and ordering. Snapshots are isolated by Agent, with at most 64 indexed observations and 4 MiB of retained JSON per store. `snapshot` retrieves a retained historical result; `offset` and `limit` page its arrays. Missing bases, changed scope, incomplete evidence or a larger delta fall back to full output.
 
 See [the detailed protocol](skills/computer-use/references/progressive-control.md) for cache limits and recovery boundaries. UIA snapshots preserve provider-returned fields within existing provider limits; historical retrieval is not fresh outcome verification.
 
@@ -123,7 +130,7 @@ See [the detailed protocol](skills/computer-use/references/progressive-control.m
 | Group | Tools |
 |---|---|
 | Activate | `computer_use_activate` |
-| Observe | `computer_state` `computer_shot` `computer_marks` `computer_uia` |
+| Observe | `computer_state` `computer_shot` `computer_ocr` `computer_marks` `computer_uia` |
 | Act | `computer_click` `computer_move` `computer_drag` `computer_scroll` `computer_select` `computer_key` `computer_type` `computer_uia_act` `computer_window` `computer_clip` |
 | Flow | `computer_wait` `computer_batch` |
 | Meta | `computer_ask` `computer_ctrl` |
@@ -166,7 +173,9 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 | Key | Default | Meaning |
 |---|---:|---|
 | `automationMode` | `standard` | approval mode (above) |
-| `progressiveTools` | `true` | per-Agent activation; `false` keeps the original 18 global tools |
+| `progressiveTools` | `true` | per-Agent activation; `false` exposes the 19 desktop tools globally |
+| `actionFeedback` | `true` | automatically observe after direct actions and batches |
+| `actionFeedbackDetail` | `compact` | `compact`, `full` or `none`; a call's `feedback` overrides this default; uncached evidence falls back to full inline output |
 | `dryRun` | `false` | simulate actuations, log only |
 | `maxActionsPerMinute` | `60` | core-level actuation rate limit |
 | `annotateMarks` | `true` | draw Set-of-Marks boxes on screenshots |
@@ -181,6 +190,19 @@ than Cordis:
 ```sh
 node mcp/src/index.js
 ```
+
+The embedded server reports the version of this root package. It starts with observation only.
+The launching host may set `DSH_CU_ALLOW_INPUT=1` when it owns authorization for desktop actions;
+MCP tool calls cannot enable input. The compatibility tool `cu_approve` only reports this rule and
+never grants consent. DSH's `automationMode` policy belongs to the Cordis adapter and is not an
+MCP approval service. `DSH_CU_DRY_RUN=1` simulates input that the host has already enabled.
+
+Both adapters use the same key-command grammar, batch failure and continuation rules, and image
+coordinate mapping. MCP returns structured capture metadata and one latest PNG/JPEG image, without
+serializing image bytes into JSON text. `cu_hold` / `cu_free` reserve or release the scene between
+actions; `cu_release` ends the desktop cycle. `cu_drag` accepts `expectCursor` and `hwnd` checks.
+MCP exposes a smaller tool surface; DSH-specific human-question and host-lifecycle integration are
+provided by the Cordis adapter.
 
 ## Development
 

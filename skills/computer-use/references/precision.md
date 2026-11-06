@@ -6,7 +6,7 @@ Mark IDs identify a snapshot. They do not follow scrolling. Actions validate the
 
 Identify target → activate → act → read back at a natural checkpoint. Use text/UIA when sufficient and pixels when they answer the remaining question. Reuse returned state; obtain a fresh element map only when it may have changed.
 
-computer_batch runs serially and stops subsequent steps on failed activation, error, cancellation or a brake. Its default shot:"auto" skips an extra image for pure observation or a final readback/screenshot, and after failure, cancellation or pause. Use shot:"always" or "never" when the task justifies it. An action's ok reports its return status; assess the business result from the evidence.
+computer_batch runs serially and stops subsequent steps on failed activation, error, cancellation or a brake. Its default shot:"auto" skips an extra image for pure observation or a final readback/screenshot, and after failure, cancellation or pause. Disabling actionFeedback also disables automatic batch observations; explicit shot:"always" still requests a screenshot, but never overrides cancellation, a brake or lost ownership. Use shot:"always" or "never" when the task justifies it. An action's ok reports its return status; assess the business result from the evidence.
 
 ### Kickoff: activate before the first screenshot
 
@@ -33,7 +33,7 @@ Cost ladder — always use the cheapest rung that can answer the question:
 | `computer_uia {at:"x,y"}` / click's own occlusion check | text; provider-dependent | who owns this pixel? is it covered? is the rect stale? |
 | `focus.match` in a click/key/type result | free (already returned) | did my keystrokes reach the window I meant? |
 | `computer_wait {mode:"change"}` | bounded wait | did the click do anything at all? |
-| `computer_uia {role/name}` | text; provider-dependent | where exactly is the control, and how wide is it? |
+| `computer_uia {hwnd,role/name}` | text; provider-dependent | where exactly is the control, and how wide is it? |
 | `computer_shot` (attached image; `read_image` only for path-only fallback) | capture + vision tokens | what does it look like? |
 
 The three failure modes this kills, all of which look like "the tool lied":
@@ -45,25 +45,19 @@ The three failure modes this kills, all of which look like "the tool lied":
    **If a click is refused as OCCLUDED, the window is behind something: activate it, move it, or
    bring it into view — do NOT hunt for another coordinate.**
 2. **Stale rects** — re-read immediately before use; reject empty rects.
-3. **Cold hit-tests** — the first query on a Chromium window answers with an ancestor; query again.
+3. **Cold hit-tests** — a Chromium query can return only an ancestor; use a point probe and, if readiness changed, one deliberate re-observation before concluding absence.
 
 Corollary: **never conclude "the target is not there" from a failure to click it.** Ask who owns the
 pixel first; the answer is usually "something is in front of it".
 
 ## Grounding: traps that cost real time
 
-- **Depth.** Web-app DOM lives ~20 levels down. `computer_uia` defaults to depth 16 (maximum 24) and
-  `computer_marks` defaults to depth 14; use computer_uia with greater depth for deeply nested controls; if a control "does not exist", raise depth before
-  concluding it is absent.
-- **Chromium's a11y tree is LAZY.** The first query on a Chromium window returns browser chrome
-  (~12 nodes), and a cold hit-test returns the nearest *ancestor* instead of the control. Query
-  twice, ~1 s apart, before believing a negative — including `computer_uia {at:...}`.
+- **Scope and budget.** Filtered `computer_uia` queries require an observed `hwnd`; omission returns `UIA_SCOPE_REQUIRED`. Defaults are `depth:6`, `maxNodes:120`, `budgetMs:1200`; the soft budget accepts 100–5000 ms. It is checked between provider calls, so one synchronous COM call can still exceed it. Inspect `truncated` and `budget`; a partial scan establishes neither absence nor uniqueness.
+- **Anchor a larger search.** `depth>6` or `maxNodes>300` without an observed `anchor:"x,y"` returns `UIA_ANCHOR_REQUIRED` before traversal. The anchor uses physical screen pixels and must hit the requested top-level HWND/PID; a mismatch returns `UIA_ANCHOR_MISMATCH`. Search starts at the anchored element's subtree. An exact `id` still requires traversal and gets no broad-search exemption. Prefer a point probe or observed target over raising global depth.
+- **Cold Chromium accessibility.** A query can expose only browser chrome or the nearest ancestor. A point probe and one deliberate refresh after readiness can distinguish a cold tree from a missing control. There is no automatic second traversal; do not retry broad queries on a timer.
 - **Stale rects.** A window just moved/dragged/minimized can report a pre-move rect (occasionally
   `0,0 0x0` for seconds). Re-read a rect right before clicking it; reject empty rects.
-- **A wrong filter parameter is silently ignored.** `computer_uia` filters by **`name`**, **`role`** and exact **`id`**; passing anything else (e.g. `nameContains`) returns the ENTIRE tree with no error, and
-  that wall of output reads exactly like "the control is not there". **If a filtered query returns
-  implausibly many elements, assume the filter did not apply.** Measured: `computer_uia {role:"Button",
-  name:"Microsoft Edge"}` → `Appid: MSEdge  x=558 y=1516 w=77 h=84`, one call.
+- **Use documented filters.** `computer_uia` filters by **`name`**, **`role`** and exact **`id`**, within `hwnd`. `nameContains` is not a supported parameter. Check returned scope and truncation rather than treating an unexpectedly large response as a negative match.
 - **The taskbar is a container, and its flyouts are transient.** `computer_uia {at:"x,y"}` over the
   taskbar answers `Shell_TrayWnd` / `MSTaskSwWClass` even for points that are ON a button, so measure
   app buttons **by name** instead. A preview thumbnail must be measured and clicked in the same burst:
@@ -114,7 +108,7 @@ stale-epoch problem largely disappears for them and **one read stays valid for a
 
 - **A page built around an outline is telling you where its stable frame is: the outline itself.**
   Docs sites, admin consoles, form wizards and SPA dashboards almost always have one. Find it in the
-  first `computer_uia {role:"Hyperlink"}` sweep and note *its* rects as the reference frame.
+  first focused `computer_uia {hwnd,role:"Hyperlink"}` query and note *its* rects as the reference frame.
 - Anchor everything scroll-dependent (table rows, form fields) **relative to that fixed frame** —
   never to absolute pixels, and never to another scrolling element.
 - Prefer a witness whose text also carries state: an outline entry reading `学术成果 完成` makes ONE
@@ -246,6 +240,8 @@ wrong value written into a real record.
 Synthetic keyboard input is **not addressed to a window** — it goes to whatever owns the
 foreground. A click can land perfectly and still be followed by text that goes somewhere else.
 
+Exact window-management chords are `alt+tab`, `alt+shift+tab`, `alt+esc`, `alt+shift+esc`, and `win`/`rwin` plus `d`, `tab`, `left`, `right`, `up` or `down`. Every key-down still requires the current receiver, host and human-input checks. Already-owned key-ups may finish after the foreground changes. Once any key-down is accepted, including on a later failure, the old sticky target and screenshot kickoff are invalidated. A normal receipt reports actual `receiverChanged` (HWND/PID), `reobserveRequired:true` and `effectVerified:false`; it does not claim a successful switch. Further key/type calls refuse `INPUT_REOBSERVE_REQUIRED`, even if they name the old target internally. Call `computer_state {windows:true}`, successfully `computer_window {hwnd,op:"activate"}`, then observe the intended target before input. An automatic screenshot refusal after the chord does not undo or disprove delivered keys. Manual brakes remain authoritative.
+
 - `computer_click`, `computer_key` and `computer_type` return a `focus` report:
   `{hwnd, title, match, refocused, warning}`. **`match:false` means the keystroke went to another
   window** — fix the window before retrying; never retype blindly.
@@ -288,6 +284,35 @@ only says "…and 2 more pages" — so text is *more* precise than a screenshot 
 for it before clicking any ordinary control.
 
 ## Failure recovery
+
+### Narrow handles and evidence boundaries
+
+For splitters, start from fresh geometry or a tight crop, then hover. Map image pixels using the returned `coordinates`; do not apply DPI again. DOM client rectangles use CSS pixels and require their own current viewport-to-screen mapping, including browser content origin and scale. Do not substitute CSS coordinates directly for screen coordinates.
+
+`computer_move` returns `cursor.shape` and `cursor.classification`:
+
+| classification | meaning |
+| --- | --- |
+| `standard` | The native handle matched a supported Windows standard cursor: four resize directions, move, arrow, ibeam, hand, wait, cross, not-allowed, app-starting or help. |
+| `unrecognized` | A visible cursor handle did not match that set. `shape:"unknown"` does not identify its appearance, CSS value, or whether the pointer hit a draggable handle. |
+| `not-visible` | The cursor is not currently reported visible; shape evidence is unavailable. |
+| `unavailable` | The native cursor query failed; shape evidence is unavailable. |
+
+Chrome CSS `ew-resize` commonly uses the Windows standard horizontal resize cursor, but CSS `col-resize`/`row-resize` use Chromium cursor resources and can be `unrecognized`. Custom image cursors and copied handles can also be unrecognized. Do not guess that these are resize cursors, and do not treat their unknown shape as proof that the target was missed. The implementation compares handles; it does not classify cursor bitmaps or read CSS. [Chromium Windows cursor mapping](https://chromium.googlesource.com/chromium/src/+/main/ui/base/win/win_cursor_factory.cc).
+
+`computer_uia {at:"x,y"}` provides a native point hit-test, but cannot promise a DOM selector, iframe ownership or CSS cursor. Verify those only through an application-supported browser channel when available. For a browser handle, fresh DOM geometry and a matching point hit-test can provide independent target evidence; otherwise use fresh visual/native geometry. An unknown cursor alone is insufficient.
+
+`computer_drag` accepts optional `expectCursor` and an expected start `hwnd`. When a supported standard shape is expected, use `expectCursor` to check the hovered start before button-down. For an independently confirmed handle whose cursor cannot be classified, omit this optional shape check and retain `hwnd`; never pass `expectCursor:"unknown"` to force a match. The successful receipt contains `cursorCheck.status:"matched"` or `"not-requested"`; the latter is not a verified shape. Start position, window/occlusion and privilege checks still apply when the cursor check is omitted.
+
+Refusals retain `code:"CURSOR_MISMATCH"` for compatibility, with `cursorCheck.status:"mismatched"` for a recognized wrong shape (for example arrow instead of resize-ew), or `"unverifiable"` for unknown, hidden or unavailable evidence. Both refuse button-down; the worker never silently drops a requested check. `dragStarted:false` with `outcome:"unknown"` must not be described as zero input: earlier pointer movement or activation may already have occurred. A successful drag receipt still has `effectVerified:false` and requires an application witness such as a changed splitter position or pane width. A changed screenshot alone can be a caret or animation. Do not invent `layoutChanged` or identify the document event receiver from a native receipt.
+
+UIA `rectValid:false` means no usable screen rectangle (`rect:null`); `isOffscreen` is the provider's report, and `intersectsVirtualScreen` is only a geometry intersection. None proves absence of occlusion. Do not diagnose layout overflow from hidden/offscreen controls or INT32 sentinel coordinates.
+
+### Refusals and cancellation
+
+`HOST-GUARDED`: input would reach the DSH host; restore the intended external target and re-observe. `KICKOFF-FOCUS-REQUIRED`: bind/activate the intended live target before a capture. `TARGET_STALE`: query current identity; do not reuse the old handle. `HUMAN_REOBSERVE`: automatic handback completed; inspect partial effects and continue. `INPUT_CANCELLED`: the owning call/turn or core cleanup cancelled input/waiting; it is not another name for physical takeover and must not be bypassed. Normal handback needs all physical keys/buttons up and three quiet seconds; Ctrl+Esc is a separate persistent brake. Batch failure preserves successful earlier receipts and stops only unfinished steps.
+
+The `computer_state` result exposes `cooperation` (phase, heldCount, quietRemainingMs) and `indicator` (state, want, holding, title). Use those to diagnose a persistent yellow wait. Handoff wait audit records include start/end, elapsed time and cancellation source. A final cancellation says how waiting ended, not why it was prolonged; a missing idle event alone cannot distinguish ongoing human activity from a lost release or monitoring fault.
 
 - Wrong element → refresh the relevant target using text/UIA or an image, then correct course.
   Ask only if the intended target remains ambiguous; do not force both a screenshot and a new map.

@@ -1,0 +1,11 @@
+[
+  {
+    "provider": "bigmodel-anthropic",
+    "model": "glm-5.3",
+    "adapterVersion": "unversioned",
+    "grounding": "failed",
+    "testedAt": "2026-10-02T00:00:00Z",
+    "expiresAt": "2026-12-01T00:00:00Z",
+    "reason": "Historical Desktop grounding test failed; adapter version was not recorded. Conservative text fallback expires after 60 days and must be revalidated."
+  }
+]

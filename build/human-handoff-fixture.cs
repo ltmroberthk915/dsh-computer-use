@@ -86,14 +86,18 @@ static class HumanHandoffFixture
             s.Record(0x41, true, false, 3200); Check(!s.Active, "held during idle is still allowed");
             s.SetActing(true, 3210); Check(s.Active, "new action waits for a physically held key");
         });
-        Case("deliberate pointer move yields even between actuations (human spec 2026-11-04)", delegate {
-            var s = new HumanInputState(); s.Enable(true, 0);   // live cycle, but NO actuation: the gap between injections
+        Case("free desktop ignores deliberate travel; scene hold protects gaps between actuations", delegate {
+            var s = new HumanInputState(); s.Enable(true, 0);
             s.Record(0x41, true, false, 10); s.Record(0x41, false, true, 15);
-            Check(!s.Active, "a gap keystroke still does not yield (legacy rule unchanged)");
-            s.Record(0, false, false, 20, true); Check(s.Active && s.Revision == 1, "a deliberate 16px move in the gap yields and lights the rail");
-            s.Tick(3019); Check(s.Active, "the yield holds through the quiet interval");
-            s.Tick(3020); Check(!s.Active, "quiet returns control");
-            s.Record(0, false, false, 4000, false); Check(!s.Active && s.Revision == 1, "a non-deliberate gap move still does nothing");
+            s.Record(0, false, false, 20, true);
+            Check(!s.Active && s.Revision == 0, "free keyboard and deliberate mouse travel do not yield");
+            s.SetActing(true, 30); // scene retention uses the same protection boundary as injection
+            s.Record(0, false, false, 40, true);
+            Check(s.Active && s.Revision == 1, "deliberate mouse move while holding yields");
+            s.Tick(3039); Check(s.Active, "quiet interval is retained");
+            s.Tick(3040); Check(!s.Active, "quiet returns control");
+            s.SetActing(false, 3100);
+            s.Record(0, false, false, 4000, true); Check(!s.Active && s.Revision == 1, "explicit free restores unrestricted travel");
         });
         Case("secure-desktop watch confirms over three misses and clears on first success (UAC, human spec 2026-11-04)", delegate {
             var w = new SecureDesktopWatch();

@@ -78,11 +78,11 @@ try {
   // A newer unrelated cache entry must never win over the current source hash.
   const local = process.env.LOCALAPPDATA, cache = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-discovery-test-')); owned.push(cache)
   try {
-    const sha = crypto.createHash('sha256').update(fs.readFileSync(new URL('../lib/core/worker.cs', import.meta.url))).digest('hex').slice(0, 16).toUpperCase()
-    const compiled = path.join(local || '', 'dsh-computer-use/worker', sha, 'dsh-computer-use-worker.exe')
-    assert.ok(fs.existsSync(compiled), 'compile the current worker before running this guard')
     process.env.LOCALAPPDATA = cache
-    const wrong = path.join(cache, 'dsh-computer-use/worker/FFFF-TEST'); fs.mkdirSync(wrong, { recursive: true }); fs.copyFileSync(compiled, path.join(wrong, 'dsh-computer-use-worker.exe'))
+    // An unrelated cache entry must never be selected or executed. Installation
+    // and exact source/binary identity are covered by test-native-runtime.
+    const wrong = path.join(cache, 'dsh-computer-use/worker/FFFF-TEST'); fs.mkdirSync(wrong, { recursive: true })
+    fs.writeFileSync(path.join(wrong, 'dsh-computer-use-worker.exe'), 'must never be executed')
     assert.equal(discoverWorker(), null); checks++
   } finally { if (local === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = local }
   console.log('ok test-control-targets — ' + checks + ' behavioral cases, isolated transport')

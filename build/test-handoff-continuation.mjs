@@ -6,10 +6,10 @@ let checks = 0
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const event = (cu, phase, revision = 1) => cu.onLine(JSON.stringify({ event: 'handoff', cooperation: { phase, active: phase !== 'idle', revision } }))
 const fresh = () => new ComputerUse({ workerExe: 'X:/NOT-STARTED.exe' })
-function fixture (cu, hooks = {}) {
+function fixture (cu, hooks = {}, ensureCycle) {
   const definitions = new Map(), controller = new AbortController()
   registerTools({ ctx: { tools: { register: def => definitions.set(def.name, def) } }, cu,
-    config: { actionFeedback: false }, hooks, defineTool: def => def, dataDir: { root: 'X:/NOT-USED', shots: 'X:/NOT-USED' },
+    config: { actionFeedback: false }, hooks, ensureCycle, defineTool: def => def, dataDir: { root: 'X:/NOT-USED', shots: 'X:/NOT-USED' },
     snapshotPath: () => { throw Error('handoff must not trigger a screenshot') } })
   const run = (name, args = {}) => definitions.get(name).execute(args, { name, arguments: args, signal: controller.signal })
   return { definitions, controller, run }
@@ -120,7 +120,41 @@ for (const outcome of ['unknown', 'not-dispatched']) {
   }
   const p = f.run('computer_key', { combo: 'enter' }); p.catch(() => {})
   await tick(); f.controller.abort()
-  await assert.rejects(p, e => e.code === 'INPUT_CANCELLED' && e.outcome === 'unknown' && !e.continuation)
+  await assert.rejects(p, e => e.code === 'INPUT_CANCELLED' && e.outcome === 'unknown' && !e.continuation &&
+    e.cancelSource === 'host-signal' && e.handoffWait.cooperation.phase === 'waiting' &&
+    !e.message.includes('No input was dispatched'))
+  checks++
+}
+
+// Wait diagnostics distinguish explicit host cancellation from core cleanup, without polling.
+for (const source of ['host-signal', 'core-input-cancel']) {
+  const cu = fresh(), controller = new AbortController(), records = []
+  cu.on('handoff-wait', record => records.push(record))
+  event(cu, 'waiting')
+  const pending = cu.withInputContext({ signal: controller.signal }, () => cu.waitForHuman())
+  pending.catch(() => {})
+  if (source === 'host-signal') controller.abort(Object.assign(Error('private payload'), { code: 'TOOL_TIMEOUT' }))
+  else cu.cancelInputs()
+  await assert.rejects(pending, error => error.cancelSource === source && error.outcome === 'not-dispatched' &&
+    error.handoffWait.waitedMs >= 0 && !error.message.includes('private payload'))
+  assert.deepEqual(records.map(r => r.phase), ['started', 'ended-with-error'])
+  assert.equal(cu.listenerCount('handoff'), 0)
+  checks++
+}
+
+// hold/free are advisory state transitions and work through the direct and batch paths.
+{
+  const cu = fresh(), calls = []; let opens = 0
+  const f = fixture(cu, {}, async () => { opens++ })
+  cu.indicator = async args => { calls.push(args); return { holding: args.hold } }
+  await f.run('computer_ctrl', { action: 'hold' })
+  await f.run('computer_ctrl', { action: 'free' })
+  await f.run('computer_batch', { shot: 'never', actions: [
+    { tool: 'computer_ctrl', args: { action: 'hold' } },
+    { tool: 'computer_ctrl', args: { action: 'free' } },
+  ] })
+  assert.deepEqual(calls, [{ hold: true }, { hold: false }, { hold: true }, { hold: false }])
+  assert.equal(opens, 0, 'hold/free cannot open a cycle, even when wrapped in a batch')
   checks++
 }
 

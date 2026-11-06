@@ -101,7 +101,7 @@ function stripComments (src) {
 const RAW = {}
 const CODE = {}
 for (const [key, rel] of Object.entries(FILES)) {
-  RAW[key] = fs.readFileSync(path.join(root, rel), 'utf8')
+  RAW[key] = fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n')
   CODE[key] = stripComments(RAW[key])
 }
 const sha = (text) => createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12)
@@ -707,14 +707,18 @@ const CHECKS = [
 
   // ------------------------------------------------------------------ the JS layer
   {
-    name: 'core signs every call with __cycle, stamped AFTER ...args (an op cannot forge it)',
+    name: 'core signs user calls with __cycle and excludes internal cleanup, AFTER ...args',
     file: 'core',
     fn: (s) => {
-      if (!/const signed = \{ \.\.\.args, __cycle: true \}/.test(s)) return 'the __cycle signature is gone, or no longer stamped AFTER ...args (an op could forge it)'
+      if (!/const signed = \{ \.\.\.args, __cycle: context\?\.internalCleanup !== true, __kickoff: this\.kickoffRequired \}/.test(s)) return 'the __cycle signature is gone, includes internal cleanup, or is no longer stamped AFTER ...args'
+      if (!/this\.inputContext\.run\(\{ internalCleanup: true \}/.test(s)) return 'internal cleanup does not identify its separate authority'
       if (!/args: signed/.test(s)) return 'the signed args are not what gets written to the worker'
       return null
     },
-    brks: [[/const signed = \{ \.\.\.args, __cycle: true \}/, 'const signed = { __cycle: true, ...args }']],
+    brks: [
+      [/const signed = \{ \.\.\.args, __cycle: context\?\.internalCleanup !== true, __kickoff: this\.kickoffRequired \}/, 'const signed = { __cycle: true, ...args }'],
+      [/this\.inputContext\.run\(\{ internalCleanup: true \}/, 'this.inputContext.run({ internalCleanup: false }'],
+    ],
   },
   {
     name: "core's resume() clears its own exited/stopped view (it must not drift from the worker)",

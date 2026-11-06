@@ -22,6 +22,7 @@ assert.equal(await queue(() => 42), 42)
 
 for (const outcome of ['unknown', 'not-dispatched']) {
   const result = continuationResult({ code: 'HUMAN_REOBSERVE', op: 'type', outcome }, humanContinuation)
+  assert.equal(result.status, 'continuation-required')
   assert.equal(result.taskStatus, 'continuing')
   assert.equal(result.continuation.required, true)
   assert.equal(result.continuation.replayInterruptedInput, false)
@@ -29,4 +30,9 @@ for (const outcome of ['unknown', 'not-dispatched']) {
 }
 assert.equal(continuationResult({ code: 'INPUT_CANCELLED' }, humanContinuation), null)
 assert.equal(continuationResult({ code: 'ABORTED' }, humanContinuation), null)
+const recovered = continuationResult({ code: 'WORKER_REOBSERVE', outcome: 'not-dispatched',
+  continuation: { required: true, reason: 'worker-restarted', replayInterruptedInput: false } }, humanContinuation)
+assert.equal(recovered.status, 'continuation-required')
+assert.equal(recovered.continuation.reason, 'worker-restarted')
+assert.equal(recovered.continuation.handback, undefined)
 console.log('ok test-mcp-execution — whole-call isolation, cancelled queue, failure recovery and nonterminal handoff')

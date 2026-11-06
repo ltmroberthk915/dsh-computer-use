@@ -21,8 +21,10 @@ static class GlowPumpFixture
 
     static int frames, lastBarHash, changedFrames;
     static bool signedRequest;
-    static long firstPresentation;
-    internal static void ResetPresentationClock() { Interlocked.Exchange(ref firstPresentation, 0); }
+    static long firstPresentation, lastPurplePresentation, firstDown, lastUp;
+    internal static void ResetPresentationClock()
+    { Interlocked.Exchange(ref firstPresentation, 0); Interlocked.Exchange(ref lastPurplePresentation, 0); firstDown = lastUp = 0; }
+    static long Ms(long ticks) { return ticks * 1000 / Stopwatch.Frequency; }
     public static IntPtr Target;
     static readonly MethodInfo Display = typeof(Glow).GetMethod("OverlayDisplay", Flags);
 
@@ -35,6 +37,7 @@ static class GlowPumpFixture
         if (!success || state != 7) return success;
         GlowFailures.RecordPurpleFrame();
         Interlocked.CompareExchange(ref firstPresentation, Stopwatch.GetTimestamp(), 0);
+        Interlocked.Exchange(ref lastPurplePresentation, Stopwatch.GetTimestamp());
         Rectangle display = (Rectangle)Display.Invoke(null, new object[] { w, h });
         float scale = Math.Max(1f, Math.Min(1.25f, display.Width / 1920f));
         float cardWidth = Math.Min(408 * scale, display.Width - 24);
@@ -83,7 +86,7 @@ static class GlowPumpFixture
         bool presentFault = scenario == "present-recovery" || scenario == "present-timeout" ||
             scenario == "present-stall" || scenario == "render-freeze";
         GlowFailures.Mode = presentFault ? scenario : null;
-        GlowHotkeys.StagePreparation = !normal && !boundary && !presentFault && scenario != "hook-unavailable";
+        GlowHotkeys.StagePreparation = !normal && !boundary && !presentFault && scenario != "hook-unavailable" && scenario != "pointer" && scenario != "capture";
         var hooksReady = typeof(Panic).GetField("_hooksReady", Flags);
         if (hooksReady != null)
         {
@@ -128,12 +131,16 @@ static class GlowPumpFixture
                     !Program.DesktopOwned || presented == 0 ||
                     (Stopwatch.GetTimestamp() - presented) * 1000 / Stopwatch.Frequency < Glow.PreparationMs)
                     throw new Exception("unexpected input or premature dispatch");
-                events.Add((input.u.ki.dwFlags & Native.KEYEVENTF_KEYUP) == 0 ? "down" : "up");
+                bool down = (input.u.ki.dwFlags & Native.KEYEVENTF_KEYUP) == 0;
+                if (down) firstDown = Stopwatch.GetTimestamp(); else lastUp = Stopwatch.GetTimestamp();
+                events.Add(down ? "down" : "up");
             }
             return (uint)inputs.Length;
         };
         clock.Restart();
         TimeSpan cpuStart = Process.GetCurrentProcess().TotalProcessorTime;
+        if (scenario == "pointer") { GlowPointer.Run(); return; }
+        if (scenario == "capture") { GlowCapture.Run(); return; }
         if (presentFault)
         {
             GlowFailures.Run(events);
@@ -172,6 +179,28 @@ static class GlowPumpFixture
             throw new Exception("expected exactly one balanced key stroke at the input boundary");
         if (!signedRequest && (Panic.CycleLit || Panic.ControlListenersEnabled || Program.DesktopOwned))
             throw new Exception("unsigned call retained its private cycle, listeners or desktop lease");
+        if (signedRequest)
+        {
+            if (!Glow.Holding || Glow.DeriveWant(true, 3) != 8)
+                throw new Exception("completed input failed to preserve the scene ahead of screenshot flash");
+            long firstMs = clock.ElapsedMilliseconds;
+            ResetPresentationClock(); events.Clear(); clock.Restart();
+            long repeatStarted = Stopwatch.GetTimestamp();
+            KeyRequest(2);
+            long repeatEnded = Stopwatch.GetTimestamp();
+            Console.WriteLine("timing repeat: firstFrameWaitMs=" + Ms(firstPresentation - repeatStarted) +
+                "; presentedCountdownMs=" + Ms(lastPurplePresentation - firstPresentation) +
+                "; frameToKeyMs=" + Ms(firstDown - lastPurplePresentation) +
+                "; keyHoldMs=" + Ms(lastUp - firstDown) + "; postKeyMs=" + Ms(repeatEnded - lastUp));
+            if (Glow.PreparationMs != 100 || clock.ElapsedMilliseconds < 100 || clock.ElapsedMilliseconds >= 1000 ||
+                String.Join(",", events) != "down,up")
+                throw new Exception("repeat warning failed the presented 100ms input boundary");
+            Request(3, "indicator", Program.Dict("hold", false));
+            if (Glow.Holding || Glow.DeriveWant(false, 3) != 3 || !Panic.CycleLit)
+                throw new Exception("free did not relinquish scene while retaining cycle");
+            Console.WriteLine("ok adaptive warning: first=" + firstMs + "ms, repeated=" + clock.ElapsedMilliseconds +
+                "ms; real progress presents gate both inputs; holding then free preserves cycle");
+        }
         Console.WriteLine("ok " + scenario + ": private overlay and keyboard request completed in " +
             clock.ElapsedMilliseconds + " ms; progress changed on " + changedFrames + "/" + frames +
             " presented frames; in-memory key down/up; processCpuMs=" +

@@ -125,7 +125,7 @@ const CHECKS = [
       // outer finally would still measure as inside it (found while building this guard's mutation).
       const fin = body.indexOf('\n    } finally {', begin)
       if (fin < 0) return 'there is no finally after beginAsk'
-      const end = body.indexOf("this.call('endAsk'", begin)
+      const end = body.indexOf("this.callInternal('endAsk'", begin)
       if (end < 0) return 'ask() never calls endAsk — an ending with no release is the defect this merge removes'
       if (end < fin) return 'endAsk is NOT inside the finally of the try that contains beginAsk — a throw, an abort or the deadline would leave the brake up'
       return null
@@ -141,10 +141,10 @@ const CHECKS = [
     name: 'G2b: EVERY endAsk call forbids the kill (killOnTimeout false), and a missing answerer is refused',
     file: 'core',
     fn: (s) => {
-      const calls = [...s.matchAll(/this\.call\('endAsk'[^)]*\)/g)].map((m) => m[0])
+      const calls = [...s.matchAll(/this\.callInternal\('endAsk'[^)]*\)/g)].map((m) => m[0])
       if (calls.length === 0) return 'no endAsk call found'
       for (const c of calls) {
-        if (!/,\s*(false|0)\s*\)$/.test(c)) {
+        if (!/,\s*(false|0)\s*,\s*sameAskWorker\s*\)$/.test(c)) {
           return `an endAsk call does not carry a falsy killOnTimeout: ${c} — killing the worker here deletes no STOP file, i.e. it ends a question with the brake still up`
         }
       }
@@ -154,7 +154,7 @@ const CHECKS = [
       return null
     },
     brks: [
-      { find: /this\.call\('endAsk', \{ askId, via, keepPause \}, END_ASK_DEADLINE_MS, \/\* killOnTimeout \*\/ false\)/, with: "this.call('endAsk', { askId, via, keepPause }, END_ASK_DEADLINE_MS, true)", whole: true },
+      { find: /this\.callInternal\('endAsk', \{ askId, via, keepPause \}, END_ASK_DEADLINE_MS, \/\* killOnTimeout \*\/ false, sameAskWorker\)/, with: "this.callInternal('endAsk', { askId, via, keepPause }, END_ASK_DEADLINE_MS, true, sameAskWorker)", whole: true },
       { find: /if \(typeof opts\.onAsk !== 'function'\)/, with: 'if (false)', whole: true },
     ],
   },

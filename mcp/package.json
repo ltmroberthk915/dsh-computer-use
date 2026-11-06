@@ -1,7 +1,8 @@
 {
   "name": "@dsh/computer-use-mcp",
   "version": "0.1.0",
-  "description": "MCP stdio server exposing dsh-computer-use to any MCP client (Claude Desktop, Codex, ...). Zero npm dependencies.",
+  "private": true,
+  "description": "Embedded MCP stdio adapter for the root dsh-computer-use package; not a standalone package. Zero npm dependencies.",
   "type": "module",
   "main": "src/index.js",
   "bin": { "dsh-computer-use-mcp": "src/index.js" },

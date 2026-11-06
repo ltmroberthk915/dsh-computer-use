@@ -1,5 +1,7 @@
 // Serialize whole MCP tool calls, including batches and human handoff waits.
 // The native desktop lease also excludes other worker processes.
+import { handoffResult } from '../../lib/continuation.js'
+
 export function createToolQueue () {
   let tail = Promise.resolve()
   return (run, signal) => {
@@ -14,9 +16,10 @@ export function createToolQueue () {
 }
 
 export function continuationResult (error, describe) {
-  if (error?.code !== 'HUMAN_REOBSERVE') return null
-  return {
-    status: 'interrupted', code: error.code, taskStatus: 'continuing', transient: true,
-    outcome: error.outcome || 'unknown', continuation: error.continuation || describe(error),
-  }
+  const shared = handoffResult(error)
+  if (shared) return shared
+  // Compatibility for a bare human-handoff error from an older core. Worker
+  // recovery must retain its own description, never invent a human handback.
+  if (error?.code !== 'HUMAN_REOBSERVE' || !describe) return null
+  return handoffResult({ ...error, continuation: describe(error) })
 }

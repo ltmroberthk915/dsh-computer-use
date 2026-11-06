@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-style-computer-use",
-  "version": "1.3.1",
+  "version": "2.0.0",
   "description": "Codex-style Computer Use for DeepSeek Harness: Windows desktop control, screenshots, UI Automation, human input handoff, approval gates and prebuilt native workers. Install and update from dsh-market without PowerShell 7 or build steps.",
   "type": "module",
   "main": "lib/index.js",
@@ -79,6 +79,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
+    "test": "node scripts/check-behavior.mjs",
     "build:native": "node scripts/build-native.mjs",
     "verify:package": "node scripts/verify-package.mjs"
   },

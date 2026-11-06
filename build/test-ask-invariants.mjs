@@ -96,8 +96,8 @@ const CHECKS = [
     // ending could set _stoppedMode again a moment after the teardown had cleared it.
     name: 'ask is its own visual state (want=5 above stopped=4) and an EXIT outranks both',
     file: 'worker',
-    re: /if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting \? 1 : \(flashOn \? 2 : committed\)\)\)\)\);/,
-    brk: [/if \(Panic\.Exited\) return 0;\s*\n\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting \? 1 : \(flashOn \? 2 : committed\)\)\)\)\);/,
+    re: /if \(Panic\.Exited\) return 0;\s*bool sceneVisible = _enabled && _sceneVisible;\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting && sceneVisible \? 1 : \(Holding && sceneVisible \? 8 : \(flashOn \? 2 : committed\)\)\)\)\)\);/,
+    brk: [/if \(Panic\.Exited\) return 0;\s*bool sceneVisible = _enabled && _sceneVisible;\s*return _askMode \? 5 : \(_stoppedMode \? 4 : \(Panic\.HumanActive \? 6 : \(_preparing \? 7 : \(Acting && sceneVisible \? 1 : \(Holding && sceneVisible \? 8 : \(flashOn \? 2 : committed\)\)\)\)\)\);/,
       'if (Panic.Exited) return 0;\n            return _stoppedMode ? 4 : (flashOn ? 2 : committed);'],
   },
   {
@@ -173,7 +173,8 @@ const CHECKS = [
       // message — which would make this guard fail for a reason that has nothing to do with refusing.
       // (Note the check spans a line break in the real source — `if (id != _askId)` then the audit then
       // `return;` — so the pattern must be whitespace-tolerant, which is why it is not a literal.)
-      if (!/if \(id != _askId\)[\s\S]{0,600}?ASK-RELEASE-STALE-ID[\s\S]{0,300}?return;/.test(body)) {
+      const staleBranch = /if \(id != _askId\)\s*\{([^}]*)\}/.exec(body)?.[1]
+      if (!staleBranch || !/ASK-RELEASE-STALE-ID[\s\S]*?return;/.test(staleBranch)) {
         return 'EndAsk refuses a stale id but never RETURNS — the comparison and the audit line are decoration, and a stale id would fall through and release the brake anyway'
       }
       if (!/ASK-RELEASE-STALE-ID/.test(body)) return 'EndAsk refuses a stale id SILENTLY — a refusal that leaves no audit record cannot be told apart from a release that did nothing'
@@ -248,7 +249,7 @@ const CHECKS = [
         return 'ask() does not require an answer channel — a caller could raise a brake that nothing will ever release it'
       }
       if (!/this\.call\('beginAsk'/.test(s)) return 'ask() no longer engages the brake through beginAsk'
-      if (/\btry \{[\s\S]*?this\.call\('beginAsk'[\s\S]*?\}\s*finally\s*\{[\s\S]*?this\.call\('endAsk'/.test(s)) { /* correct shape */ } else {
+      if (/\btry \{[\s\S]*?this\.call\('beginAsk'[\s\S]*?\}\s*finally\s*\{[\s\S]*?this\.callInternal\('endAsk'/.test(s)) { /* correct shape */ } else {
         return 'the endAsk call does not sit in the finally of the try that contains beginAsk — an ending (a throw, an abort, the deadline) could leave the brake up'
       }
       // The core's ask deadline must be its own literal. This is scoped to ask()'s own body: the CORE

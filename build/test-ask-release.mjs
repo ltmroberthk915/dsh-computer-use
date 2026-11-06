@@ -7,7 +7,7 @@
 // refused until a human pressed Ctrl+Alt+R).
 //
 // ISOLATION (mandatory): DSH_COMPUTER_USE_STOP_FILE / _EXIT_FILE / _AUDIT_LOG all point into a
-// scratch dir under build/, and DSH_CU_HOST_PID / DSH_CU_HOST_EXE are DELETED so `HostMainWindow()`
+// fresh temporary directory, on a verified non-input Win32 desktop, and DSH_CU_HOST_PID / DSH_CU_HOST_EXE are DELETED so `HostMainWindow()`
 // finds nothing and NO window is raised and NO caret is placed. Nothing here touches
 // %LOCALAPPDATA%\dsh-computer-use, no desktop input is sent, and the worker is started with stdio
 // pipes only.
@@ -17,10 +17,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ComputerUse, discoverWorker } from '../lib/core/index.js'
+import { ComputerUse } from '../lib/core/index.js'
+import { requirePrivateDesktop } from './private-desktop-test.mjs'
+
+requirePrivateDesktop(import.meta.filename)
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const SCRATCH = path.join(root, 'build', 'iso-ask-release')
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ask-release-'))
 const SHIM_DIR = path.join(SCRATCH, 'shim')
 const workerSource = path.join(root, 'lib', 'core', 'worker.cs')
 
@@ -152,7 +155,8 @@ async function withWorker (fn, faults = {}) {
     if (!fs.existsSync(exe)) throw new Error('the sandbox worker did not compile')
     if (process.env.DSH_CU_RELEASE_DEBUG) console.error(`[dbg] sandbox worker = ${exe}`)
   } else {
-    exe = discoverWorker()
+    const { prepareNativeBinary, workerReferences } = await import('../lib/core/native-runtime.js')
+    exe = prepareNativeBinary({ source: workerSource, name: 'dsh-computer-use-worker.exe', cache: 'test-worker', references: workerReferences() })
     if (!exe) throw new Error('no compiled worker found and no compile-on-demand available')
   }
 
@@ -336,4 +340,4 @@ if (failures.length) {
   for (const f of failures) console.error('  ' + f)
   process.exit(1)
 }
-console.log('ok test-ask-release — the real compiled worker was engaged and released through the real core: ask() returns in <2 s, the STOP file exists during the answer and is verified GONE after every ending (answered, no-answer and THROWING channel), a wedged endAsk does NOT kill the worker and is retried exactly once, and a worker wedged inside beginAsk is still caught by the core deadline (the discriminator)')
+console.log('ok test-ask-release — the real compiled worker was engaged and released through the real core: healthy ask() settles within the 8 s test budget, the STOP file exists during the answer and is verified GONE after every ending (answered, no-answer and THROWING channel), a wedged endAsk does NOT kill the worker and is retried exactly once, and a worker wedged inside beginAsk is still caught by the core deadline (the discriminator)')

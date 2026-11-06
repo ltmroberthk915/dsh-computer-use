@@ -17,25 +17,25 @@ public static class UiTargetProbe {
  }
  static void Ui(Action action) { form.Invoke(action); }
  static Button Add(Panel parent, string id, string text) {
-  var b=new Button {Name=id,Text=text,Left=10,Top=10,Width=150,Height=25};
+  var b=new PrivateInvokeButton {Name=id,Text=text,Left=10,Top=10,Width=150,Height=25};
   b.Click+=(s,e)=>hits++; parent.Controls.Add(b); var handle=b.Handle; return b;
  }
  static void Replace(string id,string text,Panel parent) { Ui(()=>{var next=Add(parent,id,text);button.Dispose();button=next;}); }
  static string Observe() {
-  var r=(Dictionary<string,object>)Call("Uia",Args("hwnd",hwnd,"query",true,"targets",true,"role","Button","nameContains","Save intended","depth",16,"maxNodes",1200,"limit",80));
+  var r=(Dictionary<string,object>)Call("Uia",Args("hwnd",hwnd,"query",true,"targets",true,"role","Button","nameContains","Save intended","depth",6,"maxNodes",300,"limit",80));
   var rows=(List<object>)r["flat"]; if(rows.Count!=1)throw new Exception("expected one target, got "+rows.Count);
   var row=(Dictionary<string,object>)rows[0]; if(!row.ContainsKey("target"))throw new Exception("target not issued: "+Json.Serialize(row));
   return (string)row["target"];
  }
  static void Emit(string name,bool ok,object detail) { Console.WriteLine(Json.Serialize(Args("case",name,"ok",ok,"detail",detail))); if(!ok)throw new Exception(name); }
  static void Act(string name,string token,bool rebind,string expectedMode) {
-  int before=hits;var r=(Dictionary<string,object>)Call("UiaAct",Args("target",token,"allowRebind",rebind,"action","invoke","settleMs",0,"depth",16,"maxNodes",1200));
+  int before=hits;var r=(Dictionary<string,object>)Call("UiaAct",Args("target",token,"allowRebind",rebind,"action","invoke","settleMs",0,"depth",6,"maxNodes",300));
   Thread.Sleep(60);var resolution=(Dictionary<string,object>)r["resolution"];
   Emit(name,hits==before+1 && (string)resolution["mode"]==expectedMode,Args("extraHits",hits-before,"resolution",resolution));
  }
- static void Refuse(string name,string token,string pattern,int depth=16) {
+ static void Refuse(string name,string token,string pattern,int depth=6) {
   int before=hits;string message="";
-  try { Call("UiaAct",Args("target",token,"allowRebind",name!="explicit-rebind-required","action","invoke","settleMs",0,"depth",depth,"maxNodes",1200)); }
+  try { Call("UiaAct",Args("target",token,"allowRebind",name!="explicit-rebind-required","action","invoke","settleMs",0,"depth",depth,"maxNodes",300)); }
   catch(Exception e){message=e.Message;}
   Thread.Sleep(40);Emit(name,hits==before && message.Contains(pattern),Args("extraHits",hits-before,"refusal",message));
  }

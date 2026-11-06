@@ -29,9 +29,10 @@ Normal owner idle / turn completion releases automatically, without a question c
 
 | state | border | title / badge |
 |---|---|---|
-| cycle · thinking (an op is in flight) | pale blue, breathing | `AI 正在操控此电脑 · 监听中` |
-| cycle · acting (input going out) | deep saturated blue, steady | window title `AI 正在操控此电脑 · 监听中`; no persistent badge |
-| preparing an input call / batch | purple notice and progress, 1.5 s | `即将开始操作，请暂停键鼠` |
+| cycle · free (human may use the desktop) | cyan, breathing | `可自由使用键鼠 · AI 未占用现场` |
+| cycle · holding the scene (no input in flight) | deep blue, breathing | `AI 正在检查 · 请保持页面与鼠标位置` |
+| cycle · acting (input going out) | deep saturated blue, steady | `AI 正在操作 · 请暂勿移动键鼠` |
+| preparing an input call / batch | purple notice and progress, first 1 s / repeats 0.1 s | `即将开始操作，请暂停键鼠` |
 | **PAUSED** (Ctrl+Esc) | **red, steady** | `已暂停 · Ctrl+Alt+R 继续 · Ctrl+Alt+Q 退出` |
 | **ASKING** (`computer_ask`) | **red, breathing at TWICE the cyan rate**, no countdown | `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` |
 | **EXITED** (Ctrl+Alt+Q) | **gone — nothing is listening** | ask-card in the chat, EXITED latch on disk |
@@ -43,9 +44,11 @@ appear on a session that has nothing to stop.
 
 ## Automatic cooperation
 
-Ordinary user input while the agent is thinking, observing or showing the pre-operation notice is allowed and does not initiate a handoff, with one exception (human spec 2026-11-04): a deliberate mouse move — one that exceeds the 16-screen-pixel displacement tolerance, with repeated sub-threshold jitter never accumulated into a false takeover — yields control at ANY point in a live cycle, not only during actuation; reaching for the mouse between injections lights the pale-yellow yield rail just the same. During actual actuation, physical typing, wheel movement and mouse buttons also immediately yield control. After yielding, 2 seconds of continued activity or holding a key/button changes the state to waiting. After all keys/buttons are released and 3 seconds pass without another physical event, the state returns to idle. No ordinary input raises a manual brake.
+The light describes whether the desktop must remain unchanged, not whether the model is currently thinking. Initial pure observation is free (cyan breathing). An actual input operation starts a scene hold and ends with deep-blue breathing. Keep this state while a hover, drag preflight or readback depends on the current page/pointer. Use `computer_ctrl {action:"hold"}` to declare that dependency before observation and `computer_ctrl {action:"free"}` when the user may freely act. Free does not close the cycle or release a human brake. Neither action opens a closed cycle. Release, pause and exit clear the scene hold.
 
-Before a new input call or coherent batch, the worker displays a purple 1.2-second notice, “即将开始操作，请暂停键鼠”, with progress. The notice itself does not own input. Pause, exit and cancellation remain effective during the countdown. The deep-blue acting cue and physical takeover detection use the same active boundary; there is no blue tail or minimum display dwell after actuation ends.
+During actual input or a scene hold, physical typing, wheel movement and mouse buttons yield immediately. Deliberate mouse displacement uses the same 16-screen-pixel tolerance; jitter remains filtered. While free, ordinary user activity only expires previous evidence. After yielding, 2 seconds of continued activity or holding a key/button changes the state to waiting. After all keys/buttons are released and 3 seconds pass without another physical event, the state returns to idle. No ordinary input raises a manual brake.
+
+Before a new input call or coherent batch, the worker displays a purple notice, “即将开始操作，请暂停键鼠”, with progress. The first visible notice counts down for 1 second; if the previous visible notice was less than 180000 ms ago, it counts down for 100 ms. Every visible notice renews this sliding window; a gap of at least 3 minutes restores the 1-second countdown. One monotonic timestamp is retained for the worker lifetime, including across cycle release; no polling timer, history list or disk writes track frequency. A failed presentation does not shorten the next warning. Each countdown starts after its first successfully presented frame and requires a completed presented progress frame. Pause, exit and cancellation remain effective. The notice creates no additional scene hold; an existing hold remains active.
 
 The native hook marks ownership before returning to Windows. A separate cleanup path releases only accepted plugin-owned downs; it preserves keys/buttons physically held by the user. Input loops, window refocus, UIA mutation and clipboard writes check ownership. UIA/COM actions already accepted by an application cannot be undone; their result remains unknown and needs a readback.
 
@@ -175,7 +178,8 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 
 | light | meaning |
 |---|---|
-| **cyan edge light, breathing (2.5 s)** | the agent is engaged/thinking; it has not touched the machine yet |
+| **cyan edge light, breathing (2.5 s)** | the user may freely use keyboard/mouse; no scene dependency |
+| **deep blue edge light, breathing (2.5 s)** | preserve page and pointer for the next observation/action; no input is being dispatched |
 | **deep blue edge light, steady** | the agent is actuating right now |
 | pale-yellow gentle gradient (2.8 s) | physical input owns the desktop; continue after 3 s quiet |
 | gold-orange three-beat flash (2 quick pulses → burst → short fade) | a screenshot was just taken |
@@ -183,7 +187,7 @@ Points are `"x,y"`, rects `"x,y,w,h"`, a mark id is `"M7"`.
 | red, breathing at 2× the cyan rate + title `AI 正在提问 · 在 DSH 聊天里回答 · 无倒计时（Ctrl+Alt+R 撤销）` | ASKING: `computer_ask` is waiting for the answer on the chat card — with **no clock at all**; the worker holds the brake and the card holds the wait |
 | **nothing** | idle — cut instantly when the turn ends, never lingering |
 
-All state lights use a continuous 2-pixel rail at the rectangular screen edge, with a soft glow contained within 8 pixels. Square outer corners meet without gaps. Normal thinking, acting and capture states do not place badges over application content; their interior pixels are transparent. Handoff and pause use small top-edge status chips, and preparation uses a compact progress notice. Cyan breathing means thinking; steady deep blue means driving. State transitions and animation timing are unchanged by the visual treatment. The thinking state remains latched until the cycle is released or ends.
+All state lights use a continuous 2-pixel rail at the rectangular screen edge, with a soft glow contained within 8 pixels. Square outer corners meet without gaps. Normal thinking, acting and capture states do not place badges over application content; their interior pixels are transparent. Handoff and pause use small top-edge status chips, and preparation uses a compact progress notice. Cyan breathing means free desktop; deep-blue breathing means preserving the scene; steady deep blue means driving. The scene hold lasts until explicitly freed, paused or released. The screenshot flash is a separate capture event; it never overrides holding, actuation, preparation or a human handoff.
 
 ## Human in the loop
 

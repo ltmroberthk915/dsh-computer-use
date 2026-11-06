@@ -5,7 +5,7 @@ import path from 'node:path'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { buildNativeBundle, prepareNativeBinary } from '../lib/core/native-runtime.js'
+import { buildNativeBundle, prepareNativeBinary, nativeRuntimeIdentity } from '../lib/core/native-runtime.js'
 if (process.platform !== 'win32') { console.log('ok native-runtime: Windows-only test skipped'); process.exit(0) }
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-native-install-中文 空格-'))
 const source = path.join(root, 'fixture.cs')
@@ -18,6 +18,9 @@ try {
   fs.writeFileSync(source, 'class Program { static void Main() { System.Console.WriteLine("original"); } }')
   const built = buildNativeBundle(spec)
   const first = prepareNativeBinary(spec, { env: noCompiler })
+  const identity = nativeRuntimeIdentity(first)
+  assert.equal(identity.sourceHash, built.sourceSha256); assert.equal(identity.binaryHash, built.binarySha256)
+  assert.equal(identity.verified, true); assert.equal(identity.protocolVersion, 2); checks++
   assert.equal(run(first), 'original'); assert.match(first, /prebuilt/); checks++
   assert.equal(prepareNativeBinary(spec, { env: noCompiler }), first); checks++
   assert(!first.startsWith(path.dirname(built.binary)), 'do not lock files inside node_modules'); checks++
@@ -25,6 +28,7 @@ try {
   fs.mkdirSync(path.dirname(old), { recursive: true }); fs.writeFileSync(old, 'not executable')
   assert.equal(prepareNativeBinary(spec, { env: noCompiler }), first); checks++
   fs.writeFileSync(first, 'damaged cached binary')
+  assert.equal(nativeRuntimeIdentity(first).verified, false); assert.equal(nativeRuntimeIdentity(first).sourceHash, null); checks++
   const repaired = prepareNativeBinary(spec, { env: noCompiler })
   assert.notEqual(repaired, first); assert.equal(run(repaired), 'original'); checks++
   fs.writeFileSync(source, 'class Program { static void Main() { System.Console.WriteLine("updated"); } }')

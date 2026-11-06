@@ -27,12 +27,15 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { requirePrivateDesktop } from './private-desktop-test.mjs'
+import { prepareNativeBinary, workerReferences } from '../lib/core/native-runtime.js'
+requirePrivateDesktop(import.meta.filename)
 
 const NAME = 'test-exit-coherence'
 // Both resolved from THIS file's directory: never a drive-absolute path, so the guard keeps
 // working when the repo moves (which it has).
 const WORKER = path.resolve(import.meta.dirname, '../lib/core/worker.cs')
-const EXE = path.resolve(import.meta.dirname, '../../_build/dsh-computer-use-worker.exe')
+const EXE = prepareNativeBinary({ source: WORKER, name: 'dsh-computer-use-worker.exe', cache: 'test-worker', references: workerReferences() })
 const raw = fs.readFileSync(WORKER, 'utf8')
 const sha = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)
 
@@ -557,15 +560,10 @@ if (!exePresent) {
     try { const b = fs.readFileSync(p); return `${p}|${b.length}|${crypto.createHash('sha256').update(b).digest('hex').slice(0, 16)}` } catch { return `${p}|ABSENT` }
   })
   const before = snap()
-  // THIS LEG IS NOT READ-ONLY, AND THEREFORE NOT DEFAULT (2026-09-13, Codex review). Even with all
-  // three writable paths redirected, a REAL worker that adopts a synthetic EXITED runs
-  // ReleaseStuck() → SendInput, which can release keys physically held on the live desktop right now.
-  // A test with a desktop side effect must not ride along inside the ordinary suite and must never be
-  // reported as a pass by default: it is opt-in, and the default says SKIP out loud.
-  const NATIVE_LEG = process.env.DSH_CU_NATIVE_RELEASE_LEG === '1'
-  if (!NATIVE_LEG) {
-    leg = 'SKIP behavioural native leg (opt-in): it SPAWNS A REAL WORKER, and an adopted record runs ReleaseStuck() → SendInput, which can lift keys held on the live desktop — not a read-only probe. It is NOT a pass. Run the dedicated desktop acceptance with DSH_CU_NATIVE_RELEASE_LEG=1 (three-path isolation is then mandatory).'
-  } else try {
+  // This process has verified a private non-input desktop before preparing the
+  // worker. The default native leg tests marker adoption/teardown with an empty
+  // owned-input ledger. It does not prove release of physical OS key state.
+  try {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-exit-coherence-'))
     const marker = path.join(dir, 'EXITED')
     fs.writeFileSync(marker, ['Ctrl+Alt+Q chord detected', 'source=hook', 'at=2020-01-01 00:00:00', 'evidence=vk=0x51', 'note=synthetic record planted by ' + NAME].join('\r\n'), 'utf8')
@@ -589,7 +587,7 @@ if (!exePresent) {
         failures.push(`behavioural leg TOUCHED THE REAL MACHINE STATE: ${path.basename(realPaths[i])} was "${before[i].split('|').slice(1).join('|')}" before and "${after[i].split('|').slice(1).join('|')}" after — this test must run with EXIT_FILE + STOP_FILE + AUDIT_LOG all redirected`)
       }
     }
-    leg = `behavioural RAN (${markerEnv}=<temp>, STOP_FILE=<temp>, AUDIT_LOG=<temp>; the real EXITED/STOP/audit were verified unchanged)`
+    leg = `behavioural RAN on verified non-input desktop (${markerEnv}=<temp>, STOP_FILE=<temp>, AUDIT_LOG=<temp>; isolated state unchanged, physical release not claimed)`
   } catch (e) {
     failures.push(`behavioural leg threw: ${e && e.message ? e.message : String(e)}`)
     leg = 'behavioural: could not run (see failure)'

@@ -30,8 +30,7 @@ static class PreparationFixture
             var timeout = Stopwatch.StartNew();
             while (!Glow.Preparing && timeout.ElapsedMilliseconds < 5000) Thread.Sleep(1);
             Thread.Sleep(delay);
-            Set(typeof(Glow), "_preparationStart", Environment.TickCount);
-            Set(typeof(Glow), "_presentedPreparation", Get(typeof(Glow), "_preparationSerial"));
+            Glow.PreparationPresented((int)Get(typeof(Glow), "_preparationSerial"));
             // The logic fixture stubs both renderer acknowledgements. The private
             // desktop guard exercises their ordering with actual presented pixels.
             Set(typeof(Glow), "_completedPreparation", Get(typeof(Glow), "_preparationSerial"));
@@ -60,18 +59,40 @@ static class PreparationFixture
         // The real renderer never starts; simulate only its successful-present signal.
         Set(typeof(Glow), "_thread", new Thread(delegate() { }));
         Program.PreparationForeground = delegate { return new IntPtr(123); };
-        Set(typeof(Glow), "_acting", false);
+        SceneControl.Reset();
+        var cadence = new PreparationCadence();
+        Check(cadence.Duration(0) == 1000 && cadence.Duration(500) == 1000, "unseen/failed cue does not consume full warning");
+        cadence.Presented(500);
+        Check(cadence.Duration(501) == 100 && cadence.Duration(180499) == 100, "repeat before three minutes is short");
+        Check(cadence.Duration(180500) == 1000, "exact three-minute boundary restores full cue");
+        cadence.Presented(180499);
+        Check(cadence.Duration(180500) == 100 && cadence.Duration(360498) == 100, "every displayed cue renews sliding window");
+        Check(cadence.Duration(360499) == 1000, "three minutes since latest cue restores full warning");
+        cadence.Presented((long)int.MaxValue - 50);
+        Check(cadence.Duration((long)int.MaxValue + 50) == 100, "64-bit monotonic time survives Windows tick rollover");
+        Check(cadence.Duration(0) == 1000, "clock reset fails safely to full warning");
+        cases.Add("first, repeated, sliding-window, exact-boundary and monotonic cadence");
         long duration;
         var present = Present(120, null); var watch = Stopwatch.StartNew();
         Invoke("PrepareActuation", "key", Request("one")); duration = watch.ElapsedMilliseconds;
         present.Join();
-        Check(duration >= 1300 && duration < 4000, "cold presentation does not consume the 1200ms warning");
+        Check(duration >= 1100 && duration < 4000, "cold presentation does not consume the 1000ms warning");
         Check(!Glow.Preparing && !Glow.Acting, "preparation never claims input and is cleared");
-        cases.Add("full 1200ms starts after first visible frame; preparation is not actuation");
+        cases.Add("full 1000ms starts after first visible frame; preparation is not actuation");
 
         watch.Restart(); Invoke("PrepareActuation", "key", Request("one"));
         Check(watch.ElapsedMilliseconds < 200, "same batch does not announce each primitive");
         cases.Add("one completed warning per coherent input series");
+
+        present = Present(20, null); watch.Restart();
+        Invoke("PrepareActuation", "key", Request("repeat")); present.Join();
+        Check(Glow.PreparationMs == 100 && watch.ElapsedMilliseconds >= 120 && watch.ElapsedMilliseconds < 900,
+            "independent call within three minutes uses fully presented 100ms warning");
+        Glow.Off();
+        present = Present(20, null); watch.Restart();
+        Invoke("PrepareActuation", "key", Request("one")); present.Join();
+        Check(Glow.PreparationMs == 100, "releasing a cycle does not erase in-process warning history");
+        cases.Add("repeated and later-cycle warnings use 100ms after visible first frame");
 
         Panic.RecordHumanInput(0x41, true, false); Panic.RecordHumanInput(0x41, false, true);
         Exception caught = null;
@@ -99,8 +120,8 @@ static class PreparationFixture
             "cancel immediately closes warning without any input");
         cases.Add("owning turn cancellation interrupts countdown promptly");
 
-        Set(typeof(Glow), "_acting", true); Check(Glow.DeriveWant(false, 3) == 1, "real actuation wins thinking");
-        Glow.ActuationEnd(); Check(Glow.DeriveWant(false, 3) == 3, "no acting tail after scope ends");
+        SceneControl.BeginActuation(); Glow.ActuationBegin(); Check(Glow.DeriveWant(false, 3) == 1, "real actuation wins thinking");
+        SceneControl.EndActuation(); Glow.ActuationEnd(); Check(Glow.DeriveWant(false, 3) == 3, "no acting tail after scope ends");
         Check(Glow.DeriveWant(false, 0) == 0, "no stale acting cue when idle");
         cases.Add("deep blue follows real scope with no timed tail");
 
@@ -111,12 +132,16 @@ static class PreparationFixture
         Check(Glow.Acting, "held modifier keeps a nested sequence protected");
         Invoke("ReleaseKeyForCleanup", (ushort)0x10);
         Invoke("EndActuationForReadback");
+        Check(!Glow.Acting && Glow.Holding && Glow.DeriveWant(true, 3) == 8,
+            "finished input retains scene with breathing blue, ahead of capture flash");
+        SceneControl.SetHolding(false);
+        Check(!Glow.Holding && Glow.DeriveWant(false, 3) == 3, "explicit free restores cyan");
         long revision = Panic.HumanRevision;
-        Panic.RecordHumanInput(0, false, false);
+        Panic.RecordHumanInput(0, false, false, true);
         Check(!Glow.Acting && !Panic.HumanActive && Panic.HumanRevision == revision,
-            "post-action verification permits user input without handoff");
+            "explicit free permits user input without handoff");
         Panic.TryEndCycle();
-        cases.Add("readback releases input immediately while held modifiers retain their sequence");
+        cases.Add("readback ends injection but holds scene; explicit free releases scene; modifiers retain sequence");
 
         bool called = false; var done = new ManualResetEvent(false);
         typeof(Panic).GetMethod("QueueDesktopControl", Flags).Invoke(null, new object[] {
@@ -134,7 +159,21 @@ static class PreparationFixture
             "normal release turns off controls and frees the lease again");
         cases.Add("closed physical controls stay silent and live manual recovery remains available");
 
+        SceneControl.SetHolding(true); Check(!Glow.Holding, "hold cannot open a released cycle");
+        Panic.CycleLit = true; Panic.Arm(); SceneControl.SetHolding(true); Glow.Reveal();
+        Check(Glow.Holding && Glow.DeriveWant(false, 3) == 8, "explicit hold protects a live cycle");
+        Panic.RecordHumanInput(0x45, true, false); Panic.RecordHumanInput(0x45, false, true);
+        Check(Panic.HumanActive && Glow.DeriveWant(false, 3) == 6, "human keyboard takes over a held scene");
+        Glow.Stopped(true); Check(Glow.Holding && Glow.DeriveWant(false, 3) == 4, "pause rendering wins without mutating scene authority");
+        SceneControl.Reset(); Check(!Glow.Holding, "domain lifecycle explicitly releases hold");
+        Glow.Stopped(false); Panic.TryEndCycle(); Glow.Kill();
+        Check(!Glow.Holding, "release/kill leaves no retained scene");
+        for (int t = 0; t <= 5000; t += 16)
+            Check(Glow.HoldingAlpha(t) >= 120 && Glow.HoldingAlpha(t) <= 204, "holding breath remains visible");
+        cases.Add("holding state precedence, free release, human takeover and lifecycle cleanup");
+
         Directory.CreateDirectory(args[0]);
+        Set(typeof(Glow), "_preparationMs", 1000);
         Preview(Path.Combine(args[0], "preparation-1280.png"), 1280, 720, 750);
         Preview(Path.Combine(args[0], "preparation-2560.png"), 2560, 1600, 0);
         Console.WriteLine(new JavaScriptSerializer().Serialize(new { passed = cases.Count, cases,

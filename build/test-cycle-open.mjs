@@ -104,9 +104,10 @@ const SHOTS = path.join(SANDBOX, 'shots')
 fs.mkdirSync(SHOTS, { recursive: true })
 const EXITED = path.join(LATCHDIR, 'EXITED')
 const STOPFILE = path.join(LATCHDIR, 'STOP')
-const SAVED = { localappdata: process.env.LOCALAPPDATA, stopfile: process.env.DSH_COMPUTER_USE_STOP_FILE }
+const SAVED = { localappdata: process.env.LOCALAPPDATA, stopfile: process.env.DSH_COMPUTER_USE_STOP_FILE, exitfile: process.env.DSH_COMPUTER_USE_EXIT_FILE }
 process.env.LOCALAPPDATA = SANDBOX
 delete process.env.DSH_COMPUTER_USE_STOP_FILE
+delete process.env.DSH_COMPUTER_USE_EXIT_FILE
 const clearLatches = () => {
   for (const p of [EXITED, STOPFILE]) { try { fs.unlinkSync(p) } catch { /* absent is the point */ } }
   delete process.env.DSH_COMPUTER_USE_STOP_FILE
@@ -255,7 +256,9 @@ async function ensureCycleBehaviour (indexSrc) {
 async function dispatchBehaviour (toolsSrc, tag) {
   const out = []
   const file = path.join(SANDBOX, `tools-${tag}.mjs`)
-  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback|continuation)\.js'/g,
+  // The mutated entry lives in SANDBOX; keep its real shared feedback/region
+  // dependencies rooted in lib rather than searching beside the temporary entry.
+  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback|compact-feedback|verification-region|continuation)\.js'/g,
     (_, name) => `from ${JSON.stringify(pathToFileURL(path.join(LIBDIR, name + '.js')).href)}`))
   let mod
   try {
@@ -364,16 +367,16 @@ const TEXT_CHECKS = [
         /const started = \(typeof openFn === 'function'\) \? openFn\(\) : undefined/.test(g) &&
         !/Promise\.resolve\(\)\s*\n?\s*\.then\(\(\) => \(typeof openFn/.test(g)
     }],
-  // A WHITELIST, not a blacklist of brake ops: naming the three members the opener may touch is the
+  // A whitelist of state reads, resume and its cancellation/ownership context.
   // only form a new op cannot slip past (an added `cu.call('abort')`, a `cu['panic']`, or anything
   // that appears only on the brake path — where the behavioural cases above never reach it).
-  ['opener: it touches ONLY cu.exited / cu.stopped / cu.resume — nothing that could release a brake',
+  ['opener: it touches ONLY cu.exited / cu.stopped / cu.resume / cu.withInputContext — no brake release',
     (s) => {
       const b = braceBody(s[INDEX], 'const ensureCycle = async (exec)')
       if (!b || /\bcu\s*\[/.test(b)) return false
       const members = new Set([...b.matchAll(/\bcu\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]))
       return members.size > 0 && members.has('resume') &&
-        [...members].every((m) => m === 'exited' || m === 'stopped' || m === 'resume')
+        [...members].every((m) => ['exited', 'stopped', 'resume', 'withInputContext'].includes(m))
     }],
   ['opener: the brake guard is checked BEFORE the resume is sent',
     (s) => {
@@ -563,6 +566,7 @@ if (red.length) {
 try { fs.rmSync(SANDBOX, { recursive: true, force: true }) } catch { /* best effort */ }
 if (SAVED.localappdata === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = SAVED.localappdata
 if (SAVED.stopfile === undefined) delete process.env.DSH_COMPUTER_USE_STOP_FILE; else process.env.DSH_COMPUTER_USE_STOP_FILE = SAVED.stopfile
+if (SAVED.exitfile === undefined) delete process.env.DSH_COMPUTER_USE_EXIT_FILE; else process.env.DSH_COMPUTER_USE_EXIT_FILE = SAVED.exitfile
 
 if (failures) {
   console.log(`FAIL test-cycle-open — ${failures} problem(s); self-test ${caught}/${MUTATIONS.length} mutations caught`)

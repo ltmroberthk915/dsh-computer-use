@@ -16,11 +16,29 @@ async function runPrivateHost () {
   const generations = []
   try {
     for (let index = 0; index < 2; index++) {
-      await core.ensureWorker()
+      if (index === 0) await core.ensureWorker()
+      else {
+        // Recovery must refresh native state before consulting the dead worker's
+        // waiting phase, and must not replay an operation with stale evidence.
+        await assert.rejects(core.actuate('windowOp', {}), error =>
+          error.code === 'WORKER_REOBSERVE' && error.outcome === 'not-dispatched' &&
+          error.continuation?.reason === 'worker-restarted')
+      }
       const child = core.proc
       assert.ok(child?.pid, 'worker failed to start')
       execFileSync(process.env.DSH_RESPAWN_TEST_LAUNCHER, ['verify', String(child.pid)], { windowsHide: true })
-      const before = (await core.call('ping')).glowHealth
+      assert.match(core.workerGeneration, /^[a-f0-9]{32}$/)
+      assert.equal(core.runtime.protocolVersion, 2)
+      assert.equal(core.runtime.workerGeneration, core.workerGeneration)
+      for (const field of ['packageVersion', 'buildId', 'sourceHash', 'binaryHash']) {
+        assert.equal(core.runtime[field], core.spawnRuntime[field], 'native ready runtime differs: ' + field)
+      }
+      assert.equal(core.runtime.verified, true)
+      assert.equal(core.workerStateInvalid, false)
+      const ping = await core.call('ping')
+      assert.equal(ping.cooperation.workerGeneration, core.workerGeneration)
+      assert.ok(Number.isSafeInteger(ping.cooperation.stateSeq))
+      const before = ping.glowHealth
       assert.equal(before.workerPid, child.pid, 'ping belongs to a different worker')
       const started = performance.now()
       // No hwnd, selector or title means FindHwnd returns zero. WindowOp
@@ -28,7 +46,7 @@ async function runPrivateHost () {
       // the first mutating call. It cannot select or modify any window.
       await assert.rejects(core.call('windowOp', {}), /window not found/i)
       const elapsedMs = Math.round(performance.now() - started)
-      assert.ok(elapsedMs >= 1100, 'native preparation wait (1200 ms) was bypassed')
+      assert.ok(elapsedMs >= 1000, 'first native preparation wait (1000 ms) was bypassed')
       assert.equal(core.proc, child, 'the operation must complete on the same worker')
       const after = (await core.call('probe', { what: 'glow' })).glowHealth
       assert.equal(after.workerPid, child.pid, 'probe belongs to a different worker')
@@ -36,18 +54,29 @@ async function runPrivateHost () {
       assert.ok(after.preparationSerial > before.preparationSerial, 'no new preparation was requested')
       assert.equal(after.presentedSerial, after.preparationSerial, 'the new preparation serial was not presented')
       assert.ok(after.presentSuccesses > before.presentSuccesses, 'no successful native present observed')
-      generations.push({ pid: child.pid, verifiedPrivateDesktop: true, elapsedMs, result: 'window not found',
+      generations.push({ pid: child.pid, workerGeneration: core.workerGeneration, runtime: core.runtime,
+        verifiedPrivateDesktop: true, elapsedMs, result: 'window not found',
         preparationSerial: after.preparationSerial, presentedSerial: after.presentedSerial,
         newSuccessfulPresents: after.presentSuccesses - before.presentSuccesses })
       if (index === 0) {
+        // Model a handoff/mark cache that must become invalid at process death.
+        core.cooperation = { ...core.cooperation, phase: 'waiting', active: true }
+        core.lastMarks = [{ id: 'old-generation-mark' }]
+        core.lastMarkFrame = { hwnd: 'old' }; core.maps.set('old', {})
         const death = once(core, 'dead')
         assert.ok(child.kill(), 'could not terminate the first worker created by this host')
         await death
         assert.equal(core.proc, null, 'core retained the terminated generation')
+        assert.equal(core.workerStateInvalid, true)
+        assert.equal(core.cooperation.active, false)
+        assert.equal(core.cooperation.valid, false)
+        assert.equal(core.lastMarks.length, 0); assert.equal(core.lastMarkFrame, null); assert.equal(core.maps.size, 0)
       }
     }
     assert.notEqual(generations[0].pid, generations[1].pid, 'expected a new worker PID after respawn')
-    return { passed: true, nodeHostPid: process.pid, sameCore: true, generations }
+    assert.notEqual(generations[0].workerGeneration, generations[1].workerGeneration)
+    return { passed: true, nodeHostPid: process.pid, sameCore: true, staleEvidenceCleared: true,
+      reobserveRequiredBeforeInput: true, desktopInput: false, generations }
   } finally {
     // The graceful-abort API may release input that was never acquired.
     // Terminate only the test-owned child, with no desktop control command.

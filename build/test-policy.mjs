@@ -164,10 +164,10 @@ toolMod.registerTools({
   log: () => {}, snapshotPath: (d) => `${d}/shot.jpg`, defineTool: (d) => d,
 })
 
-// policy.js has no imports, so a mutated copy loads straight from a data: URL — no temp files, and
-// no chance of a mutant leaking into the real module registry.
+// Resolve the shared key grammar before loading isolated policy mutations.
 const policySource = readFileSync(POLICY, 'utf8')
-const loadPolicy = (source) => import('data:text/javascript;base64,' + Buffer.from(source, 'utf8').toString('base64'))
+const loadPolicy = (source) => import('data:text/javascript;base64,' + Buffer.from(
+  source.replace("'./key-command.js'", JSON.stringify(pathToFileURL(path.join(root, 'lib/key-command.js')).href)), 'utf8').toString('base64'))
 const realPolicy = await import(`${pathToFileURL(POLICY).href}?v=${statSync(POLICY).mtimeMs}`)
 
 const failures = []

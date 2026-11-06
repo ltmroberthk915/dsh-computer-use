@@ -12,6 +12,7 @@ import { createTerminalCleanup } from '../lib/terminal-cleanup.js'
 import { registerTools } from '../lib/tools.js'
 import { recoveryProblem } from '../lib/recovery.js'
 import { installToolExposure, ACTIVATION_TOOL } from '../lib/exposure.js'
+import { installAudit } from '../lib/audit.js'
 
 const SOURCE_URL = new URL(process.argv[2] ? pathToFileURL(path.resolve(process.argv[2])).href : '../lib/index.js', import.meta.url)
 const source = fs.readFileSync(SOURCE_URL, 'utf8')
@@ -79,8 +80,8 @@ function harness(legacyTimeout) {
   // that the module may never learn where it lives would be a rule about the harness, not about the
   // product. Rewriting keeps `new URL(..., import.meta.url)` resolving exactly as it does in production.
   const prelude = source.replace(/^import .+$/gm, '').replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify(SOURCE_URL.href))
-  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'appendAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createTerminalCleanup', 'installApprovalAttribution', prelude + '\nreturn apply;')(
-    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', () => {}, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL, createCycleLifecycle, createTerminalCleanup, () => {})
+  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'installAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createTerminalCleanup', 'installApprovalAttribution', prelude + '\nreturn apply;')(
+    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', installAudit, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL, createCycleLifecycle, createTerminalCleanup, () => {})
   // This fixture tests lifecycle ordering in the supported legacy registration mode;
   // actual scoped activation is tested separately against the host ToolRuntime.
   apply(ctx, { enabled: true, progressiveTools: false, automationMode: 'standard', calmAfterMs: legacyTimeout, maxActionsPerMinute: 60 })

@@ -8,7 +8,7 @@ import { registerTools } from '../lib/tools.js'
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-feedback-owned-'))
 let checks = 0
 function check (value, label) { assert.ok(value, label); checks++ }
-function fixture ({ model = 'glm-5.3-flash', provider = 'bigmodel-anthropic', enabled = true, images = true, onResolve, onAction, shotError, hooks = {} } = {}) {
+function fixture ({ model = 'glm-5.3-flash', provider = 'bigmodel-anthropic', enabled = true, images = true, modalities = ['text', 'image'], sourceSize = [200, 100], attachmentSize = [200, 100], onResolve, onAction, shotError, hooks = {} } = {}) {
   const defs = new Map(), controller = new AbortController(), counts = { actions: 0, shots: 0, states: 0 }
   const exec = { agent: { id: crypto.randomUUID(), session: { requestHeader: () => ({ config: { provider, model } }) } }, signal: controller.signal }
   const receipt = { ok: true, receiver: { hwnd: 123, editable: true }, preserved: ['raw', 17] }
@@ -16,22 +16,65 @@ function fixture ({ model = 'glm-5.3-flash', provider = 'bigmodel-anthropic', en
   const cu = { stopped: false, exited: false, click: act, type: act, key: act, move: act, scroll: act, drag: act, selectRange: act,
     resolveTarget: async p => p,
     screenState: async () => { counts.states++; return { active: { hwnd: 123 }, uiaFlat: [{ name: 'SUCCESS', value: 'verified value' }], uiaTruncated: false } },
-    screenshot: async () => { counts.shots++; if (shotError) throw Error(shotError); return { image: Buffer.from('fixture bytes'), mime: 'image/png', region: { x: -100, y: 20, width: 400, height: 200 }, settled: true } },
+    screenshot: async () => { counts.shots++; if (shotError) throw Error(shotError); return { image: Buffer.from('fixture bytes'), mime: 'image/png', region: { x: -100, y: 20, width: 400, height: 200 }, imageSize: sourceSize, capturedAt: 1000, ts: 1010, cursorScreenPos: { x: 0, y: 60 }, cursorInImage: { x: 50, y: 20 }, cursorDrawn: true, settled: true } },
   }
-  const attachments = { imageLimits: { mediaTypes: ['image/png'] }, saveImage: async () => ({ attachmentId: 'fixture', mediaType: 'image/png', width: 200, height: 100, bytes: 13 }) }
-  const ctx = { tools: { register: def => defs.set(def.name, def) }, get: name => name === 'attachments' ? images ? attachments : undefined : name === 'llm' ? { resolveModelInfo: async () => { onResolve?.({ cu, controller }); return { inputModalities: ['text', 'image'] } } } : undefined }
-  registerTools({ ctx, cu, config: { actionFeedback: enabled }, defineTool: d => d, dataDir: { root, shots: root }, snapshotPath: () => path.join(root, crypto.randomUUID() + '.jpg'), hooks })
+  const attachments = { imageLimits: { mediaTypes: ['image/png'] }, saveImage: async () => ({ attachmentId: 'fixture', mediaType: 'image/png', width: attachmentSize?.[0], height: attachmentSize?.[1], bytes: 13 }) }
+  const ctx = { tools: { register: def => defs.set(def.name, def) }, get: name => name === 'attachments' ? images ? attachments : undefined : name === 'llm' ? { resolveModelInfo: async () => { onResolve?.({ cu, controller }); return { inputModalities: modalities } } } : undefined }
+  const feedbackRules = [{ provider: 'bigmodel-anthropic', model: 'glm-5.3', adapterVersion: 'unversioned', grounding: 'failed', testedAt: '2000-01-01', expiresAt: '2099-01-01', reason: 'test evidence' }]
+  registerTools({ ctx, cu, config: { actionFeedback: enabled, actionFeedbackDetail: 'full', feedbackRules }, defineTool: d => d, dataDir: { root, shots: root }, snapshotPath: () => path.join(root, crypto.randomUUID() + '.jpg'), hooks })
   return { defs, exec, counts, cu, controller, receipt,
     run: async (name, args = {}) => { const d = defs.get(name), value = await d.execute(args, exec); return { value, content: d.output.render(args, value) } },
   }
 }
 const args = { computer_click: { at: '12,34' }, computer_type: { text: 'hello' }, computer_key: { combo: 'enter' }, computer_move: { at: '12,34' }, computer_drag: { from: '12,34', to: '50,60' }, computer_select: { from: '12,34', to: '50,60' }, computer_scroll: { dir: 'down' } }
-for (const route of [{}, { provider: 'deepseek-official', model: 'deepseek-flash' }]) for (const [name, input] of Object.entries(args)) {
+for (const route of [{}, { provider: 'deepseek-official', model: 'deepseek-flash' }, { provider: 'deepseek-account', model: 'deepseek-flash' }, { provider: 'new-provider', model: 'new-image-model' }]) for (const [name, input] of Object.entries(args)) {
   const f = fixture(route), r = await f.run(name, input)
   check(r.content.filter(b => b.type === 'image').length === 1 && f.counts.shots === 1, name + ' one image')
   assert.deepEqual(r.value.preserved, f.receipt.preserved); checks++
   assert.deepEqual(r.value.observation.coordinates, { screenOrigin: [-100, 20], imageSize: [200, 100], screenPerImagePixel: [2, 2] }); checks++
+  check(r.value.observation.capturedAt === 1000 && r.value.observation.ts === 1010, 'capture time survives tool wrapper and render')
+  assert.deepEqual(r.value.observation.cursorInImage, { x: 50, y: 20 }); checks++
+  check(!('sourceImageSize' in r.value.observation) && !('sourceCursorInImage' in r.value.observation), 'unchanged attachment adds no duplicate geometry')
   check(!JSON.stringify(r).includes('undefined'), 'lossless output')
+}
+for (const attachmentSize of [[100, 50], [100, 25]]) {
+  const f = fixture({ attachmentSize }), r = await f.run('computer_shot')
+  assert.deepEqual(r.value.imageSize, attachmentSize); checks++
+  assert.deepEqual(r.value.coordinates.imageSize, attachmentSize); checks++
+  assert.deepEqual(r.value.cursorInImage, { x: attachmentSize[0] / 4, y: attachmentSize[1] / 5 }); checks++
+  assert.deepEqual(r.value.sourceImageSize, [200, 100]); checks++
+  assert.deepEqual(r.value.sourceCursorInImage, { x: 50, y: 20 }); checks++
+  check(r.value.coordinateRule.includes('path retains the original capture') && r.content.filter(b => b.type === 'image').length === 1,
+    'resized attachment and original path have explicit distinct coordinate spaces')
+}
+for (const invalid of [[0, 100], [-1, 100], [Infinity, 100], [NaN, 100], ['200', 100], [200], null]) {
+  for (const which of ['sourceSize', 'attachmentSize']) {
+    const f = fixture({ [which]: invalid }), r = await f.run('computer_shot')
+    check(r.value.imageStatus === 'path-only' && !r.value.image && r.value.path && r.content.every(b => b.type !== 'image'),
+      'invalid dimensions retain only a usable source path: ' + which)
+    check(r.value.imageReason === (which === 'sourceSize' ? 'invalid-source-image-size' : 'invalid-attachment-image-size'),
+      'dimension failure reports the failed channel')
+    if (which === 'sourceSize') check(!r.value.coordinates, 'invalid source dimensions never expose click scaling')
+    else { assert.deepEqual(r.value.coordinates.imageSize, [200, 100]); checks++ }
+  }
+}
+{
+  const f = fixture({ attachmentSize: [100, 50] })
+  const r = await f.run('computer_batch', { actions: [{ tool: 'computer_shot', args: {} }, { tool: 'computer_click', args: args.computer_click }] })
+  const earlier = r.value.actions[0].result
+  check(earlier.imageStatus === 'path-only' && !earlier.image && !earlier.sourceImageSize,
+    'demoting an earlier attachment restores source-file geometry')
+  assert.deepEqual(earlier.imageSize, [200, 100]); checks++
+  assert.deepEqual(earlier.cursorInImage, { x: 50, y: 20 }); checks++
+  assert.deepEqual(earlier.coordinates.imageSize, [200, 100]); checks++
+  assert.deepEqual(r.value.observation.imageSize, [100, 50]); checks++
+}
+// File-only routes still expose exact image-to-screen mapping and capture age.
+{
+  const f = fixture({ images: false }), r = await f.run('computer_shot')
+  check(r.value.imageStatus === 'path-only' && r.value.capturedAt === 1000, 'file-only capture retains timestamp')
+  assert.deepEqual(r.value.coordinates, { screenOrigin: [-100, 20], imageSize: [200, 100], screenPerImagePixel: [2, 2] }); checks++
+  check(r.content.every(b => b.type !== 'image') && JSON.stringify(r.content).includes('capturedAt'), 'render retains metadata without fake attachment')
 }
 for (const model of ['glm-5.3-flash', 'glm-5.3']) {
   const f = fixture({ model }), r = await f.run('computer_batch', { actions: Object.entries(args).map(([tool, args]) => ({ tool, args })) })
@@ -44,9 +87,40 @@ for (const model of ['glm-5.3-flash', 'glm-5.3']) {
   const s = await f.run('computer_shot')
   check(s.value.visionStatus === 'unverified-route' && s.value.image && s.value.path && !s.value.view.includes('Inspect it directly'), 'Max explicit image retained with truthful warning')
 }
-for (const opts of [{ enabled: false }, { model: 'unknown-model' }, { provider: 'unverified-provider' }, { images: false }]) {
+for (const opts of [{ enabled: false }]) {
   const f = fixture(opts), r = await f.run('computer_click', args.computer_click)
   check(f.counts.shots + f.counts.states === 0 && !r.value.observation, 'no unsupported automatic capture')
+}
+for (const shot of ['auto', 'always']) {
+  const f = fixture({ enabled: false })
+  const r = await f.run('computer_batch', { actions: [{ tool: 'computer_click', args: args.computer_click }], shot })
+  check(f.counts.actions === 1 && f.counts.states === 0 && f.counts.shots === (shot === 'always' ? 1 : 0),
+    'disabled feedback suppresses batch auto; explicit always still requests a screenshot')
+  if (shot === 'auto') check(r.value.observationSkipped === 'disabled' && r.value.feedback.kind === null,
+    'disabled batch feedback is reported without inventing an image policy')
+}
+for (const shot of ['auto', 'always']) {
+  let owner = true
+  const f = fixture({ onAction: () => { owner = false }, hooks: { assertOwnership: () => { if (!owner) throw Error('owner changed') } } })
+  const r = await f.run('computer_batch', { actions: [{ tool: 'computer_click', args: args.computer_click }], shot })
+  check(r.value.actions[0].ok && r.value.observationError === 'owner changed' && f.counts.shots + f.counts.states === 0,
+    'batch feedback cannot read after owner changes; accepted input receipt survives')
+}
+{
+  const f = fixture({ onResolve: ({ controller }) => controller.abort() })
+  const r = await f.run('computer_batch', { actions: [{ tool: 'computer_click', args: args.computer_click }], shot: 'auto' })
+  check(r.value.actions[0].ok && r.value.observationSkipped === 'cancelled-or-paused' && f.counts.shots + f.counts.states === 0,
+    'batch cancellation during capability lookup suppresses automatic feedback')
+}
+{
+  const f = fixture({ enabled: false, onAction: ({ controller }) => controller.abort() })
+  const r = await f.run('computer_batch', { actions: [{ tool: 'computer_click', args: args.computer_click }], shot: 'always' })
+  check(r.value.actions[0].ok && f.counts.shots + f.counts.states === 0,
+    'explicit always overrides disabled feedback, never cancellation')
+}
+for (const opts of [{ images: false }, { modalities: ['text'] }, { onResolve: () => { throw Error('catalog unavailable') } }]) {
+  const f = fixture(opts), r = await f.run('computer_click', args.computer_click)
+  check(f.counts.states === 1 && f.counts.shots === 0 && r.value.feedback.kind === 'state' && r.value.feedback.reason, 'missing transport uses explained fresh text evidence')
 }
 for (const onAction of [({ cu }) => { cu.stopped = true }, ({ cu }) => { cu.exited = true }, ({ controller }) => controller.abort()]) {
   const f = fixture({ onAction }), r = await f.run('computer_click', args.computer_click)

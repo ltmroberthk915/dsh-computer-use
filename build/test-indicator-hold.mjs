@@ -23,12 +23,12 @@ const cleanupBypassesGate = text => {
     ordered(key, 'OwnedUps.TryGetValue(key, out input)', 'Panic.HumanHolds(physical)', 'InputSender(new INPUT[] { release })') &&
     !/SendInputChecked\(|SendTrackedInput\(|Panic\.Check\(/.test(stuck + owned + key)
 }
-const exactScope = text => /bool acting = _enabled && Acting;/.test(text) &&
+const exactScope = text => /bool acting = _enabled && _sceneVisible && Acting;/.test(text) &&
   !/_lastTouchMs|_holdMs|pendingSince/.test(text) &&
   ordered(body(text, '\n        static void BeginActuation()'), 'Panic.BeginActuation()', 'CheckHumanInput()') &&
   body(text, 'static Dictionary<string, object> Handle(string line)').includes('finally { _operationActing = false; Panic.EndActuation(); Glow.Prepare(false); }')
 assert.ok(exactScope(code), 'actual action scope controls blue, with no timer tail or dwell')
-assert.equal(exactScope(code.replace('bool acting = _enabled && Acting;', 'bool acting = true;')), false, 'the guard rejects an always-on cue')
+assert.equal(exactScope(code.replace('bool acting = _enabled && _sceneVisible && Acting;', 'bool acting = true;')), false, 'the guard rejects an always-on cue')
 assert.equal(exactScope(code.replace('finally { _operationActing = false; Panic.EndActuation(); Glow.Prepare(false); }',
   'finally { _operationActing = false; Glow.Prepare(false); }')), false, 'the guard rejects missing finally cleanup')
 const input = body(code, 'static void SendInputChecked(INPUT[] arr)')
@@ -51,7 +51,8 @@ assert.ok(ordered(moving, 'Glow.InputBegin()', 'Thread.Sleep(stepMs)', 'finally 
 const warning = body(code, 'static void PrepareActuation(string op, Dictionary<string, object> request)')
 assert.ok(ordered(warning, 'Glow.Prepare(true)', 'while (!Glow.PreparationVisible)', 'while (timer.ElapsedMilliseconds < Glow.PreparationMs || !Glow.PreparationComplete)',
   'finally { Glow.Prepare(false); }'), 'warning duration starts after visibility and clears on failure')
-assert.ok(/public const int PreparationMs = 1200;/.test(code), 'warning lasts 1.2 seconds')
+assert.ok(/FullMs = 1000, RepeatMs = 100, RepeatWindowMs = 180000/.test(code), 'warning uses a rolling three-minute 1s/100ms cadence')
+assert.ok(code.includes('Holding && sceneVisible ? 8') && code.includes('SceneControl.SetHolding(GetB(a, "hold", false))'), 'explicit scene hold is authoritative independently of renderer visibility')
 assert.ok(!warning.includes('BeginActuation()'), 'warning does not claim physical input')
 assert.ok(ordered(body(code, 'static Dictionary<string, object> Click(Dictionary<string, object> a)'),
   'if (i < clicks - 1) Thread.Sleep(gap)', 'EndActuationForReadback()', 'verifyDelayMs', 'FocusReport(a, false)'),
@@ -61,4 +62,4 @@ assert.ok(ordered(body(code, 'static Dictionary<string, object> UiaAct(Dictionar
   'UIA releases real control before its settling/readback phase')
 assert.ok(code.includes('"acting", Glow.Acting') && code.includes('"preparing", Glow.Preparing') && code.includes('"injecting", Glow.Injecting'),
   'probe exposes observable actuation, preparation and injection facts')
-console.log('ok test-indicator-hold — actual-scope cue, balanced injection, no timed tail, visible 1.2s preparation and cleanup guards')
+console.log('ok test-indicator-hold — actual-scope cue, balanced injection, no timed tail, visible adaptive preparation and cleanup guards')

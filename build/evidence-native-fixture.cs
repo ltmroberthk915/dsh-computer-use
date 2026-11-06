@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
+using System.IO;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
@@ -24,9 +25,16 @@ public static class EvidenceProbe {
  static Form noise; static System.Windows.Forms.Timer timer;
  static EvidenceCustomEditor custom;
  static long hwnd; static int keys; static bool baseline;
+ static long initialHumanRevision;
+ static string stopPath,exitPath;
+ static void RefuseMarker(){if(File.Exists(stopPath)||File.Exists(exitPath))throw new Exception("LIVE_ACCEPTANCE_BLOCKED: real STOP/EXITED exists; marker retained");}
+ static void CheckLive(){
+  RefuseMarker();DshComputerUse.Worker.Panic.RequireControlHooks();DshComputerUse.Worker.Program.CheckHumanInput();
+  if(DshComputerUse.Worker.Panic.HumanRevision!=initialHumanRevision)throw new Exception("LIVE_ACCEPTANCE_BLOCKED: human took control; no continuation");
+ }
  static Dictionary<string,object> Args(params object[] pairs) {var d=new Dictionary<string,object>();for(int i=0;i<pairs.Length;i+=2)d[(string)pairs[i]]=pairs[i+1];return d;}
- static object Call(string name,params object[] args) {try{return Worker.GetMethod(name,BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,args);}catch(TargetInvocationException e){throw e.InnerException;}}
- static void Ui(Action a){form.Invoke(a);}
+ static object Call(string name,params object[] args) {CheckLive();try{return Worker.GetMethod(name,BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,args);}catch(TargetInvocationException e){throw e.InnerException;}}
+ static void Ui(Action a){CheckLive();form.Invoke(new Action(()=>{CheckLive();a();}));}
  static void Emit(string name,bool ok,object detail){Console.WriteLine(Json.Serialize(Args("case",name,"ok",ok,"detail",detail)));if(!ok)throw new Exception(name);}
  static string TextValue(){string v="";Ui(()=>v=editor.Text);return v;}
  static byte[] Rect(){Point p=Point.Empty;Ui(()=>p=board.PointToScreen(Point.Empty));return (byte[])Call("FrameSignatureRect",p.X,p.Y,33,33,16);}
@@ -77,18 +85,36 @@ public static class EvidenceProbe {
    var unchanged=(Dictionary<string,object>)Call("WaitChange",Args("hwnd",hwnd,"timeoutMs",400));
    Emit("window-change-excludes-outside-animation",!(bool)unchanged["changed"],unchanged);
    Ui(()=>{timer.Stop();noise.Close();timer.Dispose();});
-   object[] samplerArgs={Args("hwnd",hwnd),8,null};var sampler=(Func<byte[]>)Call("WaitSampler",samplerArgs);
+   object[] samplerArgs={Args("hwnd",hwnd),8,null,0,0,0,0};var sampler=(Func<byte[]>)Call("WaitSampler",samplerArgs);
    Ui(()=>form.Left+=15);error=null;try{sampler();}catch(Exception e){error=e.Message;}
    Emit("moved-wait-target-refused",error!=null&&error.Contains("WAIT_TARGET_CHANGED"),error);
    Ui(()=>form.WindowState=FormWindowState.Minimized);error=null;try{Call("WaitStable",Args("hwnd",hwnd));}catch(Exception e){error=e.Message;}
    Emit("minimized-wait-target-refused",error!=null&&error.Contains("WAIT_TARGET_UNAVAILABLE"),error);
   }
  }catch(Exception e){Console.WriteLine(Json.Serialize(Args("case","error","error",e.ToString())));Environment.ExitCode=1;}
- finally{form.BeginInvoke(new Action(()=>{if(timer!=null)timer.Stop();if(noise!=null)noise.Close();form.Close();}));}}
+ finally{DshComputerUse.Worker.Program.ReleaseOwnedInputs();DshComputerUse.Worker.Program.ReleaseDesktopOwnership();form.BeginInvoke(new Action(()=>{if(timer!=null)timer.Stop();if(noise!=null)noise.Close();form.Close();}));}}
  [STAThread]public static void Main(string[] args){
   Console.OutputEncoding=new System.Text.UTF8Encoding(false);
+  if(args.Length!=1||args[0]!="--run")throw new Exception("Explicit --run required");
+  foreach(string key in new string[]{"DSH_COMPUTER_USE_STOP_FILE","DSH_COMPUTER_USE_EXIT_FILE","DSH_COMPUTER_USE_OWNER_FILE","DSH_PRIVATE_TEST_ACTIVE"})
+   if(!String.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))throw new Exception("Live acceptance refuses isolation override: "+key);
+  string local=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"dsh-computer-use");
+  stopPath=Path.Combine(local,"STOP");exitPath=Path.Combine(local,"EXITED");RefuseMarker();
+  if(!DshComputerUse.Worker.Program.TryClaimDesktop("explicit evidence acceptance fixture"))throw new Exception("LIVE_ACCEPTANCE_BLOCKED: existing owner; no window or input");
+  try {
+  RefuseMarker();
+  DshComputerUse.Worker.Panic.Init();DshComputerUse.Worker.Panic.RequireControlHooks();
+  DshComputerUse.Worker.Panic.CycleLit=true;DshComputerUse.Worker.Panic.Arm();
+  DshComputerUse.Worker.SceneControl.SetHolding(true);initialHumanRevision=DshComputerUse.Worker.Panic.HumanRevision;
+  var realSender=DshComputerUse.Worker.Program.InputSender;
+  DshComputerUse.Worker.Program.InputSender=inputs=>{
+   bool ups=true;foreach(var input in inputs)ups &= input.type==DshComputerUse.Worker.Native.INPUT_KEYBOARD&&(input.u.ki.dwFlags&DshComputerUse.Worker.Native.KEYEVENTF_KEYUP)!=0;
+   // Accepted key-up cleanup remains possible if a person changed focus.
+   if(!ups){CheckLive();if(hwnd==0||DshComputerUse.Worker.Native.GetForegroundWindow().ToInt64()!=hwnd)throw new Exception("LIVE_ACCEPTANCE_BLOCKED: fixture is no longer foreground");}
+   return realSender(inputs);
+  };
   DshComputerUse.Worker.Native.SetProcessDpiAwarenessContext(new IntPtr(-4));
-  baseline=args.Length>0&&args[0]=="baseline";
+  baseline=false;
   Worker.Assembly.GetType("DshComputerUse.Worker.Glow").GetProperty("Enabled").SetValue(null,false,null);
   form=new Form{Text="DSH isolated evidence test",Width=740,Height=380,Left=60,Top=120,StartPosition=FormStartPosition.Manual,TopMost=true,ShowInTaskbar=false};
   button=new Button{Name="owned-button",Text="Owned test button",Left=15,Top=15,Width=190,Height=35};button.KeyPress+=(s,e)=>keys++;
@@ -97,6 +123,11 @@ public static class EvidenceProbe {
   custom=new EvidenceCustomEditor{Name="owned-custom",Left=15,Top=195,Width=300,Height=30,BackColor=Color.LightGray};
   animation=new Panel{Left=370,Top=15,Width=320,Height=260,BackColor=Color.Black};
   form.Controls.Add(button);form.Controls.Add(editor);form.Controls.Add(board);form.Controls.Add(custom);form.Controls.Add(animation);
-  form.Shown+=(s,e)=>{hwnd=form.Handle.ToInt64();button.Focus();var t=new Thread(Run);t.SetApartmentState(ApartmentState.MTA);t.IsBackground=true;t.Start();};Application.Run(form);
+  form.Shown+=(s,e)=>{hwnd=form.Handle.ToInt64();button.Focus();var t=new Thread(Run);t.SetApartmentState(ApartmentState.MTA);t.IsBackground=true;t.Start();};CheckLive();Application.Run(form);
+  }finally{
+   DshComputerUse.Worker.Program.ReleaseOwnedInputs();DshComputerUse.Worker.Program.ReleaseDesktopOwnership();
+   DshComputerUse.Worker.Panic.Disarm();DshComputerUse.Worker.Glow.Kill();
+   // No marker deletion or automatic resume. A real human pause/exit persists.
+  }
  }
 }

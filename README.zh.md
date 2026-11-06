@@ -9,7 +9,7 @@
 ![Codex 风格 Windows 桌面操控：观察、操作、验证](docs/images/01-codex-style.png)
 
 - **看得准，也点得动。** 截图、控件树与编号定位配合使用，支持点击、输入、拖拽、滚动和窗口操作。
-- **你接手，AI 等待，再接着做。** 1.3.0 提供 1.5 秒操作预告；非实际操控期间正常使用电脑，交回后重新观察并接续原任务。
+- **你接手，AI 等待，再接着做。** 2.0.0首次操作预告倒计时 1 秒；距上次提示不足 3 分钟时为 0.1 秒。交回后重新观察并接续原任务。
 - **更少往返，更省 Token。** 控件增量观察、区域与降采样截图，加上连续动作批量执行，减少重复观察和模型往返。
 
 ![人工接管与续接：先提醒、可接管、再继续](docs/images/02-handoff.png)
@@ -18,12 +18,12 @@
 
 上图为 **1.3.0 功能示意**。实际 Token 用量取决于任务、模型和观察方式。默认保留操作审批；明确暂停、取消和退出始终有效。
 
-**安装即用。** 18 个桌面工具，原生组件随包提供，无需 SDK 或安装时编译。支持 Windows、Node.js ≥ 22 和系统自带的 .NET Framework 4.x。独立社区插件；Codex 用于说明交互风格。
+**安装即用。** 19 个桌面工具，原生组件随包提供，无需 SDK 或安装时编译。支持 Windows、Node.js ≥ 22 和系统自带的 .NET Framework 4.x。独立社区插件；Codex 用于说明交互风格。
 
 <details>
 <summary>当前版本与兼容性</summary>
 
-**1.3.1** 是 npm `latest` 频道的当前版本：`dsh-codex-style-computer-use@1.3.1`。新增 worker 侧 OCR（逐词坐标）、可定位变化与识别光标闪烁的等待、UAC/锁屏感知与自动续接、以及绕过 IME 的剪贴板文本通道。更新已加载的旧版本后，按宿主提示重启。详见 [1.3.1](docs/RELEASE-1.3.1.md) 与 [GitHub Releases](https://github.com/ltmroberthk915/dsh-computer-use/releases)。
+**2.0.0** 为本次大版本，先发布至 npm `next`，通过仓库规定的 24 小时成熟期后再升稳定频道。详见 [2.0.0 变更与迁移](docs/RELEASE-2.0.0.md)，稳定版以 registry 标签为准。
 
 1.3.1 可直接从屏幕读字定位控件，察觉 Windows 安全桌面并在其结束后自动续接；所有颜色共用同一条按 DPI 换算的边缘光环，呼吸谷值保持可见。1.3.0 起工具用完可主动释放，聊天继续；正常收尾自动退出。
 
@@ -32,6 +32,12 @@
 </details>
 
 ## 它能做什么
+
+2.0.0在 AI 操作和保留现场时使用小巧的蓝色风筝光标：倾斜的尖端就是点击位置，文本、缩放等提示收在风筝中央。呼吸状态表示仍需保持页面与鼠标位置；放开现场后恢复应用原来的鼠标。Windows 鼠标主题保持原样。
+
+2.0.0进一步收紧 UIA 查询范围，并默认精简动作后的文字反馈；视觉模型仍保留原有图片检查。调用可用 `feedback: compact|full|none`，点击可用 `verificationRegion: "x,y,w,h"` 指定真正的结果区域。正常精简反馈在原动作回执之外最多增加 6 KiB 文字。完整点查证据可留在有容量与期限限制的本地缓存，按需读快照。磁盘失败先回退有界内存；如果无法保留可回读的快照，则直接完整返回已有证据，此时不受精简文字预算限制，不重复查询或操作。
+
+带过滤条件的 UIA 查询必须指定 `hwnd`，默认深度 6、最多 120 节点和 1200 毫秒软预算。深度大于 6 或节点上限大于 300 时，须提供该窗口内已测量的 `anchor:"x,y"`；精确 `id` 也不豁免。单次提供器调用可能超过软预算，部分结果不能证明目标不存在或唯一。窗口管理快捷键后，先用 `computer_state {windows:true}` 查看窗口，再成功激活目标并重新观察，随后才能继续键盘输入。
 
 - **观察** —— 窗口列表、截图（区域 / JPEG / PNG / 降采样）、可点元素的 Set-of-Marks 编号图，
   以及带精确 `AutomationId` 的 UI Automation 树。
@@ -42,8 +48,7 @@
 - **能传到模型的人为刹车** —— 停止事件被推入正在运行的会话，agent 当场知道自己被打断，
   而不是等到下一轮才发现。
 
-工具读的是桌面，不读你的文件。插件自己只写三处：worker 二进制
-（`%LOCALAPPDATA%\dsh-computer-use\worker\`）、审计日志与截图（`$DSH_HOME/data/computer-use/`）。
+工具观察桌面，不遍历用户文档。插件管理原生组件（`%LOCALAPPDATA%\dsh-computer-use\worker\`），以及 `$DSH_HOME/data/computer-use/` 下的审计日志、截图和自有 `observation-cache` 有界缓存。`computer_ctrl {action:"clear_cache"}` 只清理本 Agent 的观察缓存，不删除截图、附件或用户文档。
 
 ## 在 dsh-market 安装和更新
 
@@ -108,9 +113,9 @@ $CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
 
 ## 1.1 的按需控制
 
-- **按 Agent 加载：**未激活时暴露 `computer_use_activate`、`computer_ctrl`、`computer_ask`。成功读取 computer-use skill、确认规程或调用激活入口后，该 Agent 获得原有 18 个工具，加入口共 19 个。其他 Agent 和子 Agent 独立启用，支持原生调用和 Node `run_code`。激活本身不启动控制，也不释放人为刹车。
+- **按 Agent 加载：**未激活时暴露 `computer_use_activate`、`computer_ctrl`、`computer_ask`。成功读取 computer-use skill、确认规程或调用激活入口后，该 Agent 获得 19 个桌面工具，加入口共 20 个。其他 Agent 和子 Agent 独立启用，支持原生调用和 Node `run_code`。激活本身不启动控制，也不释放人为刹车。
 - **已观察的 UIA 目标：**指定窗口和 name/id 的聚焦查询默认生成 target 句柄。控件重建时，显式 `rebind:true` 才允许在同一窗口内进行唯一身份或语义匹配。上下文变化、歧义、扫描不完整时拒绝动作。宽查询需 `targets:true` 才生成恢复句柄，避免普通观察承担额外开销。
-- **增量观察：**重复相同查询并传入上一 observation 的 `since`，返回新增、变化、删除及顺序信息。每 Agent 保留最近 64 份完整快照，`snapshot` 可取回确切的历史结果。缺少基线、范围变化、证据不完整或增量更大时自动回退全量。
+- **增量观察：**重复相同查询并传入上一 observation 的 `since`，返回新增、变化、删除及顺序信息。快照按 Agent 隔离，每个 store 总计最多索引 64 份观察、在内存保留 4 MiB JSON。`snapshot` 可取回仍保留的历史结果，`offset` 和 `limit` 可分页读取数组。缺少基线、范围变化、证据不完整或增量更大时自动回退全量。
 
 保留的是提供器实际返回的完整字段，沿用原有提供器限制；历史快照不代替动作后的新验证。缓存上限和恢复边界见[详细协议](skills/computer-use/references/progressive-control.md)。
 
@@ -119,7 +124,7 @@ $CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
 | 分组 | 工具 |
 |---|---|
 | 激活 | `computer_use_activate` |
-| 观察 | `computer_state` `computer_shot` `computer_marks` `computer_uia` |
+| 观察 | `computer_state` `computer_shot` `computer_ocr` `computer_marks` `computer_uia` |
 | 操作 | `computer_click` `computer_move` `computer_drag` `computer_scroll` `computer_select` `computer_key` `computer_type` `computer_uia_act` `computer_window` `computer_clip` |
 | 流程 | `computer_wait` `computer_batch` |
 | 元 | `computer_ask` `computer_ctrl` |
@@ -157,7 +162,9 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 | 键 | 默认 | 含义 |
 |---|---:|---|
 | `automationMode` | `standard` | 审批模式（见上） |
-| `progressiveTools` | `true` | 按 Agent 激活；设为 `false` 可保留原有 18 个全局工具 |
+| `progressiveTools` | `true` | 按 Agent 激活；设为 `false` 全局暴露 19 个桌面工具 |
+| `actionFeedback` | `true` | 直接动作及批处理后自动观察 |
+| `actionFeedbackDetail` | `compact` | `compact`、`full` 或 `none`；单次调用的 `feedback` 可覆盖默认值；无法缓存时完整内联返回证据 |
 | `dryRun` | `false` | 只模拟操作并记录 |
 | `maxActionsPerMinute` | `60` | 核心层操作限速 |
 | `annotateMarks` | `true` | 在截图上绘制 Set-of-Marks 方框 |
@@ -171,6 +178,16 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 ```sh
 node mcp/src/index.js
 ```
+
+该入口随根包发布，运行时报告根包版本；默认只能观察桌面。启动它的宿主在负责桌面操作授权时，
+可以设置 `DSH_CU_ALLOW_INPUT=1`。模型调用工具不能开启输入：兼容工具 `cu_approve` 只说明授权来源，
+不会授予同意。DSH 的 `automationMode` 属于 Cordis 入口，不是 MCP 的审批服务。
+`DSH_CU_DRY_RUN=1` 只模拟已由宿主启用的输入。
+
+两个入口共享按键规范化、批次失败与接管后续行语义，以及图像坐标换算。MCP 保留截图时间、光标、
+稳定性和区域元数据，只附最后一张 PNG/JPEG，不把图像字节重复塞进 JSON。`cu_hold` / `cu_free`
+用于操作间保护或放开现场，`cu_release` 结束桌面周期；`cu_drag` 支持 `expectCursor` 与 `hwnd` 校验。
+MCP 工具范围较小，DSH 的人类提问和宿主生命周期集成仍由 Cordis 入口提供。
 
 ## 开发
 

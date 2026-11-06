@@ -9,7 +9,19 @@ import { execFileSync } from 'node:child_process'
 
 const source = path.resolve(import.meta.dirname, '../lib/core/worker.cs')
 const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
-// Functional baseline includes the overlay recovery, physical hotkey and kickoff changes.
+// Reviewed 2026-11-05 baseline includes adaptive preparation, scene hold/free, pointer companion,
+// capture/drag/UIA evidence and handoff diagnostics; functional fixtures cover those changes.
+// Re-reviewed 2026-11-06 against the 1.3.3 saved source: this release adds the
+// direct kite pointer, shared native shape classification and an early guardian
+// entrypoint with a bounded cursor visibility lease. The entire Glow painting
+// block is byte-identical. Pointer/pump/lease fixtures cover these changes;
+// cursor/drag fixtures retain native shape evidence and pre-dispatch checks.
+// Re-reviewed 2026-11-06 against frozen 1.3.4: native differences are bounded UIA
+// traversal/identity read budgets, exact window-management chord release and
+// target invalidation, requested pixel witness regions, shift-click receiver
+// guards, and honest BitBlt failure handling. The 12,315-character painting
+// block remains byte-identical (normalized LF); verification-region, UIA-budget,
+// and native-hardening fixtures cover the non-paint behavior independently.
 // Mask only the painting block and the two optional capture-presentation additions.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
@@ -18,7 +30,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  '25666785229b8df67d70db3a3b9b649c38e0377f1e11f62ced390637147de1c8',
+  "e454a206e9881bbd42014ba36bf011c4279e5ba0cebeb9e6f35de8a6ca970707",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')

@@ -51,7 +51,11 @@ const sent = []
 core.ready = true
 core.proc = { stdin: { write: value => sent.push(JSON.parse(value)) }, kill() {} }
 await assert.rejects(core.call('type', { text: 'fixture' }, 10), e => e.code === 'worker-timeout' && e.outcome === 'unknown')
-assert.equal(sent.length, 1); assert.equal(sent[0].op, 'type'); assert.equal(core.exited, false); checks++
+assert.deepEqual(sent.map(request => request.op), ['type', 'cancelInput'])
+assert.equal(sent.filter(request => request.op === 'type').length, 1)
+assert.equal(sent[1].args.requestId, sent[0].id)
+assert.equal(sent[1].args.__cycle, false)
+assert.equal(core.exited, false); checks++
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-task-rules-'))
 const data = { root: dir, shots: path.join(dir, 'shots') }
