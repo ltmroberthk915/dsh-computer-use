@@ -4,7 +4,7 @@
 
 你描述目标，AI 读准控件身份、按真实控件执行、回读结果——一段已知流程一轮模型往返就跑完，而不是每个动作各花一轮。
 
-[English](README.md) | 中文 · [安装](#在-dsh-market-安装和更新) · [版本记录](CHANGELOG.md) · [2.0.0 变更](docs/RELEASE-2.0.0.md)
+[English](README.md) | 中文 | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [安装](#在-dsh-market-安装和更新) · [版本记录](CHANGELOG.md) · [2.0.0 变更](docs/RELEASE-2.0.0.md)
 
 ![Codex 风格 Windows 桌面操控：观察、操作、验证](docs/images/01-codex-style.png)
 
