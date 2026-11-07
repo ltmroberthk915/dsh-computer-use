@@ -42,10 +42,4 @@
   <polygon points="14.13,10.64 22.07,14.43 19.87,22.96 11.93,19.17"
            fill="none" stroke="#CFEFFF" stroke-opacity=".95" stroke-width=".33" stroke-linejoin="round"/>
   <line x1="14.13" y1="10.64" x2="19.87" y2="22.96" stroke="#D5F2FF" stroke-opacity=".30" stroke-width=".25"/>
-
-  <!-- window-pane cross: platform cue without vendor colours -->
-  <line x1="17.0" y1="12.4" x2="17.0" y2="21.2" stroke="#06184F" stroke-opacity=".45" stroke-width="1.75" stroke-linecap="round"/>
-  <line x1="13.2" y1="16.8" x2="20.8" y2="16.8" stroke="#06184F" stroke-opacity=".45" stroke-width="1.75" stroke-linecap="round"/>
-  <line x1="17.0" y1="12.4" x2="17.0" y2="21.2" stroke="#F4FBFF" stroke-width=".86" stroke-linecap="round"/>
-  <line x1="13.2" y1="16.8" x2="20.8" y2="16.8" stroke="#F4FBFF" stroke-width=".86" stroke-linecap="round"/>
 </svg>
