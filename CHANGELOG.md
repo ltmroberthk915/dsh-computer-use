@@ -7,7 +7,8 @@
   is not cut off. A physically held key/button gets five windows (about 5 minutes)
   and then `HANDOFF_HELD_TIMEOUT`, so a stale held state cannot wait out the
   cooperative 3,600,000 ms deadline. Both codes map through `handoffResult()` as
-  `status:"continuation-required"` for the DSH tool and MCP paths. Host approval
+  `status:"continuation-required"` for the DSH tool and MCP paths, including after
+  a mid-actuation `HUMAN_YIELD` rewrap. Host approval
   waits happen before `waitForHuman` and remain governed by the host. The probe
   is JS-side only; the native worker is unchanged (#3 problem 2).
 - Regression coverage for #3/#4 on the production worker: idle mouse/keyboard

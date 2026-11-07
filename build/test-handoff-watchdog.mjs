@@ -94,5 +94,26 @@ const pending = () => new ComputerUse({ workerExe: 'X:/NOT-STARTED.exe' })
   assert.equal(handoffResult(error)?.status, 'continuation-required')
 }
 
+// 6. A timeout that happens AFTER HUMAN_YIELD (the worker already interrupted an
+//    in-flight actuation) must survive actuate()'s error rewrap as a continuation.
+{
+  const cu = pending()
+  cu.handoffWaitLimitMs = 80
+  cu.handoffRecoveryMs = 1000
+  cu.call = async (op) => {
+    if (op === 'key') {
+      handoff(cu)
+      throw Object.assign(new Error('physical input owns the desktop'), { code: 'HUMAN_YIELD', outcome: 'not-dispatched' })
+    }
+    if (op === 'ping') return { pong: true, cooperation: { phase: 'waiting', active: true, revision: 1, inputEpoch: 1, heldCount: 0, quietRemainingMs: 0 } }
+    throw new Error('unexpected call ' + op)
+  }
+  const error = await cu.actuate('key', { combo: 'enter' }).then(() => null, e => e)
+  assert.equal(error?.code, 'HANDOFF_WAIT_TIMEOUT')
+  assert.equal(error.continuation?.required, true, 'mid-yield timeout must keep its continuation after actuate() rewrap')
+  assert.equal(error.taskStatus, 'continuing')
+  assert.equal(handoffResult(error)?.status, 'continuation-required')
+}
+
 await tick()
 console.log('ok test-handoff-watchdog — silent handoff times out, missed idle recovers by ping, active input re-arms the deadline, held input is capped')
