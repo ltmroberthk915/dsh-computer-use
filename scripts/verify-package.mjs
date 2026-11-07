@@ -23,6 +23,15 @@ for (const [source, binary] of [
   assert.equal(manifest.architecture, 'x64')
 }
 for (const file of ['lib/index.js', 'lib/approval-attribution.js', 'lib/core/native-runtime.js', 'lib/attention-native.js', 'skills/computer-use/SKILL.md', 'mcp/src/index.js']) assert(fs.existsSync(path.join(root, file)), file)
+// The npx entry is model-facing documentation: a bin that is absent, points at a missing file,
+// or lacks the node shebang is a broken promise that the marketplace cannot detect.
+const bins = pkg.bin ?? {}
+assert(Object.keys(bins).length > 0, 'package must expose a bin for the embedded MCP server')
+for (const [name, target] of Object.entries(bins)) {
+  const file = path.join(root, target)
+  assert(fs.existsSync(file), `bin ${name} target missing: ${target}`)
+  assert(fs.readFileSync(file, 'utf8').startsWith('#!/usr/bin/env node'), `bin ${name} target needs a node shebang`)
+}
 const attention = fs.readFileSync(path.join(root, 'lib/attention-native.js'), 'utf8')
 assert(attention.includes("'./core/native-runtime.js'"), 'attention helper must use the bundled core')
 console.log(`ok package: ${pkg.name}@${pkg.version}; prebuilt helpers verified; no install hooks`)

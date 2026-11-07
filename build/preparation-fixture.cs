@@ -84,11 +84,21 @@ static class PreparationFixture
         Check(watch.ElapsedMilliseconds < 200, "same batch does not announce each primitive");
         cases.Add("one completed warning per coherent input series");
 
+        // NEW RULE (human, 2026-11-07): after a countdown the hands-off state counts as CONTINUOUS
+        // for 5 seconds, and an independent call inside that window shows no countdown at all.
+        watch.Restart(); Invoke("PrepareActuation", "key", Request("grace"));
+        Check(watch.ElapsedMilliseconds < 200, "independent call inside the 5s continuity window is exempt");
+        cases.Add("continuous-operation grace suppresses an independent countdown");
+
+        // Ending the window is the only way an independent call warns again inside three minutes;
+        // the fixture expires it directly so the adaptive 100ms path stays covered without sleeping.
+        Set(typeof(Program), "_noReannounceUntil", unchecked(Environment.TickCount - 1));
         present = Present(20, null); watch.Restart();
         Invoke("PrepareActuation", "key", Request("repeat")); present.Join();
         Check(Glow.PreparationMs == 100 && watch.ElapsedMilliseconds >= 120 && watch.ElapsedMilliseconds < 900,
-            "independent call within three minutes uses fully presented 100ms warning");
+            "independent call after the continuity window uses fully presented 100ms warning");
         Glow.Off();
+        Set(typeof(Program), "_noReannounceUntil", unchecked(Environment.TickCount - 1));
         present = Present(20, null); watch.Restart();
         Invoke("PrepareActuation", "key", Request("one")); present.Join();
         Check(Glow.PreparationMs == 100, "releasing a cycle does not erase in-process warning history");

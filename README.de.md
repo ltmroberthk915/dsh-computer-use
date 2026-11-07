@@ -197,6 +197,10 @@ Vorgänge mit hohem Risiko (ein Fenster schließen, `alt+f4`, `win+r` und Ähnli
 `mcp/` ist ein abhängigkeitsfreier MCP-stdio-Server über demselben Kern, für Clients, die MCP statt Cordis sprechen:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 

@@ -197,6 +197,10 @@ Operações de alto risco (fechar uma janela, `alt+f4`, `win+r` e similares) per
 `mcp/` é um servidor MCP stdio sem dependências sobre o mesmo núcleo, para clientes que falam MCP em vez de Cordis:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 

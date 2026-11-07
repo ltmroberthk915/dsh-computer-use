@@ -26,7 +26,8 @@ const result = JSON.parse(execFileSync(exe, [evidence], { windowsHide: true, tim
   DSH_COMPUTER_USE_EXIT_FILE: path.join(dir, 'EXITED'), DSH_COMPUTER_USE_AUDIT_LOG: path.join(dir, 'audit.log'),
   DSH_COMPUTER_USE_OWNER_FILE: path.join(dir, 'desktop.owner'),
 } }))
-assert.equal(result.passed, 11)
+// 11 checks before 2026-11-07 + 1 for the continuous-operation grace window (human rule).
+assert.equal(result.passed, 12)
 assert.equal(result.nativeInput, false)
 assert.equal(result.visibleOverlay, false)
 fs.writeFileSync(path.join(evidence, 'logic.json'), JSON.stringify(result, null, 2))

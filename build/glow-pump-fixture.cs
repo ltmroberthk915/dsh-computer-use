@@ -184,6 +184,9 @@ static class GlowPumpFixture
             if (!Glow.Holding || Glow.DeriveWant(true, 3) != 8)
                 throw new Exception("completed input failed to preserve the scene ahead of screenshot flash");
             long firstMs = clock.ElapsedMilliseconds;
+            // The continuity window (human rule 2026-11-07) would exempt this repeat; this fixture
+            // is about the PRESENTED 100 ms path, so it ends the window deliberately.
+            Program.ResetReannounceGrace();
             ResetPresentationClock(); events.Clear(); clock.Restart();
             long repeatStarted = Stopwatch.GetTimestamp();
             KeyRequest(2);

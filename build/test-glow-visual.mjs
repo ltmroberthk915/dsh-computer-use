@@ -22,7 +22,23 @@ const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
 // guards, and honest BitBlt failure handling. The 12,315-character painting
 // block remains byte-identical (normalized LF); verification-region, UIA-budget,
 // and native-hardening fixtures cover the non-paint behavior independently.
-// Mask only the painting block and the two optional capture-presentation additions.
+// Re-reviewed 2026-11-07 (human rule): the countdown follows CONTINUITY OF A HANDS-OFF STATE, with
+// no state fabricated anywhere. PrepareActuation gained a sliding grace window: after one countdown
+// no further countdown of any duration is shown for the next 5 s, and every dispatched mutation
+// pushes that deadline forward (MarkMutation), so a continuous sequence stays exempt indefinitely
+// while a real pause lets the window lapse and the next action warns again. The window is RESET when
+// the hands-off state itself ends (Glow.Kill → cycle release/calm/brake), so a later sequence warns
+// from scratch. Glow's derivation, the 8-state ladder, the painting block and the pointer
+// replacement are untouched — the kite still appears only for real acting/holding.
+// Re-reviewed 2026-11-07 (fourth change, measured live with Word): SAME-INPUT-FAMILY. A modal
+// dialog of the same app (Find/Replace, Save As) is a different hwnd that takes the foreground and
+// used to be refused as INPUT_TARGET_CHANGED (keys) / KICKOFF-FOCUS-REQUIRED (screenshots), which
+// made dialogs a blind black hole. Now: keyboard and point receivers accept a same-family
+// foreground (same pid, descendant process, or owned/parented window) and follow it; activate
+// adopts a modal dialog and reports hwnd+modalOf; the kickoff capture check accepts the family
+// foreground. Mouse clicks keep the strict pixel-owner check — nothing is retargeted for clicks.
+// Re-reviewed 2026-11-07 (fifth change): computer_focus / op focusField. Typing follows the focused control, not the window (measured: Word kept focus in the document while the Find dialog was foreground). The op clicks the field, reports the UIA focused control, and proves a caret either from GUITHREADINFO or a two-frame blink comparison; calls land in DrivesMachineOps so brake/audit/halo apply. New tool: computer_focus. Painting block untouched.
+// Re-reviewed 2026-11-07 (fifth change): computer_focus / op focusField. Typing follows the focused control, not the window (measured: Word kept focus in the document while the Find dialog was foreground). The op clicks the field, reports the UIA focused control, and proves a caret either from GUITHREADINFO or a two-frame blink comparison; calls land in DrivesMachineOps so brake/audit/halo apply. New tool: computer_focus. Painting block untouched.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -30,7 +46,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  "e454a206e9881bbd42014ba36bf011c4279e5ba0cebeb9e6f35de8a6ca970707",
+  "eeb9a7fb6c59a243101a3fac3766a9beef061d2702c5458cbe1990dcae35d87a",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')

@@ -213,6 +213,10 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 than Cordis:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 
@@ -252,6 +256,10 @@ node build/verify-tools-schema.mjs                                   # tool-sche
 The tool definitions are compiled through the real `@deepseek-ai/dsh-tools` DSL, so a schema mistake
 fails here instead of taking the host's plugin tree down on restart. Some guards compile the native
 worker and are Windows-only.
+
+Publishing runs `npm run verify:package` first: it checks the packed identity, the prebuilt helper
+hashes and every `bin` entry (target present, node shebang). It is deliberately not a publish hook —
+the package ships no lifecycle scripts — so run it yourself immediately before `npm publish`.
 
 ## License
 

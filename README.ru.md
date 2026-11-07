@@ -210,6 +210,10 @@ $CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
 `mcp/` — MCP-сервер stdio без зависимостей поверх того же ядра, для клиентов, которые говорят на MCP, а не на Cordis:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 

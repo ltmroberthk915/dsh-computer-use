@@ -489,8 +489,22 @@ namespace DshComputerUse.Worker
         // ---- focus / integrity probing (2026-09-13 "typing never lands" investigation) ----
         [DllImport("user32.dll")]
         public static extern IntPtr GetParent(IntPtr hWnd);
+        // GW_OWNER=4: a modal dialog's owner is the window that opened it (SameInputFamily).
         [DllImport("user32.dll")]
-        public static extern bool IsWindow(IntPtr hWnd);
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+        // ---- caret evidence: where WOULD the next character go? ----
+        // GUITHREADINFO reports the caret for the FOREGROUND THREAD without AttachThreadInput, and
+        // works in apps where UIA has no TextPattern (Word's document, many Win32 editors).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct GUITHREADINFO
+        {
+            public int cbSize;
+            public int flags;
+            public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+            public RECT rcCaret;
+        }
+        [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+        [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
         [DllImport("user32.dll")]
         public static extern IntPtr WindowFromPoint(POINT p);
         [DllImport("user32.dll")]
@@ -512,6 +526,24 @@ namespace DshComputerUse.Worker
         public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool CloseHandle(IntPtr h);
+        // ---- process ancestry: is a covered window the target app's OWN embedded renderer? ----
+        // A WeChat article panel (WeChatAppEx) or an Electron utility process is a legitimate
+        // descendant of the app the caller aimed at; an unrelated window on top is not.
+        public const uint TH32CS_SNAPPROCESS = 0x00000002;
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct PROCESSENTRY32W
+        {
+            public uint dwSize, cntUsage, th32ProcessID;
+            public IntPtr th32DefaultHeapID;
+            public uint th32ModuleID, cntThreads, th32ParentProcessID, pcPriClassBase, dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32W entry);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32W entry);
         // ---- host guard: which executable is the process that owns this window? ----
         // OpenProcess + QueryFullProcessImageName is the ONLY safe way to ask: Process.MainModule
         // throws for any process this worker may not read (see IsHostPid).
@@ -739,6 +771,9 @@ namespace DshComputerUse.Worker
         {
             _sceneVisible = false; _preparing = false; _thinking = false; _flashStart = 0;
             _killNow = true;
+            // The hands-off state is over (release/calm/brake): the countdown continuity window
+            // must not survive into the next sequence.
+            Program.ResetReannounceGrace();
         }
 
         // Cyan thinking/monitoring is a lifecycle latch, with no elapsed-time expiry. Off/Kill
@@ -2870,7 +2905,12 @@ namespace DshComputerUse.Worker
             // "calibrate" drives too — it walks the pointer across the screen to prove pixel==click.
             // (selectRange / shiftClick / calibrate were found by build/test-op-classification.mjs on
             // its first run: three real dispatcher ops the hand-written list had simply missed.)
-            "calibrate"
+            "calibrate",
+            // "launch" starts a process: the machine changes, so it may not re-open a session the
+            // human ended (Ctrl+Alt+Q) and it must not answer while a brake is up.
+            "launch",
+            // "focusField" clicks a field: it drives the machine exactly like a click.
+            "focusField"
         };
 
         static readonly HashSet<string> ReadOnlyOps = new HashSet<string> {
@@ -3436,6 +3476,23 @@ namespace DshComputerUse.Worker
         static volatile bool _operationLive, _operationDispatched;
         static bool _operationActing;
         static string _lastAnnouncedSeries;
+        // CONTINUOUS-OPERATION GRACE (human rule 2026-11-07): after one purple countdown the human
+        // has been told to keep hands off. While operations keep arriving inside this sliding
+        // window, the "do not intervene" state is CONTINUOUS, so no further countdown of any
+        // duration is shown. Every dispatched mutation pushes the deadline forward, which is what
+        // makes a real sequence exempt indefinitely; a gap longer than the window ends continuity
+        // and the next action warns again. Wrap-safe comparison: both sides are TickCount deltas
+        // bounded by the window itself.
+        const int ReannounceGraceMs = 5000;
+        static int _noReannounceUntil;
+        static bool InReannounceGrace()
+        { return unchecked(_noReannounceUntil - Environment.TickCount) > 0; }
+        static void ExtendReannounceGrace()
+        { _noReannounceUntil = unchecked(Environment.TickCount + ReannounceGraceMs); }
+        /** Ends the continuity window. Called when the hands-off state itself ends (cycle release,
+         *  calm, brake), because a later action then genuinely starts a new sequence. */
+        public static void ResetReannounceGrace()
+        { _noReannounceUntil = 0; }
         static long _announcedHumanRevision, _announcedInputEpoch, _preparedInputEpoch;
         static volatile int _activeRequestId, _lastCompletedRequestId;
         // The seam is internal to the compiled program; no tool can replace it.
@@ -3462,12 +3519,47 @@ namespace DshComputerUse.Worker
             if (actual != expected) return "input receiver changed from hwnd=" + expected + " to hwnd=" + actual;
             return null;
         }
+
+        /// True when two windows belong to the SAME input family: the same window, another window
+        /// of the same process, a descendant process's window (an embedded renderer), or a window
+        /// owned/parented by the other. A modal dialog (Find/Replace, Save As, a browser file
+        /// picker) is a DIFFERENT hwnd in the SAME process that takes the foreground while the
+        /// operation it belongs to is still running — treating it as foreign made dialogs a
+        /// keyboard black hole and blocked the screenshot that would have shown the question.
+        public static bool SameInputFamily(IntPtr a, IntPtr b)
+        {
+            if (a == b) return true;
+            if (a == IntPtr.Zero || b == IntPtr.Zero) return false;
+            uint pa = PidOf(a), pb = PidOf(b);
+            if (pa == 0 || pb == 0) return false;
+            if (pa == pb) return true;
+            if (ProcessDescendsFrom(unchecked((int)pb), unchecked((int)pa)) ||
+                ProcessDescendsFrom(unchecked((int)pa), unchecked((int)pb))) return true;
+            IntPtr x = b;
+            for (int hop = 0; hop < 8 && x != IntPtr.Zero; hop++)
+            {
+                IntPtr owner = Native.GetWindow(x, 4);          // GW_OWNER
+                if (owner == a) return true;
+                IntPtr parent = Native.GetParent(x);
+                if (parent == a) return true;
+                x = owner != IntPtr.Zero ? owner : parent;
+            }
+            return false;
+        }
+
         static IDisposable GuardReceiver(IntPtr expected, uint pid, bool keyboard)
         {
             return new ReceiverScope(delegate {
                 IntPtr actual = keyboard ? InputForeground() : InputPointReceiver();
                 string problem = InputReceiverProblem(expected.ToInt64(), pid, InputWindowExists(expected), InputWindowPid(expected), actual.ToInt64());
-                if (problem != null) throw InputInterrupted("INPUT_TARGET_CHANGED", problem + ". Remaining input was refused; inspect any partial effect before retrying.");
+                if (problem != null)
+                {
+                    // Same-family foreground for KEYBOARD only: the dialog is where the keystrokes
+                    // belong, so accept it and follow it. Mouse/point receivers keep the strict
+                    // check — a click must land on the pixel's real owner, never be retargeted.
+                    if (keyboard && SameInputFamily(expected, TopLevel(actual))) { SetSticky(TopLevel(actual)); return; }
+                    throw InputInterrupted("INPUT_TARGET_CHANGED", problem + ". Remaining input was refused; inspect any partial effect before retrying.");
+                }
             });
         }
 
@@ -3492,6 +3584,9 @@ namespace DshComputerUse.Worker
         static void MarkMutation()
         {
             Panic.Check("actuation"); BeginActuation(); CheckHumanInput(); _operationDispatched = true;
+            // Every dispatched mutation slides the grace window: a continuous sequence therefore
+            // stays exempt indefinitely, while a real pause lets the window lapse.
+            ExtendReannounceGrace();
         }
         static void BeginActuation()
         {
@@ -3527,6 +3622,14 @@ namespace DshComputerUse.Worker
                     throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop between batch steps. Obtain fresh target evidence and continue the remaining task without replaying completed input.");
                 _preparedInputEpoch = Panic.InputEpoch; return;
             }
+            // Inside the sliding grace the sequence is still in progress: no countdown of any
+            // duration, but a desktop change still refuses (the human may have taken over).
+            if (InReannounceGrace())
+            {
+                if (_announcedInputEpoch != Panic.InputEpoch)
+                    throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop between actions. Obtain fresh target evidence and continue the remaining task without replaying completed input.");
+                _preparedInputEpoch = Panic.InputEpoch; return;
+            }
             Panic.Check(op); CheckHumanInput();
             long inputEpoch = Panic.InputEpoch;
             IntPtr foreground = PreparationForeground();
@@ -3553,6 +3656,7 @@ namespace DshComputerUse.Worker
                     throw InputInterrupted("HUMAN_REOBSERVE", "The user changed the desktop during the preparation cue. No action was dispatched. Preserve the task, obtain fresh target evidence, and continue the authorized task immediately; this is not cancellation or abandonment.");
                 _lastAnnouncedSeries = series; _announcedHumanRevision = Panic.HumanRevision;
                 _announcedInputEpoch = _preparedInputEpoch = inputEpoch;
+                ExtendReannounceGrace();
             }
             finally { Glow.Prepare(false); }
         }
@@ -4136,6 +4240,8 @@ namespace DshComputerUse.Worker
                 case "type": FailsafeCheck(a); return Ok(Type(a));
                 case "clipRead": return Ok(ClipRead(a));
                 case "clipWrite": FailsafeCheck(a); return Ok(ClipWrite(a));
+                case "launch": FailsafeCheck(a); return Ok(Launch(a));
+                case "focusField": FailsafeCheck(a); return Ok(FocusField(a));
                 case "windows": return Ok(Windows(a));
                 case "activate": FailsafeCheck(a); return Ok(Activate(a));
                 case "windowOp": FailsafeCheck(a); return Ok(WindowOp(a));
@@ -4840,7 +4946,20 @@ namespace DshComputerUse.Worker
                     return dry;
                 }
                 if (hostVictim) throw new Exception(HostGuardMsg("click", unchecked((int)PidOf(under))));
-                if (blocked != null && !GetB(a, "allowCovered", false))
+                bool allowCovered = GetB(a, "allowCovered", false);
+                // NARROWED (2026-11-07): allowCovered is an escape for the target app's OWN embedded
+                // renderer only. It used to authorise the click whatever owned the pixel, so an
+                // unrelated front window could receive input meant for the target app — measured
+                // live when a covered click landed on the agent's own GUI instead of WeChat. An
+                // ancestor test cannot be spoofed by z-order: the receiver must be the target's
+                // descendant process (WeChatAppEx under Weixin.exe, an Electron utility process).
+                if (allowCovered && blocked == "COVERED" &&
+                    !ProcessDescendsFrom(unchecked((int)PidOf(under)), unchecked((int)PidOf(want))))
+                    throw new Exception("precondition failed (COVERED-UNRELATED): " + detail +
+                        ". allowCovered only authorises the target application's own embedded renderer " +
+                        "(a descendant of the target process); an unrelated window on top is never clicked. " +
+                        "NOTHING was clicked. Bring the target into view, or aim at a pixel inside it.");
+                if (blocked != null && !allowCovered)
                     throw new Exception("precondition failed (" + blocked + "): " + detail + ". NOTHING was clicked. " +
                         "Bring the target into view first (activate / move / restore), or pass allowCovered:true to click anyway. " +
                         "Use computer_uia at:\"" + tx + "," + ty + "\" for the full ground truth.");
@@ -5024,7 +5143,7 @@ namespace DshComputerUse.Worker
             AgentActing(a, "scroll");
             if (a.ContainsKey("x") && a.ContainsKey("y")) Move(a);
             IntPtr scrollTarget = InputPointReceiver();
-            if (_stickyHwnd != IntPtr.Zero && scrollTarget != _stickyHwnd && InputWindowPid(scrollTarget) != InputWindowPid(_stickyHwnd))
+            if (_stickyHwnd != IntPtr.Zero && scrollTarget != _stickyHwnd && !SameInputFamily(_stickyHwnd, scrollTarget))
                 throw InputInterrupted("INPUT_TARGET_CHANGED", "Scroll receiver differs from the observed target. No wheel input was sent.");
             using (GuardReceiver(scrollTarget, InputWindowPid(scrollTarget), false)) {
                 for (int i = 0; i < lines; i++) {
@@ -5981,6 +6100,103 @@ namespace DshComputerUse.Worker
             return Dict("written", true, "chars", text.Length);
         }
 
+        // ---------- launch: open an app / URL / folder / document in ONE op ----------
+        // WHY THIS IS AN OP AND NOT A SIDE-EFFECT IN THE PLUGIN (2026-11-07, measured): the
+        // plugin's first version spawned explorer from Node. It worked, but it never touched the
+        // worker — so the status halo never lit, the human got no signal that the machine had just
+        // been acted on, and audit/rate/cooperation had to be re-implemented by hand. This op puts
+        // launch on the SAME funnel as every other actuation.
+        //
+        // RESOLUTION IS ShellExecute's, not ours: ProcessStartInfo.UseShellExecute resolves App
+        // Paths aliases ("calc"), shell: verbs, URLs, folders and document associations exactly
+        // like the Run dialog. Measured on this machine: `explorer.exe calc` opens a FILE EXPLORER
+        // window (a bare word is a location to explorer), while ShellExecute("calc") starts the
+        // Calculator — so the launcher, not a shell wrapper, is the correct resolver.
+        //
+        // INJECTION: the target crosses as ONE Executable/FileName value. No command line is
+        // composed, no shell interpreter is involved, and nothing is appended after the target —
+        // the same argv-boundary argument the plugin's validate() documents.
+        static Dictionary<string, object> Launch(Dictionary<string, object> a)
+        {
+            string target = GetS(a, "target", "");
+            if (target.Length == 0) throw new Exception("LAUNCH_BAD_TARGET: target is empty");
+            // Optional arguments (2026-11-07). A dedicated browser profile is a LAUNCHER argument,
+            // not part of the target: without this the only route to `msedge.exe --user-data-dir=…`
+            // was Win+R, which the input guard reports as INPUT_TARGET_CHANGED after the chord has
+            // already landed and then refuses screenshots of the dialog it just opened.
+            string arguments = LaunchArguments(a);
+            // Same gate as every other mutation: brake/pause/human-input checks run BEFORE the
+            // process is started, and the deep steady blue says "the machine is being acted on".
+            AgentActing(a, "launch");
+            MarkMutation();
+            System.Diagnostics.Process started = null;
+            try
+            {
+                var info = new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true };
+                if (arguments.Length != 0) info.Arguments = arguments;
+                started = System.Diagnostics.Process.Start(info);
+            }
+            catch (Exception e)
+            {
+                throw new Exception("LAUNCH_FAILED: " + e.Message);
+            }
+            // A launch returns in milliseconds; a 5 ms flash is invisible to a human. Hold the lit
+            // border for a short, SELF-EXPIRING tail (Glow.Touch) instead of a latch, so this can
+            // never claim the machine is still being driven after the action has finished.
+            int tailMs = GetI(a, "tailMs", 2500);
+            if (tailMs > 0)
+            {
+                tailMs = Math.Min(10000, tailMs);
+                Glow.Enabled = true;
+                Glow.Touch(tailMs);
+            }
+            int pid = 0;
+            try { if (started != null) pid = started.Id; } catch { pid = 0; }
+            return Dict("launched", true, "target", target, "pid", pid, "glowMs", Math.Max(0, tailMs));
+        }
+
+        /// Quote ONE argument the way CommandLineToArgvW parses it back. Quoting happens here,
+        /// exactly once: the caller passes an array of values, never a pre-built command line.
+        static string QuoteArgument(string s)
+        {
+            if (s.Length > 0 && s.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return s;
+            var sb = new StringBuilder();
+            sb.Append('"');
+            int backslashes = 0;
+            foreach (char c in s)
+            {
+                if (c == '\\') { backslashes++; continue; }
+                if (c == '"') { sb.Append('\\', backslashes * 2 + 1); sb.Append('"'); backslashes = 0; continue; }
+                if (backslashes > 0) { sb.Append('\\', backslashes); backslashes = 0; }
+                sb.Append(c);
+            }
+            if (backslashes > 0) sb.Append('\\', backslashes * 2);
+            sb.Append('"');
+            return sb.ToString();
+        }
+
+        /// Validate the optional `args` array and turn it into one Windows command line.
+        static string LaunchArguments(Dictionary<string, object> a)
+        {
+            object raw;
+            if (!a.TryGetValue("args", out raw) || raw == null) return "";
+            if (raw is string) throw new Exception("LAUNCH_BAD_ARGS: args must be an array of strings, not a string");
+            var list = raw as System.Collections.IEnumerable;
+            if (list == null) throw new Exception("LAUNCH_BAD_ARGS: args must be an array of strings");
+            var parts = new List<string>();
+            foreach (object item in list)
+            {
+                if (item == null) throw new Exception("LAUNCH_BAD_ARGS: null argument");
+                string s = Convert.ToString(item);
+                if (s.Length == 0) throw new Exception("LAUNCH_BAD_ARGS: empty argument");
+                if (s.Length > 2000) throw new Exception("LAUNCH_BAD_ARGS: argument longer than 2000 characters");
+                if (s.IndexOf('\0') >= 0) throw new Exception("LAUNCH_BAD_ARGS: NUL in argument");
+                parts.Add(QuoteArgument(s));
+            }
+            if (parts.Count > 64) throw new Exception("LAUNCH_BAD_ARGS: more than 64 arguments");
+            return string.Join(" ", parts);
+        }
+
         // ---------- windows ----------
         static Dictionary<string, object> RectDict(RECT r)
         {
@@ -6104,16 +6320,25 @@ namespace DshComputerUse.Worker
             // guard, which must re-assert the same window before typing).
             string how = RefocusWindow(h, GetB(a, "clickFallback", true));
             uint confirmedPid = 0;
-            if (how == null || !Native.IsWindow(h) || !IsForeground(h) || (confirmedPid = PidOf(h)) == 0) how = "failed";
+            long modalOf = 0;
+            IntPtr foreground = Native.GetForegroundWindow();
+            // A MODAL DIALOG of the same app becomes the real input receiver (Find/Replace, Save As,
+            // a print dialog). Confirming the parent instead left every later key and screenshot
+            // refused while the app was literally waiting for an answer.
+            IntPtr dialog = (foreground != IntPtr.Zero && foreground != h && SameInputFamily(h, foreground)) ? foreground : IntPtr.Zero;
+            IntPtr confirmed = dialog != IntPtr.Zero ? dialog : h;
+            if (how == null || !Native.IsWindow(h) || (confirmedPid = PidOf(confirmed)) == 0 || !IsForeground(confirmed)) how = "failed";
             else
             {
-                SetSticky(h);
-                _kickoffFocus.Confirm(h.ToInt64(), confirmedPid);
+                if (dialog != IntPtr.Zero) modalOf = h.ToInt64();
+                SetSticky(confirmed);
+                _kickoffFocus.Confirm(confirmed.ToInt64(), confirmedPid);
             }
             CheckHumanInput();
             if (how != "failed") _keyboardReobserveRequired = false;
             return Dict("activated", how != "failed", "activatedVia", how,
-                        "hwnd", h.ToInt64(), "pid", confirmedPid == 0 ? null : (object)confirmedPid,
+                        "hwnd", confirmed.ToInt64(), "pid", confirmedPid == 0 ? null : (object)confirmedPid,
+                        "modalOf", modalOf == 0 ? null : (object)modalOf,
                         "hint", how == "failed"
                             ? "foreground lock refused every method; click the window (or its taskbar button) and retry"
                             : null);
@@ -6158,7 +6383,9 @@ namespace DshComputerUse.Worker
             long target = _kickoffFocus.Target;
             string problem = _kickoffFocus.CaptureProblem(true, false, false,
                 Native.IsWindow(new IntPtr(target)), foreground.ToInt64(), pid, false);
-            return problem == null ? target : 0;
+            if (problem == null) return target;
+            // Same-family foreground (a dialog of this app) is the target now.
+            return target != 0 && SameInputFamily(new IntPtr(target), foreground) ? foreground.ToInt64() : 0;
         }
         static void ValidateKickoffCapture(Dictionary<string, object> a)
         {
@@ -6168,6 +6395,9 @@ namespace DshComputerUse.Worker
             IntPtr fg = TopLevel(Native.GetForegroundWindow());
             string problem = _kickoffFocus.CaptureProblem(Panic.CycleLit, Panic.Stopped, Panic.Exited,
                 target != IntPtr.Zero && Native.IsWindow(target), fg.ToInt64(), PidOf(fg), IsHostWindow(fg));
+            // A dialog of the same app is the target now (its hwnd replaced the one we confirmed):
+            // refusing there blocked the very screenshot that shows what the dialog is asking.
+            if (problem != null && target != IntPtr.Zero && SameInputFamily(target, fg)) return;
             if (problem != null)
             {
                 // NAME THE ACTUAL FOREGROUND (test report 2026-11-04): "identify the intended
@@ -6487,6 +6717,39 @@ namespace DshComputerUse.Worker
         {
             if (h == IntPtr.Zero) return false;
             return IsHostPid(unchecked((int)PidOf(h)));
+        }
+
+        /// True when `child` is `ancestor` itself or a descendant process of it (bounded walk).
+        /// This is the ONLY relationship that makes a covered click legitimate: the target app's
+        /// own embedded renderer (e.g. WeChatAppEx under Weixin.exe). An unrelated window that
+        /// happens to be on top must never receive the input.
+        public static bool ProcessDescendsFrom(int child, int ancestor)
+        {
+            if (child <= 0 || ancestor <= 0) return false;
+            if (child == ancestor) return true;
+            IntPtr snapshot = Native.CreateToolhelp32Snapshot(Native.TH32CS_SNAPPROCESS, 0);
+            if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) return false;
+            try
+            {
+                uint size = (uint)Marshal.SizeOf(typeof(Native.PROCESSENTRY32W));
+                int pid = child;
+                for (int hop = 0; hop < 16 && pid > 0; hop++)
+                {
+                    var entry = new Native.PROCESSENTRY32W();
+                    entry.dwSize = size;
+                    if (!Native.Process32FirstW(snapshot, ref entry)) return false;
+                    int parent = 0;
+                    do
+                    {
+                        if (unchecked((int)entry.th32ProcessID) == pid) { parent = unchecked((int)entry.th32ParentProcessID); break; }
+                    } while (Native.Process32NextW(snapshot, ref entry));
+                    if (parent <= 0) return false;
+                    if (parent == ancestor) return true;
+                    pid = parent;
+                }
+                return false;
+            }
+            finally { try { Native.CloseHandle(snapshot); } catch { } }
         }
 
         /// Did the host identity reach us from the launcher? The keyboard half of the human-presence
@@ -6962,6 +7225,113 @@ namespace DshComputerUse.Worker
         }
 
 
+
+        // ---------- focus: put the keyboard somewhere, and PROVE it before typing ----------
+        // Typing follows the focused CONTROL, not the foreground window: activating Word's Find
+        // dialog and typing still landed in the document (measured 2026-11-07 — "abc" was inserted
+        // into the .doc while the field stayed empty). This op clicks the field, reports where focus
+        // actually went (UIA focused element), and whether a caret is provable there, so a caller
+        // can refuse to type into an unproven field instead of discovering it in the file.
+        static Dictionary<string, object> FocusedElementReport()
+        {
+            try
+            {
+                AutomationElement fe = AutomationElement.FocusedElement;
+                if (fe == null) return Dict("available", false);
+                string type = null, name = null, id = null;
+                try { type = fe.Current.ControlType.ProgrammaticName; } catch { }
+                try { name = fe.Current.Name; } catch { }
+                try { id = fe.Current.AutomationId; } catch { }
+                return Dict("available", true, "controlType", type, "name", Short(name, 48), "automationId", id);
+            }
+            catch (Exception e) { return Dict("available", false, "error", e.GetType().Name); }
+        }
+
+        static Dictionary<string, object> CaretReport()
+        {
+            try
+            {
+                Native.GUITHREADINFO info = new Native.GUITHREADINFO();
+                info.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
+                IntPtr fg = Native.GetForegroundWindow();
+                uint pid;
+                uint thread = Native.GetWindowThreadProcessId(fg, out pid);
+                if (thread == 0 || !Native.GetGUIThreadInfo(thread, ref info) || info.hwndCaret == IntPtr.Zero)
+                    return Dict("available", false);
+                POINT p = new POINT();
+                p.X = info.rcCaret.Left; p.Y = info.rcCaret.Top;
+                Native.ClientToScreen(info.hwndCaret, ref p);
+                return Dict("available", true, "x", p.X, "y", p.Y,
+                            "height", Math.Max(1, info.rcCaret.Bottom - info.rcCaret.Top));
+            }
+            catch (Exception e) { return Dict("available", false, "error", e.GetType().Name); }
+        }
+
+        static Dictionary<string, object> FocusField(Dictionary<string, object> a)
+        {
+            int x = GetI(a, "x", int.MinValue), y = GetI(a, "y", int.MinValue);
+            if (x == int.MinValue || y == int.MinValue)
+                throw new Exception("FOCUS_POINT_REQUIRED: focus needs the field's x,y in screen pixels; nothing was clicked");
+            IntPtr want = a.ContainsKey("hwnd") && GetI(a, "hwnd", 0) != 0 ? new IntPtr(GetI(a, "hwnd", 0)) : IntPtr.Zero;
+            AgentActing(a, "focusField");
+            MarkMutation();
+            if (want != IntPtr.Zero) { RefocusWindow(want, true); Thread.Sleep(60); }
+            AnimatedMove(x, y, GetI(a, "dur", 140));
+            Thread.Sleep(GetI(a, "settleMs", 90));
+            IntPtr under = InputPointReceiver();
+            IntPtr target = want != IntPtr.Zero ? want : TopLevel(under);
+            if (!SameInputFamily(target, under))
+                throw new Exception("precondition failed (COVERED): the pixel belongs to \"" + Short(WinTitleOf(under), 40) + "\" (pid " +
+                    PidOf(under) + "), not to the window you aimed at. NOTHING was clicked.");
+            using (GuardReceiver(under, InputWindowPid(under), false))
+            {
+                SendMouse(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
+                Thread.Sleep(30);
+                SendMouse(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0);
+            }
+            // The click moved focus inside this app: confirm the foreground as the observation
+            // target, or the capture that must prove the field would be refused as unconfirmed.
+            IntPtr fgTop = TopLevel(Native.GetForegroundWindow());
+            if (fgTop != IntPtr.Zero)
+            {
+                SetSticky(fgTop);
+                _kickoffFocus.Confirm(fgTop.ToInt64(), PidOf(fgTop));
+            }
+            EndActuationForReadback();
+            Thread.Sleep(GetI(a, "readDelayMs", 180));
+            Dictionary<string, object> focused = FocusedElementReport();
+            Dictionary<string, object> caret = CaretReport();
+            object rawType;
+            string controlType = focused.TryGetValue("controlType", out rawType) ? Convert.ToString(rawType) : null;
+            bool textTarget = controlType != null &&
+                (controlType.IndexOf("Edit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 controlType.IndexOf("Document", StringComparison.OrdinalIgnoreCase) >= 0);
+            bool caretVisible = caret.ContainsKey("available") && Convert.ToBoolean(caret["available"]);
+            // UNCERTAIN CASE: the OS reports no caret (browser content, some editors). Fall back to
+            // the one property a caret always has — it blinks: two tight crops 260 ms apart differ.
+            bool blink = false;
+            if (!caretVisible && GetB(a, "verifyCaret", true))
+            {
+                int bx = Math.Max(0, x - 30), by = Math.Max(0, y - 16);
+                byte[] first = FrameSignatureRect(bx, by, 60, 32, 2);
+                Thread.Sleep(260);
+                byte[] second = FrameSignatureRect(bx, by, 60, 32, 2);
+                blink = first != null && second != null && first.Length == second.Length && SigDiffPct(first, second, 8) >= 0.05;
+            }
+            bool verified = textTarget && (caretVisible || blink);
+            return Dict(
+                "clicked", Dict("x", x, "y", y),
+                "receiver", under == IntPtr.Zero ? null : (object)(Short(WinTitleOf(under), 40) + " (pid " + PidOf(under) + ")"),
+                "focused", focused,
+                "textTarget", textTarget,
+                "caret", caret,
+                "caretVerified", caretVisible,
+                "caretBlink", blink,
+                "verified", verified,
+                "reason", verified ? null : (textTarget
+                    ? "focus reached a text control but no caret is provable; capture the field, click it again, and re-check before typing"
+                    : "focus landed on a non-text control (" + (controlType ?? "unknown") + "); click a field before typing"));
+        }
 
         static Dictionary<string, object> WindowOp(Dictionary<string, object> a)
         {

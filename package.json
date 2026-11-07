@@ -1,9 +1,13 @@
 {
   "name": "dsh-codex-style-computer-use",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Codex-style Computer Use for DeepSeek Harness: Windows desktop control, screenshots, UI Automation, human input handoff, approval gates and prebuilt native workers. Install and update from dsh-market without PowerShell 7 or build steps.",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "dsh-codex-style-computer-use": "mcp/src/index.js",
+    "dsh-computer-use-mcp": "mcp/src/index.js"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./package.json": "./package.json",

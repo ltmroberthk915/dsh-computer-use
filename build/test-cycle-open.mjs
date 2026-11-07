@@ -258,7 +258,10 @@ async function dispatchBehaviour (toolsSrc, tag) {
   const file = path.join(SANDBOX, `tools-${tag}.mjs`)
   // The mutated entry lives in SANDBOX; keep its real shared feedback/region
   // dependencies rooted in lib rather than searching beside the temporary entry.
-  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback|compact-feedback|verification-region|continuation)\.js'/g,
+  // Keep this alternation in step with tools.js's own relative imports — a missing name
+  // surfaces as "did not load" rather than as the real dispatch result (found 2026-11-07 when
+  // computer_launch added ./launch.js).
+  fs.writeFileSync(file, toolsSrc.replace(/from '\.\/(batch|artifacts|image-output|observations|feedback|compact-feedback|verification-region|continuation|launch)\.js'/g,
     (_, name) => `from ${JSON.stringify(pathToFileURL(path.join(LIBDIR, name + '.js')).href)}`))
   let mod
   try {

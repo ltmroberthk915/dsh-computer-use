@@ -197,6 +197,10 @@ $CuDshInstall = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
 `mcp/` هو خادم MCP stdio بلا تبعيات يعمل فوق النواة نفسها، للعملاء الذين يتحدثون MCP بدلًا من Cordis:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 

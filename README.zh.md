@@ -201,6 +201,10 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 `mcp/` 是建立在同一核心之上的零依赖 MCP stdio 服务，供只讲 MCP、不讲 Cordis 的客户端使用：
 
 ```sh
+# 已发布包（2.0.1 起可用），无需克隆仓库
+npx -y dsh-codex-style-computer-use
+
+# 从仓库检出运行
 node mcp/src/index.js
 ```
 
@@ -236,6 +240,10 @@ node build/verify-tools-schema.mjs                                   # 工具 sc
 
 工具定义走真实的 `@deepseek-ai/dsh-tools` DSL 编译，因此 schema 写错会在这里失败，
 而不是在宿主重启时把整棵插件树带崩。部分守卫会编译原生 worker，仅 Windows 可跑。
+
+发版前先跑 `npm run verify:package`：它校验打包身份、预编译 helper 的哈希，以及每一个 `bin`
+条目（目标文件存在、带 node shebang）。它刻意不是发布钩子——本包不带任何生命周期脚本——
+所以请在 `npm publish` 之前自己手动执行一次。
 
 ## 许可
 

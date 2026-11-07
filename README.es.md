@@ -215,6 +215,10 @@ de contraseña se detectan mediante `IsPassword` de UI Automation y se rechazan 
 de Cordis:
 
 ```sh
+# published package (2.0.1 and later) — no checkout needed
+npx -y dsh-codex-style-computer-use
+
+# from a checkout
 node mcp/src/index.js
 ```
 

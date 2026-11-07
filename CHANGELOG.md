@@ -1,3 +1,27 @@
+# 2.1.0 — one-call launch, proven focus, and a countdown that stops stuttering
+
+New capabilities, all additive to the 2.0.x tool surface (20 → 21 tools).
+
+- `computer_launch` accepts an optional `args` array: an executable starts with real arguments (a dedicated browser profile, a document path) in ONE call. Each array entry is one argument VALUE, quoted exactly once in the worker; empty entries, NUL and control characters are refused before dispatch. The target keeps the earlier high-risk escalation for executables/scripts/UNC/file: targets.
+- `computer_focus {x,y,hwnd}` puts keyboard focus on a field and PROVES it before typing: it clicks the field, reports the UIA focused control (`controlType`/`name`/`automationId`), and proves a caret either from `GetGUIThreadInfo` or — when the OS reports none — from a two-frame blink comparison. `verified:false` must stop the caller from typing; typing follows the focused control, not the window.
+- Countdown continuity: after one preparation countdown, further actions inside a sliding 5-second window show NO countdown of any duration; every dispatched mutation slides the window, and the window is reset when the hands-off state ends (release/calm/brake). The adaptive 1 s / 0.1 s cadence still applies once the window lapses.
+- Same-input-family guards: a modal dialog of the same app (Find/Replace, Save As) no longer refuses keyboard input and screenshots as `INPUT_TARGET_CHANGED` / `KICKOFF-FOCUS-REQUIRED`. Same-window, same-process, descendant-process and owner/parent relationships count as one family; `activate` adopts a modal dialog and reports `hwnd` + `modalOf`. Mouse clicks keep the strict pixel-owner check — nothing is retargeted for clicks, and an unrelated window on top is still refused.
+- `allowCovered` is forwarded to the tool surface and narrowed: it authorises only the target application's own embedded renderer (a descendant process, e.g. WeChat's article panel under Weixin.exe); an unrelated window on top yields `COVERED-UNRELATED` and nothing is clicked.
+- `delivery:"path"` on `computer_shot`/`computer_batch` withholds the image block while writing the file; a batch-level request also demotes every step image, not just the checkpoint.
+- The skill manual gains hard rules for modal dialogs, destructive document selection (never triple-click/`ctrl+a`; verify the selection before typing; `ctrl+z` after an unexpected change; Save As a new file), focus-with-caret verification before typing, and download paths (resolved from the KnownFolder registry value; Edge insecure-download blocks are reported after at most two attempts instead of retried in a loop).
+
+Distribution: publish 2.1.0 to npm next first, then promote to latest after the usual maturation period (`scripts/release-channel.mjs`); only then promote the GitHub release. Market catalog refresh is independent. Loaded local hosts may require a restart; do not interrupt an active host automatically.
+# 2.0.1 — npx entry for the embedded MCP server
+
+No behavior change to the `computer_*` tools or to the plugin's loading path.
+
+- `package.json` gains `bin`: both `dsh-codex-style-computer-use` and the `dsh-computer-use-mcp` alias point at `mcp/src/index.js`. The entry resolves `../../lib/core/index.js` and `../../lib/tool-contract.js` from the packed layout, so an install has no dependency gap; the server still starts observation-only unless the launching host sets `DSH_CU_ALLOW_INPUT=1`.
+- The MCP server section of all nine READMEs documents `npx -y dsh-codex-style-computer-use` alongside the checkout form.
+- `scripts/verify-package.mjs` now asserts every `bin` target exists and carries a node shebang, so a broken entry fails the package check instead of reaching users.
+- Storefront assets published earlier on `main` — `docs/images/icon-180.png` (180×180) and the French, German, Spanish, Portuguese, Arabic, Russian and Persian READMEs — ship in this version.
+
+Distribution: publish 2.0.1 to npm next first, then promote to latest after the 24-hour maturation period (`scripts/release-channel.mjs`). The `npx` command only resolves once a version carrying `bin` is the latest dist-tag; until then a checkout plus `node mcp/src/index.js` is the supported entry. Market catalog refresh is independent.
+
 # 2.0.0 — guarded input, bounded evidence and recoverable desktop control
 
 This major release changes default post-action text feedback and UIA query scope. Existing computer_* tool names remain available.
