@@ -6,9 +6,9 @@ Describe the goal. Your agent reads exact control identities, acts through the c
 
 English | [中文](README.zh.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md) · [2.0.0 changes](docs/RELEASE-2.0.0.md)
 
-<img src="docs/images/demo-task.gif" width="900" alt="Computer Use demo: after the 即将开始操作，请暂停键鼠 countdown the agent fills a new-task form in a project board, creates the card and verifies the result">
+<img src="docs/images/computer-use-demo.gif" width="900" alt="Computer Use demo: after the 即将开始操作，请暂停键鼠 countdown the agent fills a new-task form in a project board, creates the card and verifies the result">
 
-<img src="docs/images/demo-states.gif" width="900" alt="Computer Use invocation states: thinking, about to start, acting, handed back, paused, released">
+<img src="docs/images/computer-use-states.gif" width="900" alt="Computer Use invocation states: thinking, about to start, acting, handed back, paused, released">
 
 ![Codex-style Windows desktop control: observe, act, verify](docs/images/01-codex-style.png)
 

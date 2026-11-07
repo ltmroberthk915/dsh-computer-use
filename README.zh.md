@@ -6,9 +6,9 @@
 
 [English](README.md) | 中文 | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [安装](#在-dsh-market-安装和更新) · [版本记录](CHANGELOG.md) · [2.0.0 变更](docs/RELEASE-2.0.0.md)
 
-<img src="docs/images/demo-task.gif" width="900" alt="Computer Use 演示：显示「即将开始操作，请暂停键鼠」倒计时后，AI 在项目看板中新建任务、核验结果">
+<img src="docs/images/computer-use-demo.gif" width="900" alt="Computer Use 演示：显示「即将开始操作，请暂停键鼠」倒计时后，AI 在项目看板中新建任务、核验结果">
 
-<img src="docs/images/demo-states.gif" width="900" alt="Computer Use 调用状态：思考、即将开始、操控中、已让出、已暂停、已交还">
+<img src="docs/images/computer-use-states.gif" width="900" alt="Computer Use 调用状态：思考、即将开始、操控中、已让出、已暂停、已交还">
 
 ![Codex 风格 Windows 桌面操控：观察、操作、验证](docs/images/01-codex-style.png)
 
