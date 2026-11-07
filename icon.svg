@@ -13,10 +13,14 @@
       <stop offset=".5" stop-color="#38BDF8"/>
       <stop offset="1" stop-color="#A78BFA"/>
     </linearGradient>
-    <radialGradient id="glow" cx="18.2" cy="19.4" r="7.6" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#38BDF8" stop-opacity=".32"/>
+    <radialGradient id="glow" cx="17.4" cy="16.8" r="7.4" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38BDF8" stop-opacity=".30"/>
       <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
     </radialGradient>
+    <linearGradient id="kite" x1="14.1" y1="10.6" x2="19.9" y2="23.0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#55ADFF"/>
+      <stop offset="1" stop-color="#163A99"/>
+    </linearGradient>
   </defs>
   <rect width="32" height="32" rx="7.5" fill="url(#tile)"/>
   <rect width="32" height="32" rx="7.5" fill="url(#halo)"/>
@@ -24,6 +28,24 @@
   <path d="M5.6 10.1 H26.4" stroke="url(#rail)" stroke-width="1.05" stroke-opacity=".5"/>
   <circle cx="8.5" cy="8" r=".9" fill="#5EEAD4"/>
   <circle cx="11.2" cy="8" r=".9" fill="#A78BFA" fill-opacity=".85"/>
-  <circle cx="18.2" cy="19.4" r="7.6" fill="url(#glow)"/>
-  <path d="M15.6 12.4 L15.6 21.2 L17.8 19 L19.3 22.4 L20.8 21.7 L19.3 18.5 L22.3 18.5 Z" fill="#F8FAFC" stroke="#070B14" stroke-width=".85" stroke-linejoin="round"/>
+  <circle cx="17.4" cy="16.8" r="7.4" fill="url(#glow)"/>
+
+  <!-- mouse-line tail of the agent kite pointer -->
+  <path d="M19.87 22.96 C 19.2 25.3, 16.4 24.1, 14.6 26.3" stroke="#3B82F6" stroke-opacity=".92" stroke-width=".74" stroke-linecap="round" fill="none"/>
+
+  <!-- tilted kite pointer, simplified from the runtime KitePointerPainter -->
+  <polygon points="14.13,10.64 22.07,14.43 19.87,22.96 11.93,19.17"
+           fill="none" stroke="#3684FF" stroke-opacity=".35" stroke-width="1.5" stroke-linejoin="round"/>
+  <polygon points="14.13,10.64 22.07,14.43 19.87,22.96 11.93,19.17" fill="url(#kite)"/>
+  <polygon points="14.13,10.64 22.07,14.43 17.00,16.80" fill="#A9E0FF" fill-opacity=".30"/>
+  <polygon points="17.00,16.80 22.07,14.43 19.87,22.96" fill="#06184F" fill-opacity=".28"/>
+  <polygon points="14.13,10.64 22.07,14.43 19.87,22.96 11.93,19.17"
+           fill="none" stroke="#CFEFFF" stroke-opacity=".95" stroke-width=".33" stroke-linejoin="round"/>
+  <line x1="14.13" y1="10.64" x2="19.87" y2="22.96" stroke="#D5F2FF" stroke-opacity=".30" stroke-width=".25"/>
+
+  <!-- window-pane cross: platform cue without vendor colours -->
+  <line x1="17.0" y1="12.4" x2="17.0" y2="21.2" stroke="#06184F" stroke-opacity=".45" stroke-width="1.75" stroke-linecap="round"/>
+  <line x1="13.2" y1="16.8" x2="20.8" y2="16.8" stroke="#06184F" stroke-opacity=".45" stroke-width="1.75" stroke-linecap="round"/>
+  <line x1="17.0" y1="12.4" x2="17.0" y2="21.2" stroke="#F4FBFF" stroke-width=".86" stroke-linecap="round"/>
+  <line x1="13.2" y1="16.8" x2="20.8" y2="16.8" stroke="#F4FBFF" stroke-width=".86" stroke-linecap="round"/>
 </svg>
