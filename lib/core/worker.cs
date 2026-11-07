@@ -4112,6 +4112,10 @@ namespace DshComputerUse.Worker
             object o; object av;
             string op = req.TryGetValue("op", out o) ? o as string : null;
             Dictionary<string, object> a = (req.TryGetValue("args", out av) && av is Dictionary<string, object>) ? (Dictionary<string, object>)av : new Dictionary<string, object>();
+            // Host-driving debug gates travel WITH the request (lib/host-debug.js): gate 1 = the
+            // calling conversation is danger-full-access, gate 2 = debug mode was enabled by hand.
+            _requestHostDebug = GetB(a, "__hostDebug", false);
+            _requestHostFull = GetB(a, "__hostFull", false);
             bool cycleOp = GetB(a, "__cycle", false) && op != null &&
                 op != "abort" && op != "ping" && op != "echoargs" &&
                 op != "probe" && op != "keyClass" && op != "stuckPlan" &&
@@ -4945,7 +4949,7 @@ namespace DshComputerUse.Worker
                         "verdict", detail == null ? "ok — the pixel belongs to the intended window" : (blocked + ": " + detail));
                     return dry;
                 }
-                if (hostVictim) throw new Exception(HostGuardMsg("click", unchecked((int)PidOf(under))));
+                if (hostVictim) GuardHostDriving(unchecked((int)PidOf(under)), "click");
                 bool allowCovered = GetB(a, "allowCovered", false);
                 // NARROWED (2026-11-07): allowCovered is an escape for the target app's OWN embedded
                 // renderer only. It used to authorise the click whatever owned the pixel, so an
@@ -6394,7 +6398,7 @@ namespace DshComputerUse.Worker
             IntPtr target = new IntPtr(_kickoffFocus.Target);
             IntPtr fg = TopLevel(Native.GetForegroundWindow());
             string problem = _kickoffFocus.CaptureProblem(Panic.CycleLit, Panic.Stopped, Panic.Exited,
-                target != IntPtr.Zero && Native.IsWindow(target), fg.ToInt64(), PidOf(fg), IsHostWindow(fg));
+                target != IntPtr.Zero && Native.IsWindow(target), fg.ToInt64(), PidOf(fg), IsHostWindow(fg) && !HostDrivingAllowed());
             // A dialog of the same app is the target now (its hwnd replaced the one we confirmed):
             // refusing there blocked the very screenshot that shows what the dialog is asking.
             if (problem != null && target != IntPtr.Zero && SameInputFamily(target, fg)) return;
@@ -6445,7 +6449,7 @@ namespace DshComputerUse.Worker
             // The host is never "the window the agent is working in": 2026-09-12 the sticky
             // target followed the host window and the next click went into it. Click/activate
             // already refuse a host window, so this only removes the retry path.
-            if (t != IntPtr.Zero && Native.IsWindow(t) && !IsHostWindow(t)) _stickyHwnd = t;
+            if (t != IntPtr.Zero && Native.IsWindow(t) && (!IsHostWindow(t) || HostDrivingAllowed())) _stickyHwnd = t;
         }
 
         static uint PidOf(IntPtr h) { uint pid = 0; try { Native.GetWindowThreadProcessId(h, out pid); } catch { } return pid; }
@@ -6769,20 +6773,88 @@ namespace DshComputerUse.Worker
                    "The agent must never drive its own host — activate the intended application first.";
         }
 
+        // ---- host-driving debug gates (lib/host-debug.js) ----
+        // Driving the agent's OWN Harness window is refused by default: the host holds the human's
+        // approval cards, the question card and the Stop control, so an agent that could click it
+        // could approve itself. Self-iteration (debugging another plugin in this same instance)
+        // needs it, so there are exactly two gates, both fail-closed, both set OUTSIDE a tool call:
+        //   1. the CALLING conversation is danger-full-access (the human's composer setting);
+        //   2. debug mode was switched on by hand in Settings -> 电脑操控（调试）.
+        // A tool cannot write either: gate 1 lives in the session policy, gate 2 in a host-side file
+        // that only the settings page writes.
+        static bool _requestHostDebug, _requestHostFull;
+        static string _hostDebugFile; static bool _hostDebugFileInit, _hostDebugValue; static int _hostDebugAt;
+
+        /// Hot read of the settings switch (500 ms cache), so toggling it needs no restart.
+        static bool HostDebugFileEnabled()
+        {
+            if (!_hostDebugFileInit)
+            {
+                _hostDebugFileInit = true;
+                try { string p = Environment.GetEnvironmentVariable("DSH_CU_HOST_DEBUG_FILE"); _hostDebugFile = string.IsNullOrEmpty(p) ? null : p; }
+                catch { _hostDebugFile = null; }
+            }
+            if (_hostDebugFile == null) return false;
+            int now = unchecked(Environment.TickCount);
+            if (_hostDebugAt != 0 && unchecked(now - _hostDebugAt) < 500) return _hostDebugValue;
+            _hostDebugAt = now;
+            try
+            {
+                string text = System.IO.File.ReadAllText(_hostDebugFile).Replace(" ", "");
+                _hostDebugValue = text.IndexOf("\"enabled\":true", StringComparison.Ordinal) >= 0;
+            }
+            catch { _hostDebugValue = false; }
+            return _hostDebugValue;
+        }
+
+        /// True when the core configured host identity at all (production always does).
+        static bool HostGuardConfigured() { HostGuardInit(); return _hostPid > 0 || _hostExe != null; }
+
+        /// Last-resort protection for workers launched WITHOUT host identity (CLI/MCP/test
+        /// harnesses): the 2026-11-08 accident sent WM_CLOSE to the real Harness from exactly such
+        /// a harness. Such a worker must never close/minimize/hide the DSH window unless the caller
+        /// explicitly passes confirmHost:true.
+        static bool LooksLikeHarness(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return false;
+                string p = ProcessImagePath(PidOf(h));
+                if (p == null) return false;
+                return string.Equals(System.IO.Path.GetFileName(p.Trim()), "DeepSeek Harness.exe", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        /// BOTH gates required. Unknown state fails closed.
+        static bool HostDrivingAllowed() { return _requestHostDebug && _requestHostFull && HostDebugFileEnabled(); }
+
+        static void GuardHostDriving(int pid, string op)
+        {
+            if (op == "close" || op == "minimize" || op == "hide")
+                throw new Exception("HOST_DEBUG_GATE: " + op + " on the agent's own Harness window is never allowed, not even in debug mode. Nothing was dispatched.");
+            if (HostDrivingAllowed())
+            {
+                try { AuditRecord("HOST-CONTROL", op + "; pid=" + pid + "; debug=1; full=1"); } catch { }
+                return;
+            }
+            throw new Exception("HOST_DEBUG_GATE: " + op + " targets the agent's own Harness window (pid " + pid + "). " +
+                "To iterate on plugins in this same instance, open Settings -> 电脑操控（调试）, switch debug mode ON, and make sure THIS conversation is 完全权限 (danger-full-access). " +
+                "Nothing was dispatched. Ordinary work should target the application window instead.");
+        }
+
         /// The refusal itself. It throws, exactly like the click precondition below, so Main
-        /// answers through the existing error helper Err(...) -> {"ok":false,"error":"HOST-GUARDED: ..."}
-        /// and the Node layer rejects the call with that message. Returning an Err(...) dict from a
-        /// handler would NOT work: the dispatcher wraps every handler result in Ok(...).
+        /// answers through the existing error helper Err(...) -> {"ok":false,"error":"HOST_DEBUG_GATE: ..."}
         static void HostGuard(IntPtr window, string op)
         {
             if (!IsHostWindow(window)) return;
-            throw new Exception(HostGuardMsg(op, unchecked((int)PidOf(window))));
+            GuardHostDriving(unchecked((int)PidOf(window)), op);
         }
 
         static void HostGuardPid(int pid, string op)
         {
             if (!IsHostPid(pid)) return;
-            throw new Exception(HostGuardMsg(op, pid));
+            GuardHostDriving(pid, op);
         }
 
         /// For ops whose victim is the window under a POINT: the pixel decides, exactly as the
@@ -7341,6 +7413,13 @@ namespace DshComputerUse.Worker
             string op = GetS(a, "op", "minimize");
             AgentActing(a, "windowOp");
             MarkMutation();
+            // Closing/minimizing/hiding the host is never negotiable: debug mode exists so the agent
+            // can click a sidebar to debug a plugin, not so it can make its own window disappear.
+            // The LooksLikeHarness fallback covers a worker launched WITHOUT host identity (CLI,
+            // MCP, a test harness): it must not be able to close the Harness by accident either.
+            bool harnessTarget = IsHostWindow(h) || (!HostGuardConfigured() && LooksLikeHarness(h));
+            if ((op == "close" || op == "minimize" || op == "hide") && harnessTarget && !GetB(a, "confirmHost", false))
+                throw new Exception("HOST_DEBUG_GATE: " + op + " on the agent's own Harness window is never allowed, not even in debug mode. Nothing was dispatched. (confirmHost:true is for an intentional CLI shutdown only.)");
             switch (op)
             {
                 case "minimize": Native.ShowWindow(h, Native.SW_MINIMIZE); break;

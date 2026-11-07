@@ -38,7 +38,19 @@ const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
 // adopts a modal dialog and reports hwnd+modalOf; the kickoff capture check accepts the family
 // foreground. Mouse clicks keep the strict pixel-owner check — nothing is retargeted for clicks.
 // Re-reviewed 2026-11-07 (fifth change): computer_focus / op focusField. Typing follows the focused control, not the window (measured: Word kept focus in the document while the Find dialog was foreground). The op clicks the field, reports the UIA focused control, and proves a caret either from GUITHREADINFO or a two-frame blink comparison; calls land in DrivesMachineOps so brake/audit/halo apply. New tool: computer_focus. Painting block untouched.
-// Re-reviewed 2026-11-07 (fifth change): computer_focus / op focusField. Typing follows the focused control, not the window (measured: Word kept focus in the document while the Find dialog was foreground). The op clicks the field, reports the UIA focused control, and proves a caret either from GUITHREADINFO or a two-frame blink comparison; calls land in DrivesMachineOps so brake/audit/halo apply. New tool: computer_focus. Painting block untouched.
+// Re-reviewed 2026-11-07 (sixth change): host-driving DEBUG GATES. Driving the agent's own Harness
+// window used to be refused unconditionally; that also blocked self-iteration (debugging another
+// plugin in the same instance), so two gates now exist, both set OUTSIDE a tool call: the CALLING
+// conversation must be danger-full-access, and debug mode must be switched on by hand in
+// Settings -> 电脑操控（调试）. The worker reads the switch hot (500 ms, no restart), stamps both
+// flags per request from the core, refuses close/minimize/hide of the host even in debug mode, and
+// audits every allowed host control as HOST-CONTROL. Everything outside the guard block (painting,
+// pump, pointer, timing) is byte-identical.
+// Re-reviewed 2026-11-08 (seventh change): NO-IDENTITY HARNESS PROTECTION. A worker launched
+// without DSH_CU_HOST_PID/EXE (CLI, MCP, a test harness) has its guard fail-open by design, and
+// on 2026-11-08 a harness used exactly that to send WM_CLOSE to the real Harness. windowOp
+// close/minimize/hide now also refuses when the target image is DeepSeek Harness.exe and host
+// identity is absent, unless the caller passes confirmHost:true. Painting block untouched.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -46,7 +58,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  "eeb9a7fb6c59a243101a3fac3766a9beef061d2702c5458cbe1990dcae35d87a",
+  "8653ec1dba29f978fa615d672f27f3989522a64289adfeb54082cc709c8151e0",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')
