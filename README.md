@@ -11,8 +11,8 @@ English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market)
 ## Why it is the precise one
 
 - **Identity, not guesswork.** UI Automation exposes the real control tree with exact `AutomationId`s, and actions can drive a control through its own UI Automation patterns instead of clicking coordinates.
-- **Marks are checked, not trusted.** A numbered mark is validated against window identity and sampled pixels before any input is dispatched, so a stale mark is refused rather than clicked at the wrong place. When an animated neighbour keeps invalidating the pixel signature, `uiaOnly` pins identity to the window handle and geometry while the dispatch-time occlusion check still applies.
-- **Queries stay bounded.** UIA queries default to depth 6, 120 nodes and a 1200 ms soft budget; deeper or larger queries require a measured `anchor`, so a query cannot quietly sweep the wrong region.
+- **Marks are checked, not trusted.** By default, a numbered mark is validated against window identity and sampled pixels before any input is dispatched, so a stale mark is refused rather than clicked at the wrong place. When an animated neighbour keeps invalidating the pixel signature, `uiaOnly` pins identity to the window handle and geometry while the dispatch-time occlusion check still applies.
+- **Queries stay bounded.** UIA queries default to depth 6, 120 nodes and a 1200 ms soft budget; a query deeper than 6 or larger than 300 nodes requires a measured `anchor`, so a query cannot quietly sweep the wrong region.
 - **When the app hides it, read it.** `computer_ocr` returns lines and per-word boxes in absolute screen pixels, so zero-UIA applications can be located by name.
 
 ## Why it costs less
@@ -26,7 +26,7 @@ English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market)
 ## Built for a desktop you still use
 
 - **It waits for you.** A 1-second notice before input (0.1 second within a rolling 3-minute window) hands the desktop back immediately; after you finish, the agent re-observes and continues the original task.
-- **The brake reaches the model.** `Ctrl+Esc` pauses, `Ctrl+Alt+R` resumes, `Ctrl+Alt+Q` exits, and a stop is pushed into the running session. Approvals stay on by default and password fields are refused.
+- **The brake reaches the model.** `Ctrl+Esc` pauses, `Ctrl+Alt+R` resumes, `Ctrl+Alt+Q` exits, and a stop is pushed into the running session. Approvals stay on by default and password fields are refused by default.
 - **It reports what it cannot do.** The Windows secure desktop (UAC prompt or lock screen) is detected, reported and resumed after — not blind-retried.
 
 ![Human handoff: prepare, take over, continue](docs/images/02-handoff.png)
@@ -40,7 +40,7 @@ The illustrations above show the interaction model introduced in 1.3.0; the 2.0.
 ## New in 2.0.0
 
 - **Compact receipts by default** — post-action text normally adds at most 6 KiB to the action receipt; `feedback: full` and `feedback: none` are explicit alternatives.
-- **Bounded, anchored UIA queries** — depth 6, 120 nodes and a 1200 ms soft budget by default; deeper or larger queries need a measured `anchor`.
+- **Bounded, anchored UIA queries** — depth 6, 120 nodes and a 1200 ms soft budget by default; queries deeper than 6 or larger than 300 nodes need a measured `anchor`.
 - **Evidence on demand** — 4 MiB memory + 32 MiB disk, 64 records, 24-hour expiry; a disk failure falls back to bounded memory.
 - **Adaptive preparation notice** — 1 second initially, 0.1 second within a rolling 3-minute window; the tilted kite marks the agent's click point.
 - **Hardened input path** — guarded window-management chords, worker backpressure/recovery, stale-target checks and cancellation cleanup.
