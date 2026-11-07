@@ -1,24 +1,49 @@
 # Codex-style Computer Use
 
-**Bring a Codex-style desktop workflow to DeepSeek Harness.**
+**The most precise way to drive Windows from DeepSeek Harness — and the cheapest per task.**
 
-Describe the goal. Your agent observes the screen, locates controls, clicks and types, then checks the result. Work with native Windows apps from the conversation.
+Describe the goal. Your agent reads exact control identities, acts through the controls themselves, verifies the result — and finishes a known sequence in one model round trip instead of ten.
 
-English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md)
+English | [中文](README.zh.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md) · [2.0.0 changes](docs/RELEASE-2.0.0.md)
 
 ![Codex-style Windows desktop control: observe, act, verify](docs/images/01-codex-style.png)
 
-- **See the target. Take the action.** Combine screenshots, UI Automation and numbered targets with mouse, keyboard, drag, scroll and window tools.
-- **Take over. Let the agent wait. Hand back and continue.** Version 2.0.0 shows a 1-second notice before input, or 0.1 second when the previous notice was less than 3 minutes ago. After handback, the agent re-observes and resumes the original task.
-- **Fewer round trips. More efficient token use.** Incremental control observations, cropped or downsampled screenshots and batches of known actions reduce repeated context and model calls.
+## Why it is the precise one
+
+- **Identity, not guesswork.** UI Automation exposes the real control tree with exact `AutomationId`s, and actions can drive a control through its own UI Automation patterns instead of clicking coordinates.
+- **Marks are checked, not trusted.** A numbered mark is validated against window identity and sampled pixels before any input is dispatched, so a stale mark is refused rather than clicked at the wrong place. When an animated neighbour keeps invalidating the pixel signature, `uiaOnly` pins identity to the window handle and geometry while the dispatch-time occlusion check still applies.
+- **Queries stay bounded.** UIA queries default to depth 6, 120 nodes and a 1200 ms soft budget; deeper or larger queries require a measured `anchor`, so a query cannot quietly sweep the wrong region.
+- **When the app hides it, read it.** `computer_ocr` returns lines and per-word boxes in absolute screen pixels, so zero-UIA applications can be located by name.
+
+## Why it costs less
+
+- **One round trip for a known sequence.** One `computer_batch` call runs a list of actions serially, stops at the first failure, and costs one model round trip instead of one per action.
+- **Only the delta comes back.** Pass the previous observation ID as `since` and receive additions, changes, removals and ordering — not the whole tree again.
+- **Compact receipts by default in 2.0.0.** Post-action text normally adds at most 6 KiB to the action receipt; `feedback: full` is still there when detail matters more.
+- **Evidence stays out of the conversation.** Complete point evidence can live in a bounded local cache (4 MiB memory, 32 MiB disk, 64 records, 24-hour expiry) and be pulled on demand.
+- **Local work stays local.** UI Automation, screen OCR and pixel checks run in the prebuilt native worker — no extra vision bill per step.
+
+## Built for a desktop you still use
+
+- **It waits for you.** A 1-second notice before input (0.1 second within a rolling 3-minute window) hands the desktop back immediately; after you finish, the agent re-observes and continues the original task.
+- **The brake reaches the model.** `Ctrl+Esc` pauses, `Ctrl+Alt+R` resumes, `Ctrl+Alt+Q` exits, and a stop is pushed into the running session. Approvals stay on by default and password fields are refused.
+- **It reports what it cannot do.** The Windows secure desktop (UAC prompt or lock screen) is detected, reported and resumed after — not blind-retried.
 
 ![Human handoff: prepare, take over, continue](docs/images/02-handoff.png)
 
 ![Token efficiency: focused observations, batched actions and result readback](docs/images/03-token-efficiency.png)
 
-These are **1.3.0 feature illustrations**. Actual token use depends on the task, model and observation strategy. Approvals remain enabled by default; explicit pause, cancellation and exit remain authoritative.
+The illustrations above show the interaction model introduced in 1.3.0; the 2.0.0 kite pointer, bounded queries and compact receipts are described above. Actual token use depends on the task, model and observation strategy. Approvals remain enabled by default; explicit pause, cancellation and exit remain authoritative.
 
 **Ready to install.** 19 desktop tools, with native helpers included. No SDK or install-time compilation. Requires Windows, Node.js ≥ 22 and the .NET Framework 4.x included with Windows. An independent community plugin; Codex describes the interaction style.
+
+## New in 2.0.0
+
+- **Compact receipts by default** — post-action text normally adds at most 6 KiB to the action receipt; `feedback: full` and `feedback: none` are explicit alternatives.
+- **Bounded, anchored UIA queries** — depth 6, 120 nodes and a 1200 ms soft budget by default; deeper or larger queries need a measured `anchor`.
+- **Evidence on demand** — 4 MiB memory + 32 MiB disk, 64 records, 24-hour expiry; a disk failure falls back to bounded memory.
+- **Adaptive preparation notice** — 1 second initially, 0.1 second within a rolling 3-minute window; the tilted kite marks the agent's click point.
+- **Hardened input path** — guarded window-management chords, worker backpressure/recovery, stale-target checks and cancellation cleanup.
 
 <details>
 <summary>Current release and compatibility</summary>
@@ -59,7 +84,7 @@ this Agent's observation cache; it does not delete screenshots, attachments or u
 
 Search **computer-use** or **Codex-style** in the market. Look for repository **ltmroberthk915/dsh-computer-use** and npm package **dsh-codex-style-computer-use** (maintainer: **ltmroberthk**), then click **Install**. Use **Update** or **Update all** for stable-channel updates. Both native helpers are included; no PowerShell 7 or build permission is needed.
 
-Alternatively, enter **`dsh-codex-style-computer-use`** in **Settings → Plugins → Add plugin** for the current stable channel, or **`dsh-codex-style-computer-use@1.3.0`** for the version illustrated here. Enter the npm package spec directly. Your host may apply a waiting period to fresh versions; follow its indication. A newly added bundle can load live on supported hosts; check that its tools and skill appear. Restart from the tray when replacing a loaded version, when the client remains stale, or when DSH reports **restart-required**.
+Alternatively, enter **`dsh-codex-style-computer-use`** in **Settings → Plugins → Add plugin** for the current stable channel, or **`dsh-codex-style-computer-use@2.0.0`** for the version described here. Enter the npm package spec directly. Your host may apply a waiting period to fresh versions; follow its indication. A newly added bundle can load live on supported hosts; check that its tools and skill appear. Restart from the tray when replacing a loaded version, when the client remains stale, or when DSH reports **restart-required**.
 
 ### Releases less than 24 hours old
 
