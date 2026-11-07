@@ -1,3 +1,27 @@
+# 2.2.4 — bounded handoff wait; issue #3/#4 verification
+
+- `waitForHuman` now ends a silent, non-progressing handoff after 60 s with
+  `HANDOFF_WAIT_TIMEOUT` (a retryable continuation, `handoffWait` attached), and
+  probes `ping` every 5 s to recover a lost idle event. Every ACTIVE handoff
+  event re-arms the inactivity deadline, so a human who keeps using the machine
+  is not cut off. A physically held key/button gets five windows (about 5 minutes)
+  and then `HANDOFF_HELD_TIMEOUT`, so a stale held state cannot wait out the
+  cooperative 3,600,000 ms deadline. Both codes map through `handoffResult()` as
+  `status:"continuation-required"` for the DSH tool and MCP paths. Host approval
+  waits happen before `waitForHuman` and remain governed by the host. The probe
+  is JS-side only; the native worker is unchanged (#3 problem 2).
+- Regression coverage for #3/#4 on the production worker: idle mouse/keyboard
+  input stays free (`revision=0`), actuation-time input publishes
+  `handoff:yielding` then `handoff:idle` by itself, and the idle/yield phases are
+  present in the audit log. The 1.3.0 idle-input guard is what fixed the
+  approval-card click path in #3; 2.2.4 locks it in.
+- Clarify docs: `computer_window` remains a cooperative tool with a
+  3,600,000 ms budget; the new 60 s limit only ends a wait that is making no
+  progress, not one where the human is still using the machine.
+- Document the desktop settings fallback: if the host does not render the
+  `computer-use` settings card, set `automationMode` on the `computer-use` row in
+  the target profile's `cordis.patch.yml` (issue #3 problem 3).
+
 # 2.2.3 — host debug gates: driving the Harness itself, only with two human gates
 
 The host guard used to refuse EVERY driving op aimed at the DSH window — right for ordinary work

@@ -183,6 +183,7 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 - **人工暂停** —— 只有实体 `Ctrl+Esc` 触发持续输入刹车，`Ctrl+Alt+R` 恢复。普通 Esc、打字、滚动、鼠标距离/频率和屏幕左上角不再触发这种暂停；显式提问、诊断暂停保持独立。
 - **退出** —— `Ctrl+Alt+Q` 结束会话：覆盖层消失、监听全部拆除，后续注入被拒，直到之后某一轮重新开启。
 - **刹车是关于机器的事实，不属于某一个进程** —— 闩锁状态落盘，每个 worker 都会遵守，包括之后从命令行启动的。
+- **等待有上限** —— 人机交接若静默 60 秒仍没有任何进展，`waitForHuman` 会以 `HANDOFF_WAIT_TIMEOUT` 结束本次等待并提示重新观察当前目标（可重试，不会重放输入）。每次真实输入事件都会重置这个静默计时，所以人持续使用电脑不会被误判；期间每 5 秒还会用 `ping` 探测一次，以恢复丢失的 `handoff:idle` 事件。若物理键/按钮仍被按住，普通的 3 秒静默本来就不应结束等待，因此按住状态按 5 个静默窗口（默认约 5 分钟）封顶，陈旧 `heldCount` 会以 `HANDOFF_HELD_TIMEOUT` 结束，不会一直等到协作工具 3,600,000 ms。宿主审批卡发生在 `waitForHuman` 之前，由宿主自己的审批等待/截止时间管理，不在本上限内。
 - **审计** —— 每次操作连同脱敏后的参数追加到 `$DSH_HOME/data/computer-use/audit.jsonl`。
 - **插件级开关** —— `DSH_COMPUTER_USE_KILL=1` 让插件拒绝启动；`dryRun: true` 只模拟并记录。
 
@@ -199,6 +200,11 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 | `annotateMarks` | `true` | 在截图上绘制 Set-of-Marks 方框 |
 | `workerExe` | `""` | 显式指定 worker 路径；留空则自动发现或编译 |
 | `snapshotDir` | `""` | 截图目录；留空为 `$DSH_HOME/data/computer-use/shots` |
+
+**桌面版设置卡不出现时：** 部分桌面宿主不渲染插件的设置卡。此时可直接在目标 profile 的
+`cordis.patch.yml` 中给 `- id: computer-use` 行写 `config`，例如
+`automationMode: autonomous`、`dryRun: false`，保留已有键、不要整段覆盖；改完重启宿主。
+CLI 安装若未自动进入 `dsh.profile.bundles`，也可用同一条 `- insert:` 行手工挂载（issue #3）。
 
 ## MCP 服务
 

@@ -192,6 +192,14 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
   further actuation is refused until a later turn opens a new one.
 - **The brake is a fact about the machine, not one process** — the engaged state is persisted, and
   every worker adopts it, including one started later from a shell.
+- **The handback wait is bounded** — if a handoff makes no progress for 60 s, `waitForHuman` ends the
+  wait with `HANDOFF_WAIT_TIMEOUT` and tells the agent to re-observe (retryable, no input replay).
+  Every real input event re-arms that quiet timer, so a human who keeps using the machine is never
+  cut off; a `ping` recovery probe runs every 5 s to recover a lost `handoff:idle` event. A genuinely
+  held key/button is different: it gets five windows (about 5 minutes by default) and then ends with
+  `HANDOFF_HELD_TIMEOUT`, so a stale `heldCount` cannot wait out the cooperative 3,600,000 ms
+  deadline. A host approval card happens before `waitForHuman` and is bounded by the host's own
+  approval wait, not by this local limit.
 - **Audit** — every actuation is appended to `$DSH_HOME/data/computer-use/audit.jsonl` with argument
   sanitisation.
 - **Kill switch for the plugin itself** — `DSH_COMPUTER_USE_KILL=1` makes the plugin refuse to start;
@@ -210,6 +218,12 @@ fields are detected through UI Automation's `IsPassword` and refused by default.
 | `annotateMarks` | `true` | draw Set-of-Marks boxes on screenshots |
 | `workerExe` | `""` | explicit worker path; empty = autodiscover or compile |
 | `snapshotDir` | `""` | screenshot directory; empty = `$DSH_HOME/data/computer-use/shots` |
+
+**When the desktop host does not render the plugin settings card:** set `config` directly on the
+`- id: computer-use` row in the target profile's `cordis.patch.yml` (for example
+`automationMode: autonomous`, `dryRun: false`), preserving existing keys; restart the host. If a CLI
+install did not reconcile into `dsh.profile.bundles`, the same `- insert:` row can mount it manually
+(issue #3).
 
 ## MCP server
 
