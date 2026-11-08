@@ -1,5 +1,7 @@
 # Codex-style Computer Use
 
+[![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
+
 **The most precise way to drive Windows from DeepSeek Harness — and the cheapest per task.**
 
 Describe the goal. Your agent reads exact control identities, acts through the controls themselves, verifies the result — and finishes a known sequence in one model round trip instead of ten.

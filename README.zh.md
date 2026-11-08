@@ -1,5 +1,7 @@
 # Codex 风格 Computer Use
 
+[![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
+
 **全市场最精准的 Windows 桌面操控，也是单个任务成本最低的。**
 
 你描述目标，AI 读准控件身份、按真实控件执行、回读结果——一段已知流程一轮模型往返就跑完，而不是每个动作各花一轮。
