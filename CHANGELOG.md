@@ -1,3 +1,29 @@
+# 2.2.7 — deterministic 100 s leave backstop
+
+- Add `lib/leave-timer.js`: the cycle-boundary skill is now backed by a real
+  lease-expiry, not only by prose. After a non-desktop tool starts, the timer
+  releases the lease if no `computer_*` call starts within **100 s**
+  (`leaveDesktopGraceMs`; 0 disables). It is not an idle timeout: silence never
+  arms it.
+- Safety invariants: only the owner's own call can arm/cancel; the captured
+  cycle id and claim are passed to `release` as the expected ownership, so a
+  late timer can never release a newer cycle; a refusal from pause/question/
+  handoff/in-flight is retried, not consumed; turn end, agent disposal, explicit
+  release and plugin dispose clear it; timer errors are fail-open and never deny
+  a non-computer tool.
+- Local bookkeeping (`todo_write`, `read`, `write`, `edit`, `glob`, `grep`,
+  terminal reads, `ask_user_question`) and `run_code` do not arm it; all other
+  top-level tools do, including MCP/subagent/workflow/network work. A quick
+  read→compute→type helper inside the grace is cancelled by the next actual
+  computer start and never releases.
+- `hold` does not extend the timer; an automatic release emits a visible notice
+  and the skill tells the model to re-observe. `leaveDesktopGraceMs` is
+  configurable in settings.
+- Tests: new `build/test-leave-timer.mjs` (owner scope, cancel/re-arm, no
+  reset, stale cycle, refusals/retries, turn/dispose cleanup, notice) plus the
+  real hook/lifecycle integration in `build/test-cycle-no-timeout.mjs`.
+- No native/runtime worker change; JS plugin only.
+
 # 2.2.6 — cycle boundary, not a per-call release gate
 
 - 2.2.5's "check before every tool call" over-corrected: it forced a release

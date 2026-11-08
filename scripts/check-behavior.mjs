@@ -37,7 +37,7 @@ const reviewed = new Set([
   'cycle-no-timeout', 'cycle-open', 'desktop-acceptance-io', 'desktop-ownership', 'drag-options', 'evidence-protocol',
   'exit-coherence', 'feedback-cache-integration', 'feedback-policy', 'glow-pump', 'glow-visual', 'handoff-continuation',
   'handoff-lock', 'handoff-runtime', 'handoff-watchdog', 'host-gate', 'human-handoff', 'indicator-hold', 'input-stamp', 'key-command',
-  'kickoff-focus', 'mcp-contracts', 'mcp-execution', 'modifier-vk', 'monitor-lifetime', 'native-hardening', 'native-respawn',
+  'kickoff-focus', 'leave-timer', 'mcp-contracts', 'mcp-execution', 'modifier-vk', 'monitor-lifetime', 'native-hardening', 'native-respawn',
   'native-runtime', 'native-fault-lifecycle', 'observation-archive', 'observations', 'op-classification', 'pointer-lease', 'policy', 'preparation',
   'release-channel', 'renders', 'root-integration', 'session-identity', 'skill-gate', 'steer-message-shape',
   'task-rules', 'terminal-cleanup', 'timeout-branch', 'turnend-agent', 'turnend-rootagent',

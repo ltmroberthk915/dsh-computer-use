@@ -8,6 +8,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { ComputerUse } from '../lib/core/index.js'
 import { createCycleGate, agentKeyOf } from '../lib/cycle.js'
 import { createCycleLifecycle } from '../lib/cycle-lifecycle.js'
+import { createLeaveTimer } from '../lib/leave-timer.js'
 import { createTerminalCleanup } from '../lib/terminal-cleanup.js'
 import { registerTools } from '../lib/tools.js'
 import { recoveryProblem } from '../lib/recovery.js'
@@ -80,14 +81,15 @@ function harness(legacyTimeout) {
   // that the module may never learn where it lives would be a rule about the harness, not about the
   // product. Rewriting keeps `new URL(..., import.meta.url)` resolving exactly as it does in production.
   const prelude = source.replace(/^import .+$/gm, '').replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify(SOURCE_URL.href))
-  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'installAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createTerminalCleanup', 'installApprovalAttribution', prelude + '\nreturn apply;')(
-    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', installAudit, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL, createCycleLifecycle, createTerminalCleanup, () => {})
+  const apply = new Function('defineTool', 'Schema', 'ComputerUse', 'policyDecision', 'acknowledge', 'isAcked', 'ACK_HINT', 'isDrivingCall', 'mkDataDir', 'snapshotPath', 'installAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf', 'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure', 'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createLeaveTimer', 'createTerminalCleanup', 'installApprovalAttribution', prelude + '\nreturn apply;')(
+    def => def, fluent, FakeCU, () => ({ kind: state.policy }), () => true, () => true, '', () => false, () => '', () => '', installAudit, registerTools, fakeFs, os, path, (...args) => (gate = createCycleGate(...args)), agentKeyOf, fakeSetTimeout, fakeClearTimeout, fakeDate, recoveryProblem, () => {}, fileURLToPath, installToolExposure, () => undefined, ACTIVATION_TOOL, createCycleLifecycle, createLeaveTimer, createTerminalCleanup, () => {})
   // This fixture tests lifecycle ordering in the supported legacy registration mode;
   // actual scoped activation is tested separately against the host ToolRuntime.
   apply(ctx, { enabled: true, progressiveTools: false, automationMode: 'standard', calmAfterMs: legacyTimeout, maxActionsPerMinute: 60 })
   const agent = { id: 'agentA', session: { id: 'A' }, status: 'running', inject() {}, steer: m => state.steers.push(m), cancel() {} }
   const exec = { name: 'computer_state', arguments: { windows: true }, session: 'A', agent }
-  const pre = () => handlers.get('tools/pre-execute')(exec, () => ({ kind: 'allow' }))
+  const preFor = e => handlers.get('tools/pre-execute')(e, () => ({ kind: 'allow' }))
+  const pre = () => preFor(exec)
   pre()
   const run = () => definitions.get('computer_state').execute({ windows: true }, exec)
   const event = name => {
@@ -96,7 +98,7 @@ function harness(legacyTimeout) {
     if (name === 'exit') { state.exited = true; state.stop = false; state.lit = false }
     cu.onLine(JSON.stringify({ event: name, why: 'isolated no-timeout test' }))
   }
-  return { state, gate, cu, agent, handlers, pre, run, event, advance, exec, definitions }
+  return { state, gate, cu, agent, handlers, pre, preFor, run, event, advance, exec, definitions }
 }
 const settle = () => new Promise(r => setTimeout(r, 60))
 const wakes = h => h.state.steers.filter(m => m.source.summary === 'computer-use resumed').length
@@ -214,4 +216,36 @@ assert.doesNotMatch(native, /ThinkSafetyNetMs|_thinkHoldMs|_lastOpMs/)
   assert.equal(h.state.stop, false, 'the brake is still up after a no-answer ending')
   assert.equal(h.gate.state(), 'open', `the cycle gate was left on ${h.gate.state()} after the question ended — the owner would be refused`)
 }
-console.log('ok test-cycle-no-timeout — finite legacy settings ignored; long thinking/approval/pause retained; R wakes once; completion and Q still close; the merged ask engages, answers and releases without stranding the gate')
+// THE LEAVE TIMER'S INTEGRATION SEAM. The guard is separately unit-tested, but the hook wiring,
+// owner claim and real lifecycle release are only proven here: a shell call starts the 100 s
+// grace, a computer call inside it cancels, and an actual expiry really closes the cycle.
+{
+  const h = harness(0); await h.run()
+  const shell = { name: 'pwsh', session: 'A', agent: h.agent }
+  h.preFor(shell)
+  h.advance(99_999)
+  assert.equal(h.gate.state(), 'open', 'the leave grace fired before 100 s')
+  h.advance(1)
+  await settle()
+  assert.equal(h.gate.state(), 'ended', 'the 100 s leave grace did not close the cycle')
+  assert.equal(h.state.lit, false, 'the border stayed lit after the automatic release')
+}
+{
+  const h = harness(0); await h.run()
+  const shell = { name: 'pwsh', session: 'A', agent: h.agent }
+  h.preFor(shell)
+  h.advance(50_000)
+  await h.run() // a computer_* call starts: onStart cancels the timer
+  h.advance(100_000)
+  await settle()
+  assert.equal(h.gate.state(), 'open', 'a quick read→compute→type helper was released')
+  assert.equal(h.state.lit, true)
+}
+{
+  const h = harness(0); await h.run()
+  h.preFor({ name: 'todo_write', session: 'A', agent: h.agent })
+  h.advance(100_000)
+  await settle()
+  assert.equal(h.gate.state(), 'open', 'a local bookkeeping call armed the leave timer')
+}
+console.log('ok test-cycle-no-timeout — finite legacy settings ignored; long thinking/approval/pause retained; R wakes once; completion and Q still close; the merged ask engages, answers and releases without stranding the gate; the 100 s leave timer releases on a real shell leave and cancels on a computer return')

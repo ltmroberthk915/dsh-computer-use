@@ -28,6 +28,8 @@ An artifact in hand (token, clipboard text, a value, a path, a screenshot) means
 
 When in doubt, release: reacquiring the lease is cheap, while a lit border and an exclusive lease during long non-desktop work are not.
 
+The plugin also has a deterministic backstop: after a non-desktop top-level tool starts, if no `computer_*` call starts within **100 seconds**, it releases the lease automatically (`leaveDesktopGraceMs`; 0 disables). `hold` does not extend this timer. A release is not an error: call `computer_state` again before driving; old marks and cached observations are stale. A `run_code`-only host is covered by this block rule, not by the timer; if you dispatch desktop work through `run_code`, release at the same boundary yourself.
+
 ## Start, act, verify
 
 1. Identify the app with `computer_state {windows:true}`, reusing a known window; activate its hwnd with `computer_window` and require `activated:true` before capturing or driving; bind the intended record/field/document too. Minimized: restore, then activate. An occlusion error means inspect what covers it.
