@@ -6,6 +6,14 @@ const root = path.resolve(process.argv[2] || path.join(import.meta.dirname, '..'
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 assert.equal(pkg.name, 'dsh-codex-style-computer-use')
 assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml')
+// dsh-client-modules discovers the settings bundle through exports["./client"]; without it the
+// client.js below becomes a silent dead file and the settings section never appears.
+assert.equal(pkg.dsh?.client?.platform, 'web', 'dsh.client platform must be web')
+const clientExport = pkg.exports?.['./client']
+assert.ok(clientExport, 'exports["./client"] is required for the settings client bundle')
+const clientTarget = typeof clientExport === 'string' ? clientExport : clientExport?.default
+assert.equal(clientTarget, './client.js', 'exports["./client"] must resolve to ./client.js')
+assert(fs.existsSync(path.join(root, 'client.js')), 'client.js is missing')
 assert.equal(pkg.packageManager, undefined, 'git installs must not invoke a nested package manager')
 for (const hook of ['prepare', 'prepack', 'prepublish', 'prepublishOnly', 'preinstall', 'install', 'postinstall']) assert.equal(pkg.scripts?.[hook], undefined, hook)
 const patch = fs.readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')

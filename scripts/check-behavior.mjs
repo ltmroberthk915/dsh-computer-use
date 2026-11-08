@@ -32,7 +32,7 @@ const excluded = {
 }
 const reviewed = new Set([
   'action-feedback', 'agent-pointer', 'approval-attribution', 'ask-invariants', 'ask-merge', 'ask-orphan', 'ask-release',
-  'attention-native', 'attention', 'audit-completion', 'batch-coverage', 'buildusermessage', 'bundled-skill',
+  'attention-native', 'attention', 'audit-completion', 'batch-coverage', 'buildusermessage', 'bundled-skill', 'client-export',
   'coactive', 'compact-feedback', 'control-targets', 'core-system-recovery', 'cursor', 'cycle-completion',
   'cycle-no-timeout', 'cycle-open', 'desktop-acceptance-io', 'desktop-ownership', 'drag-options', 'evidence-protocol',
   'exit-coherence', 'feedback-cache-integration', 'feedback-policy', 'glow-pump', 'glow-visual', 'handoff-continuation',

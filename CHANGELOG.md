@@ -1,3 +1,16 @@
+# 2.2.8 — restore the host-debug settings client
+
+- **Regression fixed:** `package.json` did not export `"./client"`, so
+  `dsh-client-modules` silently skipped `client.js`; Settings never showed the
+  「电脑操控（调试）」 section and the second HOST_DEBUG_GATE could not be
+  opened. Add `"exports": { "./client": "./client.js" }` (the bundle and the
+  `dsh.client` declaration were already present).
+- `scripts/verify-package.mjs` now fails a package that lacks the client export
+  or target, and `build/test-client-export.mjs` pins the shipped bundle's
+  `settings.section`/API wiring. This is a packaging/identity guard, not a
+  native behavior change.
+- No worker/native change.
+
 # 2.2.7 — deterministic 100 s leave backstop
 
 - Add `lib/leave-timer.js`: the cycle-boundary skill is now backed by a real

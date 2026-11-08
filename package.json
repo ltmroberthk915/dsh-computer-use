@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-style-computer-use",
-  "version": "2.2.7",
+  "version": "2.2.8",
   "description": "Codex-style Computer Use for DeepSeek Harness: Windows desktop control, screenshots, UI Automation, human input handoff, approval gates and prebuilt native workers. Install and update from dsh-market without PowerShell 7 or build steps.",
   "type": "module",
   "main": "lib/index.js",
@@ -11,7 +11,8 @@
   "exports": {
     ".": "./lib/index.js",
     "./package.json": "./package.json",
-    "./cordis.patch.yml": "./cordis.patch.yml"
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./client": "./client.js"
   },
   "files": [
     "icon.svg",
