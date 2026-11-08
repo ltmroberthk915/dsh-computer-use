@@ -27,6 +27,7 @@ const F = {
   index: path.join(ROOT, 'lib/index.js'),
   gate: path.join(ROOT, 'lib/skill-gate.js'),
   skill: path.join(ROOT, 'skills/computer-use/SKILL.md'),
+  lifecycle: path.join(ROOT, 'skills/computer-use/references/lifecycle.md'),
 }
 const read = (p) => fs.readFileSync(p, 'utf8')
 const failures = []
@@ -59,6 +60,7 @@ const indexCode = stripComments(indexSrc)
 // so importing the module would test the unmutated file on disk and could never fire.
 const PHRASE = ((read(F.gate).match(/export const REQUIRED_PHRASE = '([^']+)'/) || [])[1] || '')
 const REAL_SKILL = read(F.skill)
+const REAL_LIFECYCLE = read(F.lifecycle)
 
 // ---- static wiring: registered, and NOT through `inject` -----------------------------------------
 const injectDecl = (indexCode.match(/export const inject = \[[^\]]*\]/) || [''])[0]
@@ -131,9 +133,12 @@ t('shipped: the name comes from the frontmatter', g && g.name === 'computer-use'
 t('shipped: the description is present and non-empty', g && typeof g.description === 'string' && g.description.length > 20, `description = ${g && g.description}`)
 t('shipped: the body KEEPS the receipt phrase the gate quotes (else every session locks forever)',
   g && PHRASE.length > 0 && g.content.includes(PHRASE), 'the registered body does not contain REQUIRED_PHRASE')
-t('shipped: the manual contains the next-action release gate (not just “when done”)',
-  /## Release gate/.test(REAL_SKILL) && /next-action test/.test(REAL_SKILL) && /computer_ctrl \{action:"release"\}/.test(REAL_SKILL),
-  'the release boundary wording disappeared from SKILL.md')
+t('shipped: the manual defines one cycle boundary (continuous desktop block)',
+  /## Cycle boundary/.test(REAL_SKILL) && /continuous desktop block/.test(REAL_SKILL) && /computer_ctrl \{action:"release"\}/.test(REAL_SKILL),
+  'the cycle-boundary wording disappeared from SKILL.md')
+t('shipped: stale task-scoped release sentences are gone',
+  !/Release the cycle when desktop work is done/.test(REAL_SKILL) && !/immediately after the final desktop action/.test(REAL_LIFECYCLE),
+  'an old task-scoped release boundary is still shipped')
 t('shipped: the body is the manual, not the frontmatter', g && !/^---/.test(g.content) && /^#\s/.test(g.content.trimStart()), 'frontmatter leaked into the body')
 t('shipped: resourceBase points at the skill directory so references/*.md resolve',
   g && g.resourceBase && g.resourceBase.kind === 'directory' && /skills[\\/]computer-use[\\/]?$/.test(g.resourceBase.path), `resourceBase = ${JSON.stringify(g && g.resourceBase)}`)

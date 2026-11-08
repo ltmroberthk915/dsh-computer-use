@@ -1,3 +1,23 @@
+# 2.2.6 — cycle boundary, not a per-call release gate
+
+- 2.2.5's "check before every tool call" over-corrected: it forced a release
+  before quick read→compute→type helpers and could lose a transient scene. It
+  also shipped the older task-scoped release sentence in two places.
+- Replace it with one **cycle boundary**: a cycle covers one continuous desktop
+  block. Release when the next step leaves that block for publish/upload/install/
+  build/test/network/file-write/analysis/chat, or when you cannot name the next
+  desktop action. Keep it for a quick readback you type straight back, a
+  `run_code`/observation helper that continues the block, or a single short
+  helper needed for the next click. An artifact in hand is a signal, not an
+  automatic release point. `hold` is only for position-sensitive readback inside
+  the block, never across a long command.
+- Fix the contradictory "Release the cycle when desktop work is done" and
+  "immediately after the final desktop action" sentences in `SKILL.md` and
+  `references/lifecycle.md`.
+- The shipped-manual guard now checks one boundary rule and the absence of the
+  stale task-scoped sentences, rather than locking exact prose.
+- No native/runtime behavior change; the worker is unchanged.
+
 # 2.2.5 — release by the next action, not by task completion
 
 - The bundled `computer-use` skill now starts with a **Release gate** applied

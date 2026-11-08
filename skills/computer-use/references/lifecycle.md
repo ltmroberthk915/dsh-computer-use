@@ -17,9 +17,9 @@ The human's own words are the spec here; this section is what they mean.
   it ("Computer use 周期结束之后, 所有跟 computer use 相关的监听, 全部都要终结").
 - **A pause NEVER ends the cycle.** The cycle stays live while paused. Normal desktop completion can release an unpaused cycle before the chat turn ends; an explicit Q remains a terminal exit for that turn.
 
-## Release as soon as desktop work is done
+## Release at the cycle boundary
 
-Call `computer_ctrl {action:"release"}` immediately after the final desktop action and its verification. This closes the indicator/listeners and releases the exclusive desktop lease while the conversation continues. Subsequent explanation, computation and other tools do not require a computer-use cycle. When new desktop work becomes necessary, a later real tool call can open a new cycle in the same turn.
+Call `computer_ctrl {action:"release"}` when the next step leaves this continuous desktop block for a different work item (publish, upload, install, build, test, network, a file write, analysis or chat), or when you cannot name the next desktop action. This closes the indicator/listeners and releases the exclusive desktop lease while the conversation continues. A quick readback you type straight back, a `run_code`/observation helper that itself continues the desktop action, or a single short helper needed for the next click is still inside the block; keep the cycle. An artifact in hand is a signal that the block may be ending, not an automatic release point. `hold` is only for position-sensitive readback inside the block, never across a long command; `free` then release. When in doubt, release; a later real tool call can open a new cycle in the same turn.
 
 Release is owner-checked and distinct from `exit`: it does not cancel the conversation or write an EXITED latch. It cannot release an explicit human pause or a pending question. Closure is serialized with ownership acquisition so an old owner's delayed release cannot close a new owner's cycle. An explicit Ctrl+Alt+Q still prevents reopening in that same turn.
 

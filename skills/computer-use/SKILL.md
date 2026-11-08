@@ -11,24 +11,22 @@ Read this entry before driving. The skill gate requires this receipt once per se
 
 Tools load for the current Agent after a successful `skill` load or this receipt; if invisible, call `computer_use_activate` (opens no cycle, releases no brake). Stop/exit and computer_ask work before activation. Issue real tool calls: a target handle is a string argument to computer_uia_act — tags, examples and prose do not execute; in a run_code-only host, call tools through run_code. Observation and the safety direction (ask, stop, exit) are not gated; a human brake still refuses observation. Read a referenced file only when its condition applies.
 
-## Release gate (applies before EVERY tool call)
+## Cycle boundary (one rule)
 
-A desktop cycle is a lease on the live desktop, not a flag for the whole task. Before every tool call while a cycle is open, ask with the **next-action test**:
+A desktop cycle covers **one continuous desktop block**, not the user's task and not the turn.
 
-> Does my NEXT call need the mouse, keyboard, UI Automation, a screenshot, or this same live clipboard?
+When your next call is not `computer_*`, use this two-part test:
 
-- **NO → call `computer_ctrl {action:"release"}` FIRST**, before that shell/file/network/npm/chat/analysis call. Do not keep the lease while you use the desktop artifact somewhere else.
-- **YES → keep it**, but only for that continuous desktop step.
+1. Can you name the next desktop action in this same block?
+2. Is this non-desktop step a short helper needed for that action, rather than a different work item?
 
-The lease ends when the desktop **artifact** is obtained: clipboard text read, UIA value/control read, screenshot captured, field typed and verified, file saved, or window activated. It does not wait for the user's whole task, the final answer, or a turn boundary. Examples that all require immediate release after the `computer_*` result:
+Keep the cycle only if both answers are yes and the helper is quick. Otherwise release first: `computer_ctrl {action:"release"}`. Publish, upload, install, build, test, network, a file write, analysis and a chat answer are different work items, so release before them. `todo_write` or a quick local read between two desktop actions is a helper, not a block boundary. A `run_code` call that itself dispatches the next desktop action, and an observation helper used for that action, remain part of the block.
 
-- `computer_clip` returned a token/password/text and the next step is `npm publish`, a shell command, or a file write.
-- `computer_shot` returned an image and the next step analyzes or edits it outside the desktop.
-- `computer_uia` / `computer_state` returned a value and the next step is a shell/file/network call.
-- `computer_type` verified a field and the next step is not another `computer_*` call.
-- A save/open dialog returned a path and the next step uses that path in a non-desktop tool.
+An artifact in hand (token, clipboard text, a value, a path, a screenshot) means the desktop block **may** be ending; it is not an automatic release point. If the next call is another desktop action (paste, verify, click), keep the cycle; if it is non-desktop and you cannot name the next desktop action, release.
 
-Holding “because I may need the desktop again later” is not allowed: reacquiring is cheap, and a later need starts a fresh cycle with fresh evidence. Holding while publishing, uploading, running a command, writing a file or composing a chat answer is the exact failure this gate prevents. An explicit `computer_ctrl {action:"hold"}` is the only reason to stay on the desktop across non-desktop work; `free` and then `release` when that readback is done. Human pause/question/exit still take precedence. **Self-audit:** if you have made any non-`computer_*` tool call since your last `computer_*` call and the cycle is still open, you missed this gate — release now before continuing.
+`hold` is only for a position-sensitive readback inside the continuous block — never across a build, publish, upload or long command. `free`, then release when the readback is done. Pauses, questions and human handoffs still own the desktop; release does not override them.
+
+When in doubt, release: reacquiring the lease is cheap, while a lit border and an exclusive lease during long non-desktop work are not.
 
 ## Start, act, verify
 
@@ -38,7 +36,7 @@ Holding “because I may need the desktop again later” is not allowed: reacqui
 4. Otherwise use an observed mark or measured coordinate. A mark is a snapshot ID and does not follow scrolling; each mark action checks window identity, position and sampled pixels, and STALE_MARK means no input was dispatched. Refresh with `computer_marks {refresh:true}` and pick by NEW id (old ids retire); refresh after known scrolling/navigation even if a sample misses it. dx/dy offsets work in direct and batch clicks.
 5. Batch a coherent set to a natural checkpoint — no fixed step count. Steps run serially; failure, failed activation or cancellation stops later ones. Reuse returned evidence; `shot:"auto"` adds at most one observation when needed, `shot:"never"` suits text/readback verification. Batch known inputs rather than paying an intermediate image per keystroke.
 6. Verify the outcome: field value, saved record/document, selected range, app status or image. A provider accepting input proves neither a save nor the business result. Report what was observed and any unresolved uncertainty, then finish.
-7. Release at the boundary defined by the release gate above — when the next action no longer needs the live desktop; do not wait for task completion, a final summary, or the turn end. `computer_ctrl {action:"release"}` closes desktop control only, not the conversation; a later desktop need opens a fresh cycle and requires fresh evidence. If a pause, question or handoff currently owns the desktop, finish that state first. Normal turn completion also releases without a question card; explicit pauses/questions are preserved.
+7. Release at the cycle boundary above — when the next step leaves this continuous desktop block for a different work item, or when you cannot name the next desktop action. Do not wait for task completion, a final summary, or the turn end. `computer_ctrl {action:"release"}` closes desktop control only, not the conversation; a later desktop need opens a fresh cycle and requires fresh evidence. If a pause, question or handoff currently owns the desktop, finish that state first. Normal turn completion also releases without a question card; explicit pauses/questions are preserved.
 
 `since` (same query + previous observation id) returns added/changed/removed elements and order changes; omitted elements keep their state, while no/expired base, changed scope, partial results or an uneconomical diff return full. `snapshot` retrieves a retained observation without capturing — not fresh verification; page it with `offset`/`limit`. `computer_ctrl {action:"clear_cache"}` clears this Agent's cache without a cycle. Caches are bounded and expire; storage failure falls back to bounded memory and memory pressure to inline results without a fake snapshot id. Omit since/snapshot for fresh evidence after losing the baseline. See [progressive-control.md](references/progressive-control.md).
 
@@ -78,7 +76,7 @@ Before replaying a write, inspect whether it already took effect, then focus, mo
 
 **Document editors (Word/WPS/PDF) — destructive selection:** never triple-click, never `ctrl+a`, never select-then-paste as an edit strategy. Triple-click selects an unpredictable scope (measured 2026-11-07: it replaced an entire one-page form in Word). Edit one line at a time: click inside the line, `home`, then `shift+end`, CAPTURE and confirm the selection covers only that line, then type. After any unexpected document change press `ctrl+z` immediately and capture before continuing; never save a document you have not seen in full after the edit. Save As a NEW file and never overwrite the original.
 
-**Downloads:** resolve the real download directory from `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders` (`{374DE290-123F-4565-9164-39C4925E467B}`) — a redirected profile puts it outside `%USERPROFILE%`. Edge refuses some HTTP documents with "无法安全下载" and leaves a small `.crdownload` stub; there may be no Keep option. Attempt the download at most twice, then report the block and use an already-downloaded copy or the site's preview if it exists; do not loop on the security UI. Preserve the breakpoint and live cycle; elapsed time cannot release a human brake. Use computer_wait for transient readiness; selftest/calibration are for observed input-delivery or coordinate problems, not every failure.
+**Downloads:** resolve the real download directory from `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders` (`{374DE290-123F-4565-9164-39C4925E467B}`) — a redirected profile puts it outside `%USERPROFILE%`. Edge refuses some HTTP documents with "无法安全下载" and leaves a small `.crdownload` stub; there may be no Keep option. Attempt the download at most twice, then report the block and use an already-downloaded copy or the site's preview if it exists; do not loop on the security UI. Keep the cycle only for this blocked-download retry; elapsed time cannot release a human brake. Use computer_wait for transient readiness; selftest/calibration are for observed input-delivery or coordinate problems, not every failure.
 
 For pixel waits pass the observed hwnd to `computer_wait` (stable/change) so animation elsewhere does not delay you; the default covers the whole virtual desktop. A caret inside the region can still prevent settling — verify with UIA state instead of spending full timeouts. `lastDiffPct` describes only the final sample pair; a moved/minimized target needs a fresh observation.
 
@@ -101,7 +99,7 @@ A cold tree may expose only window chrome/an ancestor: use a point query and one
 
 ## Human control and permission
 
-Initial observation is free; dispatching input and preserving the scene are the two held states described below. Use `computer_ctrl {action:"hold"}` before a position-sensitive readback and `{action:"free"}` as soon as thinking no longer needs an unchanged desktop; neither creates a cycle nor releases a manual brake. Release the cycle when desktop work is done.
+Initial observation is free; dispatching input and preserving the scene are the two held states described below. Use `computer_ctrl {action:"hold"}` before a position-sensitive readback and `{action:"free"}` as soon as thinking no longer needs an unchanged desktop; neither creates a cycle nor releases a manual brake. Release at the cycle boundary above, not when the user's task or the turn ends.
 
 During acting/holding a compact tilted blue kite temporarily replaces the pointer; its tip is the exact native hotspot and its centre symbol follows recognized native shapes, neutral when unknown. Native cursor handles and visibility are preserved for cursor checks and screenshot burn-in, so tool images intentionally show the application cursor, not the kite. Free, handoff, pause and release restore native presentation; a short-lived visibility lease restores it if rendering or the worker stops. The symbol proves no target or effect.
 
