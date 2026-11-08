@@ -1,3 +1,18 @@
+# 2.2.5 — release by the next action, not by task completion
+
+- The bundled `computer-use` skill now starts with a **Release gate** applied
+  before every tool call: if the next call does not need the mouse, keyboard,
+  UI Automation, a screenshot or the same live clipboard, release first. The
+  lease ends when the desktop artifact is obtained (token/clipboard text, a
+  read value, a path, a saved file, a verified field, a captured image), not
+  when the user's whole task or the turn ends.
+- Explicit examples cover common non-token endings (screen text, UIA value,
+  save/open path, screenshot), plus a self-audit: a non-`computer_*` call made
+  while the cycle is still open means the release was missed.
+- The shipped-manual guard now asserts that the next-action release gate is
+  present, so a future edit cannot silently remove it.
+- No native or runtime behavior change; the worker is unchanged.
+
 # 2.2.4 — bounded handoff wait; issue #3/#4 verification
 
 - `waitForHuman` now ends a silent, non-progressing handoff after 60 s with

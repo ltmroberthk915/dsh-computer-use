@@ -11,6 +11,25 @@ Read this entry before driving. The skill gate requires this receipt once per se
 
 Tools load for the current Agent after a successful `skill` load or this receipt; if invisible, call `computer_use_activate` (opens no cycle, releases no brake). Stop/exit and computer_ask work before activation. Issue real tool calls: a target handle is a string argument to computer_uia_act — tags, examples and prose do not execute; in a run_code-only host, call tools through run_code. Observation and the safety direction (ask, stop, exit) are not gated; a human brake still refuses observation. Read a referenced file only when its condition applies.
 
+## Release gate (applies before EVERY tool call)
+
+A desktop cycle is a lease on the live desktop, not a flag for the whole task. Before every tool call while a cycle is open, ask with the **next-action test**:
+
+> Does my NEXT call need the mouse, keyboard, UI Automation, a screenshot, or this same live clipboard?
+
+- **NO → call `computer_ctrl {action:"release"}` FIRST**, before that shell/file/network/npm/chat/analysis call. Do not keep the lease while you use the desktop artifact somewhere else.
+- **YES → keep it**, but only for that continuous desktop step.
+
+The lease ends when the desktop **artifact** is obtained: clipboard text read, UIA value/control read, screenshot captured, field typed and verified, file saved, or window activated. It does not wait for the user's whole task, the final answer, or a turn boundary. Examples that all require immediate release after the `computer_*` result:
+
+- `computer_clip` returned a token/password/text and the next step is `npm publish`, a shell command, or a file write.
+- `computer_shot` returned an image and the next step analyzes or edits it outside the desktop.
+- `computer_uia` / `computer_state` returned a value and the next step is a shell/file/network call.
+- `computer_type` verified a field and the next step is not another `computer_*` call.
+- A save/open dialog returned a path and the next step uses that path in a non-desktop tool.
+
+Holding “because I may need the desktop again later” is not allowed: reacquiring is cheap, and a later need starts a fresh cycle with fresh evidence. Holding while publishing, uploading, running a command, writing a file or composing a chat answer is the exact failure this gate prevents. An explicit `computer_ctrl {action:"hold"}` is the only reason to stay on the desktop across non-desktop work; `free` and then `release` when that readback is done. Human pause/question/exit still take precedence. **Self-audit:** if you have made any non-`computer_*` tool call since your last `computer_*` call and the cycle is still open, you missed this gate — release now before continuing.
+
 ## Start, act, verify
 
 1. Identify the app with `computer_state {windows:true}`, reusing a known window; activate its hwnd with `computer_window` and require `activated:true` before capturing or driving; bind the intended record/field/document too. Minimized: restore, then activate. An occlusion error means inspect what covers it.
@@ -19,7 +38,7 @@ Tools load for the current Agent after a successful `skill` load or this receipt
 4. Otherwise use an observed mark or measured coordinate. A mark is a snapshot ID and does not follow scrolling; each mark action checks window identity, position and sampled pixels, and STALE_MARK means no input was dispatched. Refresh with `computer_marks {refresh:true}` and pick by NEW id (old ids retire); refresh after known scrolling/navigation even if a sample misses it. dx/dy offsets work in direct and batch clicks.
 5. Batch a coherent set to a natural checkpoint — no fixed step count. Steps run serially; failure, failed activation or cancellation stops later ones. Reuse returned evidence; `shot:"auto"` adds at most one observation when needed, `shot:"never"` suits text/readback verification. Batch known inputs rather than paying an intermediate image per keystroke.
 6. Verify the outcome: field value, saved record/document, selected range, app status or image. A provider accepting input proves neither a save nor the business result. Report what was observed and any unresolved uncertainty, then finish.
-7. When desktop work is done call `computer_ctrl {action:"release"}` — even while you keep explaining or using other tools. Do not retain ownership because the chat is alive; a later real need opens a fresh cycle. Normal turn completion releases without a question card; explicit pauses/questions are preserved.
+7. Release at the boundary defined by the release gate above — when the next action no longer needs the live desktop; do not wait for task completion, a final summary, or the turn end. `computer_ctrl {action:"release"}` closes desktop control only, not the conversation; a later desktop need opens a fresh cycle and requires fresh evidence. If a pause, question or handoff currently owns the desktop, finish that state first. Normal turn completion also releases without a question card; explicit pauses/questions are preserved.
 
 `since` (same query + previous observation id) returns added/changed/removed elements and order changes; omitted elements keep their state, while no/expired base, changed scope, partial results or an uneconomical diff return full. `snapshot` retrieves a retained observation without capturing — not fresh verification; page it with `offset`/`limit`. `computer_ctrl {action:"clear_cache"}` clears this Agent's cache without a cycle. Caches are bounded and expire; storage failure falls back to bounded memory and memory pressure to inline results without a fake snapshot id. Omit since/snapshot for fresh evidence after losing the baseline. See [progressive-control.md](references/progressive-control.md).
 

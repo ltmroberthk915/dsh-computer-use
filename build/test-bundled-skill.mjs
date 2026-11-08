@@ -131,6 +131,9 @@ t('shipped: the name comes from the frontmatter', g && g.name === 'computer-use'
 t('shipped: the description is present and non-empty', g && typeof g.description === 'string' && g.description.length > 20, `description = ${g && g.description}`)
 t('shipped: the body KEEPS the receipt phrase the gate quotes (else every session locks forever)',
   g && PHRASE.length > 0 && g.content.includes(PHRASE), 'the registered body does not contain REQUIRED_PHRASE')
+t('shipped: the manual contains the next-action release gate (not just “when done”)',
+  /## Release gate/.test(REAL_SKILL) && /next-action test/.test(REAL_SKILL) && /computer_ctrl \{action:"release"\}/.test(REAL_SKILL),
+  'the release boundary wording disappeared from SKILL.md')
 t('shipped: the body is the manual, not the frontmatter', g && !/^---/.test(g.content) && /^#\s/.test(g.content.trimStart()), 'frontmatter leaked into the body')
 t('shipped: resourceBase points at the skill directory so references/*.md resolve',
   g && g.resourceBase && g.resourceBase.kind === 'directory' && /skills[\\/]computer-use[\\/]?$/.test(g.resourceBase.path), `resourceBase = ${JSON.stringify(g && g.resourceBase)}`)
