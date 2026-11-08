@@ -33,6 +33,13 @@ assert.match(core, /DSH_CU_HOST_DEBUG_FILE: this\.hostDebugFile/)
 // 3) The worker requires BOTH, refuses close/minimize/hide even when allowed, and audits.
 assert.match(worker, /_requestHostDebug && _requestHostFull && HostDebugFileEnabled\(\)/)
 assert.match(worker, /op == "close" \|\| op == "minimize" \|\| op == "hide"/)
+// The click path has an EXTRA preliminary HOST-GUARDED label before GuardHostDriving. When the
+// gates allow, that label must be cleared or the generic blocked!=null refusal wins even though
+// the gate just returned successfully (the 2026-11-09 "debug ON, full access, click still refused"
+// report). Dry-run must report the same decision without dispatching.
+assert.match(worker, /bool hostClickAllowed = hostVictim && HostDrivingAllowed\(\)/)
+assert.match(worker, /if \(hostVictim\)\s*\{\s*GuardHostDriving\([\s\S]{0,240}?blocked = null;[\s\S]{0,160}?detail = null;/,
+  'host click must clear the preliminary HOST-GUARDED label after GuardHostDriving allows')
 assert.match(worker, /"HOST_DEBUG_GATE: "/)
 assert.match(worker, /AuditRecord\("HOST-CONTROL"/)
 // A worker launched WITHOUT host identity (CLI/MCP/test harness) must not be able to close the

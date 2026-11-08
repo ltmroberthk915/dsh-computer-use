@@ -1,3 +1,15 @@
+# 2.2.9 — a host-debug click really reaches the host
+
+- **Regression fixed:** the click path set a preliminary `blocked = "HOST-GUARDED"`
+  label before calling `GuardHostDriving`. With debug ON + danger-full-access the
+  gate returned allowed, but the generic `blocked != null` refusal still fired
+  afterwards, so a click was refused as `HOST-GUARDED` even though both gates
+  were open. Clear the preliminary label after `GuardHostDriving` allows; the
+  dry-run verdict now reports the same decision without dispatching.
+- Rebuilt the native worker and its source/binary manifest; the host-debug
+  settings client (`"./client"` export) remains from 2.2.8.
+- `build/test-host-gate.mjs` now pins the clear path and the dry-run decision.
+
 # 2.2.8 — restore the host-debug settings client
 
 - **Regression fixed:** `package.json` did not export `"./client"`, so

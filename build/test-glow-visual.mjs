@@ -50,7 +50,7 @@ const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
 // without DSH_CU_HOST_PID/EXE (CLI, MCP, a test harness) has its guard fail-open by design, and
 // on 2026-11-08 a harness used exactly that to send WM_CLOSE to the real Harness. windowOp
 // close/minimize/hide now also refuses when the target image is DeepSeek Harness.exe and host
-// identity is absent, unless the caller passes confirmHost:true. Painting block untouched.
+// identity is absent, unless the caller passes confirmHost:true. Painting block untouched.\n// Re-reviewed 2026-11-09: the host-debug click path clears its preliminary HOST-GUARDED label\n// after GuardHostDriving allows, so debug mode actually reaches the host. Painting block untouched.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -58,7 +58,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  "8653ec1dba29f978fa615d672f27f3989522a64289adfeb54082cc709c8151e0",
+  "31d527965d8ed2581f2db1c5b825ae81a79a295a894c36fc006364543d2ad5dd",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')

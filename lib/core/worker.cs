@@ -4938,6 +4938,12 @@ namespace DshComputerUse.Worker
                 // no button), so it is allowed even while the brake is on — which is exactly when
                 // you want to ask "would this click land where I think?" before re-arming. It must
                 // never THROW: a failed precondition is the answer it was asked for.
+                // A host click that passed GuardHostDriving (debug mode + full permission) must not
+                // fall through to the generic `blocked != null` refusal below: the gate ALLOWS it,
+                // while `blocked` still carries the preliminary "HOST-GUARDED" label. Clearing both
+                // fields here is what makes the two gates actually usable (the 2026-11-09 report:
+                // host-debug ON, danger-full-access, click still refused as HOST-GUARDED).
+                bool hostClickAllowed = hostVictim && HostDrivingAllowed();
                 if (dryRun)
                 {
                     Dictionary<string, object> dry = Dict(
@@ -4945,11 +4951,17 @@ namespace DshComputerUse.Worker
                         "receives", under == IntPtr.Zero ? null : (object)(Short(WinTitleOf(under), 50) + " (pid " + PidOf(under) + ")"),
                         "receivesHwnd", under.ToInt64(),
                         "expected", want == IntPtr.Zero ? null : (object)(Short(WinTitleOf(want), 50) + " (pid " + PidOf(want) + ")"),
-                        "wouldBlock", blocked,
-                        "verdict", detail == null ? "ok — the pixel belongs to the intended window" : (blocked + ": " + detail));
+                        "wouldBlock", hostClickAllowed ? null : blocked,
+                        "verdict", hostClickAllowed ? "ok — host-driving gates are open for this click"
+                            : detail == null ? "ok — the pixel belongs to the intended window" : (blocked + ": " + detail));
                     return dry;
                 }
-                if (hostVictim) GuardHostDriving(unchecked((int)PidOf(under)), "click");
+                if (hostVictim)
+                {
+                    GuardHostDriving(unchecked((int)PidOf(under)), "click");
+                    blocked = null;
+                    detail = null;
+                }
                 bool allowCovered = GetB(a, "allowCovered", false);
                 // NARROWED (2026-11-07): allowCovered is an escape for the target app's OWN embedded
                 // renderer only. It used to authorise the click whatever owned the pixel, so an
