@@ -243,4 +243,43 @@ await test('Cordis-style traced method access restores the stored method on unin
   assert.match((await tools.serviceAsk(f.exec,f.ask)).decision.reason,/automatically rejected/);
   dispose();assert.equal(target.serviceAsk,oldAsk);
 });
+await test('an answer-channel rejection never claims what the human saw', async () => {
+  const f=fixture({policy:'ask'}), i=installed(f);
+  const result=await i.call();
+  assert.match(result.decision.reason,/rejected by the approval channel/);
+  assert.doesNotMatch(result.decision.reason,/may not have seen|the user rejected|automatically/);
+  i.dispose();
+});
+await test('two installs on one registry restore the original exactly once, in either disposal order', async () => {
+  const f=fixture({policy:'never'}); f.owner.serviceAsk=oldAsk;
+  const disposers=[];
+  const install=()=>{ let d; installApprovalAttribution({get:()=>f.owner,effect:fn=>{d=fn()}},{info(){},warn(){}}); disposers.push(d); if(disposers.length===2) return d; };
+  install(); const second=install();
+  assert.equal(Object.hasOwn(f.owner,'serviceAsk'),true);
+  disposers[0]();  // FIFO: the first install is torn down while the second is still live
+  assert.equal(Object.hasOwn(f.owner,'serviceAsk'),true,'the surviving install must stay wrapped');
+  assert.match((await f.owner.serviceAsk(f.exec,f.ask)).decision.reason,/automatically rejected/);
+  disposers[1]();
+  assert.equal(f.owner.serviceAsk,oldAsk,'both disposers together restore the original method');
+  assert.equal(second===undefined,false);
+});
+await test('two installs through a FRESH TRACED PROXY still share one seam and restore exactly once', async () => {
+  // ctx.get('tools') hands out a fresh proxy per call, so identity-based bookkeeping cannot
+  // dedupe installs; the seam must dedupe through the wrapper it installed on the service.
+  const f=fixture({policy:'never'}); f.owner.serviceAsk=oldAsk;
+  const trace=()=>new Proxy(f.owner,{get(object,key,receiver){const value=Reflect.get(object,key,receiver);return typeof value==='function'?(...args)=>Reflect.apply(value,receiver,args):value}});
+  const disposers=[];
+  const install=()=>{let d;installApprovalAttribution({get:()=>trace(),effect:fn=>{d=fn()}},{info(){},warn(){}});disposers.push(d)};
+  install();install();
+  disposers[0]();
+  assert.equal(Object.hasOwn(f.owner,'serviceAsk'),true,'the surviving install must stay wrapped');
+  assert.match((await f.owner.serviceAsk(f.exec,f.ask)).decision.reason,/automatically rejected/);
+  disposers[1]();
+  assert.equal(f.owner.serviceAsk,oldAsk,'the original method is restored');
+});
+await test('a registry that arrives without a serviceAsk seam reports unavailable, not awaiting', async () => {
+  const state=installApprovalAttribution({get:()=>undefined,inject:(names,cb)=>cb({tools:{}}),effect:()=>{}},{info(){},warn(){}});
+  assert.equal(state.installed,false);
+  assert.equal(state.reason,'unavailable');
+});
 console.log(`${passed} regression tests passed`);

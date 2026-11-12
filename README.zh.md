@@ -170,12 +170,29 @@ ID**：派发输入前会核对窗口身份与采样像素，因此过期的 mar
 | 模式 | 观察 | 操作 |
 |---|---|---|
 | `read-only` | 允许 | 拒绝 |
-| `standard` | 允许 | 每个动作都经宿主审批卡确认 |
+| `standard` | 允许 | 每个动作都经宿主审批卡确认（无卡可用时拒绝） |
 | `autonomous` | 允许 | 允许，高危动作仍需确认 |
 | `unrestricted` | 允许 | 允许（worker 自身的失效保护与限速仍在） |
 
-高危动作（关闭窗口、`alt+f4`、`win+r` 等）在任何模式下都要确认。
-密码框通过 UI Automation 的 `IsPassword` 识别，默认拒绝输入。
+高危动作（关闭窗口、`alt+f4`、`win+r` 等）在任何模式下都要确认——前提是当前会话真的能弹卡；
+完全权限下的情形见下。密码框通过 UI Automation 的 `IsPassword` 识别，默认拒绝输入。
+
+**只有在当前会话真的能弹卡时，`ask` 才会被交给宿主。** 宿主按会话给出审批策略；`danger-full-access`
+预设选的是 `never`，此时弹不出任何卡片，任何 `ask` 都会被自动拒绝。插件因此自己裁决这个 ask，而不是
+把一个无人可答的请求转发下去：
+
+- `autonomous` + 已证实完全权限：高危动作按人的既有授权直接执行（`policy.jsonl` 记为
+  `escalated:"full-access"`）。
+- `standard`：拒绝并说明原因。完全权限不是一次审批，而这个模式的契约是「逐次同意」；确实要放行，
+  请把 `automationMode` 提到 `autonomous`。
+- 被委派的 subagent 会话：拒绝。`@deepseek-ai/dsh-subagent` 给每个子会话钉死 `never` 并复制父会话
+  沙箱，这两件事都不是人给的授权。
+- 任何没有「已证实完全权限」的沙箱：明确拒绝，理由写明「本会话审批弹窗不可用（审批策略 `never`），
+  没有执行任何动作，也没有询问用户」。
+
+宿主那句遗留的「the user rejected tool "…"」对 `computer_*` 调用会被改写，因此自动拒绝不会再被写成
+人的决定。只要还能弹卡，`standard` 与 `autonomous` 照旧询问。门禁诊断落在
+`$DSH_HOME/data/computer-use/policy.jsonl`（模式、通道、裁决；启动 URL 已脱敏；不记录输入文本）。
 
 ## 安全模型
 

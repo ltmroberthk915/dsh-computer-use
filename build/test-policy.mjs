@@ -148,8 +148,8 @@ const MUTATIONS = [
   { check: 'exit-all-modes', what: 'delete the exit branch (the exact hole: "unknown computer_ctrl action: exit" in all four modes)',
     find: "    if (act === 'exit') return { kind: 'allow' }\n", with: '' },
   { check: 'resume-refused', what: 're-add the dead resume branch as an ALLOW',
-    find: "    if (act === 'calibrate' || act === 'indicator') return decideActuation(name, a, mode)",
-    with: "    if (act === 'resume') return { kind: 'allow' }\n    if (act === 'calibrate' || act === 'indicator') return decideActuation(name, a, mode)" },
+    find: "    if (act === 'calibrate' || act === 'indicator') return decideActuation(name, a, mode, approvalEnv)",
+    with: "    if (act === 'resume') return { kind: 'allow' }\n    if (act === 'calibrate' || act === 'indicator') return decideActuation(name, a, mode, approvalEnv)" },
   { check: 'observations-readonly', what: 'drop computer_shot from OBSERVATION_TOOLS',
     find: "'computer_shot', ", with: '' },
 ]

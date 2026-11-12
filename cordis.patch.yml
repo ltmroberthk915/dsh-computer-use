@@ -6,6 +6,12 @@
 # (click / type / key / drag / scroll / clipboard write) goes through the host's approval card.
 # Raise it to `autonomous` (high-risk operations still ask) or `unrestricted` deliberately, in
 # Settings → computer-use, once you have decided the machine may be driven without a prompt.
+#
+# If the session's approval policy is `never` (DSH selects it for the danger-full-access preset)
+# there is no card to show. `standard` then refuses rather than running, because full access is
+# not an approval; `autonomous` runs the unanswerable high-risk ask under the full-access grant
+# and records it as `escalated:"full-access"` in $DSH_HOME/data/computer-use/policy.jsonl. A
+# delegated subagent session never inherits that grant.
 - insert:
   - id: computer-use
     name: dsh-codex-style-computer-use

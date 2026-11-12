@@ -1,3 +1,49 @@
+# 2.3.0 — full access stops speaking for the user
+
+- **Fixed (reported 2026-11-12):** in a `danger-full-access` session the host's approval policy
+  is `never`, so the plugin's `{kind:'ask'}` for a high-risk action was auto-rejected **without
+  ever showing a prompt**, and the host tool layer reported
+  `Error: the user rejected tool "computer_key"` for a decision no human made
+  (`computer_key {combo:"backspace"}`, autonomous mode, user had not touched the machine).
+  `lib/approval-env.js` now reads the calling session's effective approval policy, sandbox mode
+  and delegation identity per call, and `lib/policy.js` settles the ask against the channel that
+  actually exists: **`autonomous` + proven full access runs it** under the human's standing
+  grant; every other combination **refuses with a reason that names the exact blocker**. A real
+  `ask` channel is untouched and still shows the host card and its `approval/asked` +
+  `approval/decided` audit pair.
+- **No widening:**
+  - `standard` keeps failing closed. Full access is not an approval, and that mode's contract is
+    per-action consent; it now refuses with a message naming the mode instead of running (or
+    being mislabelled as a user rejection).
+  - A **delegated subagent session never inherits the grant**: `@deepseek-ai/dsh-subagent` pins
+    `approval/policy = never` on every child and copies the parent's sandbox mode, so those two
+    facts are a child's default shape, not the human's grant.
+  - Full access must come from a live per-session service (`sandboxPolicy.resolve({session}).mode`,
+    then the `permissionPresets` projection). The deployment default (`shell.sandboxMode`) is
+    never used, the throttled durable session record may only **narrow** the sandbox, and the
+    approval policy is never taken from that cache. Unknown facts keep the old `ask`.
+- **Attribution seam hardened:** `lib/approval-attribution.js` also installs through
+  `ctx.inject(['tools'], …)` when the tool registry mounts after the plugin, ref-counts its
+  wrappers per service (an out-of-order/FIFO unload can no longer leave a dead wrapper installed),
+  reports `installed` / `awaiting-tools` / `unavailable` in the gate record, and rewrites only
+  the exact legacy sentence for `computer_*` tools. A human rejection under `ask` is no longer
+  hedged with a claim about what the human saw.
+- **Diagnostics:** one `gate …` log line per `computer_*` call (automation mode, approval policy,
+  sandbox mode and which service supplied each, delegation flag, raw vs final decision,
+  attribution-seam state), plus `<DSH_HOME>/data/computer-use/policy.jsonl` — identities,
+  coordinates and lengths only, **never typed text**, **launch URLs stripped of userinfo/query**,
+  and bounded by a single `.1` rotation at 4 MiB. `escalated:"full-access"` marks an unanswerable
+  ask that ran.
+- **Tests:** new `build/test-approval-channel.mjs` (20 cases: the high-risk key/tool matrix across
+  full access / workspace-write / ask / unknown / delegated, `standard` failing closed, the
+  documented `readApprovalEnv` layering against throwing methods *and* throwing property getters,
+  the real gate driven through `apply()`, `policy.jsonl` contents and target redaction, and the
+  late-mount attribution seam). `build/test-approval-attribution.mjs` grows to 27 cases (answer
+  channel wording, two-install FIFO disposal, registry without a seam).
+  `build/test-policy.mjs` and `build/test-cycle-no-timeout.mjs` updated for the new bindings;
+  `scripts/check-behavior.mjs` registers the new guard.
+- No worker/native change.
+
 # 2.2.9 — a host-debug click really reaches the host
 
 - **Regression fixed:** the click path set a preliminary `blocked = "HOST-GUARDED"`

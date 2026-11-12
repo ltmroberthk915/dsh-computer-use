@@ -179,12 +179,34 @@ For a host that reports a disabled-prompt automatic refusal as “the user rejec
 | Mode | Observation | Actuation |
 |---|---|---|
 | `read-only` | allowed | denied |
-| `standard` | allowed | every action asks through the host's approval card |
+| `standard` | allowed | every action asks through the host's approval card (with no card available it refuses) |
 | `autonomous` | allowed | allowed, high-risk operations still ask |
 | `unrestricted` | allowed | allowed (worker failsafe and rate limit still apply) |
 
-High-risk operations (closing a window, `alt+f4`, `win+r`, and the like) ask in every mode. Password
+High-risk operations (closing a window, `alt+f4`, `win+r`, and the like) ask in every mode — as long
+as the session can show a card; the full-access case is described below. Password
 fields are detected through UI Automation's `IsPassword` and refused by default.
+
+**An ask is only honoured when the session can actually ask.** The host reports a per-session
+approval policy; its `danger-full-access` preset selects `never`, where no card can be shown and
+every `ask` is auto-rejected. The plugin therefore settles its own asks instead of forwarding an
+unanswerable one:
+
+- `autonomous` + proven full access: the high-risk action runs under the human's standing grant
+  (recorded as `escalated:"full-access"` in `policy.jsonl`).
+- `standard`: refuses and says so. Full access is not an approval, and the mode's contract is
+  per-action consent — raise `automationMode` to `autonomous` if that is what you want.
+- a delegated subagent session: refuses. `@deepseek-ai/dsh-subagent` pins `never` on every child
+  and copies the parent's sandbox, so neither fact is the human's grant.
+- any sandbox without proven full access: refuses with an explicit
+  `approval prompts are unavailable in this session (approval policy: never)` reason that says
+  nothing ran and the user was not asked.
+
+The host's legacy `the user rejected tool "…"` wording is corrected for `computer_*` calls, so an
+automatic refusal is never reported as a human decision. Whenever a card can be shown, `standard`
+and `autonomous` ask exactly as before. Gate diagnostics land in
+`$DSH_HOME/data/computer-use/policy.jsonl` (modes, channel, verdict; launch URLs are redacted;
+no typed text).
 
 ## Safety model
 

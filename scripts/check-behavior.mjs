@@ -31,7 +31,7 @@ const excluded = {
   'test-approval-attention.mjs': 'alias imports test-attention.mjs, which is already run directly',
 }
 const reviewed = new Set([
-  'action-feedback', 'agent-pointer', 'approval-attribution', 'ask-invariants', 'ask-merge', 'ask-orphan', 'ask-release',
+  'action-feedback', 'agent-pointer', 'approval-attribution', 'approval-channel', 'ask-invariants', 'ask-merge', 'ask-orphan', 'ask-release',
   'attention-native', 'attention', 'audit-completion', 'batch-coverage', 'buildusermessage', 'bundled-skill', 'client-export',
   'coactive', 'compact-feedback', 'control-targets', 'core-system-recovery', 'cursor', 'cycle-completion',
   'cycle-no-timeout', 'cycle-open', 'desktop-acceptance-io', 'desktop-ownership', 'drag-options', 'evidence-protocol',
