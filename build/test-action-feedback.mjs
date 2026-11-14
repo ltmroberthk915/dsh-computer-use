@@ -9,7 +9,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-feedback-owned-'))
 let checks = 0
 function check (value, label) { assert.ok(value, label); checks++ }
 function fixture ({ model = 'glm-5.3-flash', provider = 'bigmodel-anthropic', enabled = true, images = true, modalities = ['text', 'image'], sourceSize = [200, 100], attachmentSize = [200, 100], onResolve, onAction, shotError, hooks = {} } = {}) {
-  const defs = new Map(), controller = new AbortController(), counts = { actions: 0, shots: 0, states: 0 }
+  const defs = new Map(), controller = new AbortController(), counts = { actions: 0, shots: 0, states: 0, saves: [] }
   const exec = { agent: { id: crypto.randomUUID(), session: { requestHeader: () => ({ config: { provider, model } }) } }, signal: controller.signal }
   const receipt = { ok: true, receiver: { hwnd: 123, editable: true }, preserved: ['raw', 17] }
   const act = async () => { counts.actions++; onAction?.({ cu, controller }); return structuredClone(receipt) }
@@ -18,7 +18,10 @@ function fixture ({ model = 'glm-5.3-flash', provider = 'bigmodel-anthropic', en
     screenState: async () => { counts.states++; return { active: { hwnd: 123 }, uiaFlat: [{ name: 'SUCCESS', value: 'verified value' }], uiaTruncated: false } },
     screenshot: async () => { counts.shots++; if (shotError) throw Error(shotError); return { image: Buffer.from('fixture bytes'), mime: 'image/png', region: { x: -100, y: 20, width: 400, height: 200 }, imageSize: sourceSize, capturedAt: 1000, ts: 1010, cursorScreenPos: { x: 0, y: 60 }, cursorInImage: { x: 50, y: 20 }, cursorDrawn: true, settled: true } },
   }
-  const attachments = { imageLimits: { mediaTypes: ['image/png'] }, saveImage: async () => ({ attachmentId: 'fixture', mediaType: 'image/png', width: attachmentSize?.[0], height: attachmentSize?.[1], bytes: 13 }) }
+  const attachments = { imageLimits: { mediaTypes: ['image/png'] }, saveImage: async ({ name }) => {
+    counts.saves.push(name)
+    return { attachmentId: 'fixture', mediaType: 'image/png', width: attachmentSize?.[0], height: attachmentSize?.[1], bytes: 13 }
+  } }
   const ctx = { tools: { register: def => defs.set(def.name, def) }, get: name => name === 'attachments' ? images ? attachments : undefined : name === 'llm' ? { resolveModelInfo: async () => { onResolve?.({ cu, controller }); return { inputModalities: modalities } } } : undefined }
   const feedbackRules = [{ provider: 'bigmodel-anthropic', model: 'glm-5.3', adapterVersion: 'unversioned', grounding: 'failed', testedAt: '2000-01-01', expiresAt: '2099-01-01', reason: 'test evidence' }]
   registerTools({ ctx, cu, config: { actionFeedback: enabled, actionFeedbackDetail: 'full', feedbackRules }, defineTool: d => d, dataDir: { root, shots: root }, snapshotPath: () => path.join(root, crypto.randomUUID() + '.jpg'), hooks })
@@ -68,6 +71,49 @@ for (const invalid of [[0, 100], [-1, 100], [Infinity, 100], [NaN, 100], ['200',
   assert.deepEqual(earlier.cursorInImage, { x: 50, y: 20 }); checks++
   assert.deepEqual(earlier.coordinates.imageSize, [200, 100]); checks++
   assert.deepEqual(r.value.observation.imageSize, [100, 50]); checks++
+  assert.deepEqual(f.counts.saves, [path.basename(r.value.observation.path)]); checks++
+}
+const shotStep = delivery => ({ tool: 'computer_shot', args: delivery ? { delivery } : {} })
+for (const [delivery, modes, saved] of [
+  ['auto', [null, null, null], true],
+  ['auto', ['path', 'path', null], true],
+  ['auto', [null, null, 'path'], false],
+  ['path', [null, 'auto', null], false],
+  ['path', ['path', 'path', 'path'], false],
+]) {
+  const f = fixture(), r = await f.run('computer_batch', { delivery, shot: 'never', actions: modes.map(shotStep) })
+  const paths = r.value.actions.map(a => a.result.path)
+  check(paths.length === f.counts.shots && paths.every(p => fs.existsSync(p)) && new Set(paths).size === 3, 'all three distinct files survive')
+  assert.deepEqual(f.counts.saves, saved ? [path.basename(paths[2])] : []); checks++
+  check(r.content.filter(b => b.type === 'image').length === Number(saved) &&
+    r.value.observation.path === paths[2] && r.value.imageSource.startsWith('action 3;'), 'only the selected explicit frame can be displayed')
+}
+{
+  const f = fixture(), r = await f.run('computer_batch', { actions: [
+    shotStep(), { tool: 'unknown' }, shotStep(),
+  ] })
+  check(f.counts.shots === 1 && !r.value.actions[1].ok && r.value.actions[2].outcome === 'not-dispatched' &&
+    r.value.imageSource.startsWith('action 1;'), 'ordinary failure preserves the last completed capture with its step number')
+  assert.deepEqual(f.counts.saves, [path.basename(r.value.actions[0].result.path)]); checks++
+}
+{
+  const f = fixture({ onAction: ({ controller }) => controller.abort() })
+  const r = await f.run('computer_batch', { actions: [shotStep(), { tool: 'computer_click', args: args.computer_click }] })
+  check(r.value.actions[1].ok && fs.existsSync(r.value.observation.path) && f.counts.shots === 1 &&
+    f.counts.saves.length === 0 && r.content.every(b => b.type !== 'image'), 'cancellation retains captured file without starting an attachment')
+}
+{
+  const f = fixture(), r = await f.run('computer_batch', { delivery: 'path', actions: [
+    shotStep(), shotStep('invalid'), shotStep(),
+  ] })
+  check(f.counts.shots === 1 && f.counts.saves.length === 0 && r.value.actions[1].code === 'BAD_DELIVERY' &&
+    r.value.actions[2].outcome === 'not-dispatched', 'batch path does not mask invalid step delivery')
+}
+{
+  const f = fixture({ onResolve: ({ cu }) => { cu.stopped = true } })
+  const r = await f.run('computer_batch', { actions: [shotStep()], shot: 'never' })
+  check(f.counts.saves.length === 0 && r.value.observation.imageStatus === 'path-only' && fs.existsSync(r.value.observation.path),
+    'brake during deferred attachment lookup suppresses the save without discarding the file')
 }
 // File-only routes still expose exact image-to-screen mapping and capture age.
 {
@@ -150,5 +196,6 @@ for (const shot of ['never', 'auto']) {
   const f = fixture({ model: 'glm-5.3' }), r = await f.run('computer_batch', { actions: [{ tool: 'computer_shot', args: {} }, { tool: 'computer_click', args: args.computer_click }] })
   check(r.value.observationSource === 'automatic final UIA state' && !r.value.imageSource, 'state checkpoint is never labelled as an earlier screenshot')
   check(r.value.actions[0].result.imageStatus === 'path-only' && r.value.actions[0].result.path && !r.value.actions[0].result.image, 'earlier explicit image path retained without claiming attachment')
+  check(f.counts.saves.length === 0, 'a final UIA observation supersedes explicit captures before attachment')
 }
 console.log(JSON.stringify({ pass: true, checks, artifacts: root }))

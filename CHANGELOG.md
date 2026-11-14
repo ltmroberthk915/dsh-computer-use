@@ -1,3 +1,11 @@
+# 2.3.1 — save only the selected batch screenshot as an attachment
+
+- Each explicit screenshot keeps its original file. On image-capable routes a
+  batch saves at most one host attachment, for the frame it actually displays.
+  Batch-level `delivery:"path"` now skips the attachment service for every step.
+- A final UIA checkpoint needs no image attachment. If an ordinary step fails,
+  the last successful explicit capture remains identified by its actual step.
+
 # 2.3.0 — full access stops speaking for the user
 
 - **Fixed (reported 2026-11-12):** in a `danger-full-access` session the host's approval policy

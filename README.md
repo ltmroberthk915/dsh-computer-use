@@ -23,6 +23,7 @@ English | [中文](README.zh.md) | [Français](README.fr.md) | [Deutsch](README.
 
 ## Why it costs less
 
+- **Find a window without reading its controls.** Start with `computer_state {windows:true}`. When you need a control, pass that window's handle to `computer_uia`.
 - **One round trip for a known sequence.** One `computer_batch` call runs a list of actions serially, stops at the first failure, and costs one model round trip instead of one per action.
 - **Only the delta comes back.** Pass the previous observation ID as `since` and receive additions, changes, removals and ordering — not the whole tree again.
 - **Compact receipts by default in 2.0.0.** Post-action text normally adds at most 6 KiB to the action receipt; `feedback: full` is still there when detail matters more.
