@@ -51,6 +51,10 @@ const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
 // on 2026-11-08 a harness used exactly that to send WM_CLOSE to the real Harness. windowOp
 // close/minimize/hide now also refuses when the target image is DeepSeek Harness.exe and host
 // identity is absent, unless the caller passes confirmHost:true. Painting block untouched.\n// Re-reviewed 2026-11-09: the host-debug click path clears its preliminary HOST-GUARDED label\n// after GuardHostDriving allows, so debug mode actually reaches the host. Painting block untouched.
+// 2026-11-18: compared the painter to 2.3.1 before updating the non-painting digest for the Windows control changes.
+// The window/selection changes preserve the reviewed painter byte for byte.
+// The HWND capture and settle changes preserve the reviewed painter byte for byte.
+// The HWND capture and settle changes preserve the reviewed painter byte for byte.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -58,7 +62,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  "31d527965d8ed2581f2db1c5b825ae81a79a295a894c36fc006364543d2ad5dd",
+  "661d5a26e663dfa41210aeedf004079ba0dc5214ea80de08497b126da63b0965",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')

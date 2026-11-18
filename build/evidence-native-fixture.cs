@@ -33,7 +33,7 @@ public static class EvidenceProbe {
   if(DshComputerUse.Worker.Panic.HumanRevision!=initialHumanRevision)throw new Exception("LIVE_ACCEPTANCE_BLOCKED: human took control; no continuation");
  }
  static Dictionary<string,object> Args(params object[] pairs) {var d=new Dictionary<string,object>();for(int i=0;i<pairs.Length;i+=2)d[(string)pairs[i]]=pairs[i+1];return d;}
- static object Call(string name,params object[] args) {CheckLive();try{return Worker.GetMethod(name,BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,args);}catch(TargetInvocationException e){throw e.InnerException;}}
+ static object Call(string name,params object[] args) {CheckLive();try{return Worker.InvokeMember(name,BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.InvokeMethod,null,null,args);}catch(TargetInvocationException e){throw e.InnerException;}}
  static void Ui(Action a){CheckLive();form.Invoke(new Action(()=>{CheckLive();a();}));}
  static void Emit(string name,bool ok,object detail){Console.WriteLine(Json.Serialize(Args("case",name,"ok",ok,"detail",detail)));if(!ok)throw new Exception(name);}
  static string TextValue(){string v="";Ui(()=>v=editor.Text);return v;}
@@ -79,15 +79,21 @@ public static class EvidenceProbe {
     noise=new EvidencePassiveForm{Text="Owned animation",Left=850,Top=150,Width=340,Height=300,TopMost=true,ShowInTaskbar=false,StartPosition=FormStartPosition.Manual,BackColor=Color.Black};noise.Show();
     int color=0;timer=new System.Windows.Forms.Timer{Interval=70};timer.Tick+=(s,e)=>{color=(color+71)%256;noise.BackColor=Color.FromArgb(color,color,color);noise.Refresh();};timer.Start();
    });
+   var activation=(Dictionary<string,object>)Call("Activate",Args("hwnd",hwnd));
+   Emit("fixture-activation-confirmed",(bool)activation["activated"],null);
    var global=(Dictionary<string,object>)Call("WaitStable",Args("timeoutMs",1600));
    var scoped=(Dictionary<string,object>)Call("WaitStable",Args("hwnd",hwnd,"timeoutMs",1600));
    Emit("window-wait-excludes-outside-animation",!(bool)global["stable"]&&(bool)scoped["stable"],Args("global",global,"window",scoped));
    var unchanged=(Dictionary<string,object>)Call("WaitChange",Args("hwnd",hwnd,"timeoutMs",400));
    Emit("window-change-excludes-outside-animation",!(bool)unchanged["changed"],unchanged);
    Ui(()=>{timer.Stop();noise.Close();timer.Dispose();});
-   object[] samplerArgs={Args("hwnd",hwnd),8,null,0,0,0,0};var sampler=(Func<byte[]>)Call("WaitSampler",samplerArgs);
-   Ui(()=>form.Left+=15);error=null;try{sampler();}catch(Exception e){error=e.Message;}
-   Emit("moved-wait-target-refused",error!=null&&error.Contains("WAIT_TARGET_CHANGED"),error);
+   var target=Args("hwnd",hwnd);
+   using(var capture=(IDisposable)Call("OpenWaitSurface",target)){
+    object[] samplerArgs={target,capture,8,null,0,0,0,0};
+    var sampler=(Func<byte[]>)Call("WaitSampler",samplerArgs);
+    Ui(()=>form.Left+=15);error=null;try{sampler();}catch(Exception e){error=e.Message;}
+    Emit("moved-wait-target-refused",error!=null&&error.Contains("WAIT_TARGET_CHANGED"),error);
+   }
    Ui(()=>form.WindowState=FormWindowState.Minimized);error=null;try{Call("WaitStable",Args("hwnd",hwnd));}catch(Exception e){error=e.Message;}
    Emit("minimized-wait-target-refused",error!=null&&error.Contains("WAIT_TARGET_UNAVAILABLE"),error);
   }

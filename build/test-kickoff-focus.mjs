@@ -25,6 +25,10 @@ public static class Fixture {
   }
   public static void Main() {
     var f = new KickoffFocus();
+    Check(!f.Confirms(0, 0), "a new cycle has no background surface");
+    f.Confirm(70, 80);
+    Check(f.Confirms(70, 80) && !f.Confirms(70, 81) && !f.Confirms(71, 80), "background capture requires the same window and process");
+    f.Reset();
     Check(!Allowed(f), "new cycle must identify and activate before capturing");
     string missing = f.CaptureProblem(true, false, false, true, 10, 100, false);
     Check(missing.Contains("this worker has no confirmed target") && missing.Contains("hwnd=10, pid=100"), "current foreground identity is evidence for explicit reactivation after restart");
@@ -71,12 +75,18 @@ const section = (start, end) => {
   return worker.slice(a, b)
 }
 const capture = section('static Dictionary<string, object> Capture(', 'static Dictionary<string, object>')
-assert.equal((capture.match(/ValidateKickoffCapture\(a\)/g) || []).length, 3)
-assert.ok(capture.indexOf('ValidateKickoffCapture(a)') < capture.indexOf('SettleWait('))
-assert.ok(capture.lastIndexOf('ValidateKickoffCapture(a)') > capture.indexOf('Native.ReleaseDC('))
+const guard = section('static void ValidateCaptureTarget(', 'static Dictionary<string, object> Capture(')
+assert.match(guard, /hwnd != IntPtr.Zero && _kickoffFocus\.Confirms\(hwnd\.ToInt64\(\), PidOf\(hwnd\)\) && Native\.IsWindow\(hwnd\)/)
+assert.match(guard, /ValidateKickoffCapture\(args\)/)
+assert.match(guard, /hwnd != TopLevel\(Native.GetForegroundWindow\(\)\)\)\s+throw/)
+assert.equal((capture.match(/ValidateCaptureTarget\(a, shotWindow\)/g) || []).length, 2)
+assert.ok(capture.indexOf('ValidateCaptureTarget(a, shotWindow)') < capture.indexOf('new WindowFrames('))
+assert.ok(capture.indexOf('ValidateCaptureTarget(a, shotWindow)') < capture.indexOf('WaitForCapture('))
+assert.ok(capture.indexOf('ValidateKickoffCapture(a)') < capture.indexOf('Native.BitBlt('))
+assert.ok(capture.lastIndexOf('ValidateCaptureTarget(a, shotWindow)') > capture.indexOf('Native.ReleaseDC('))
 assert.match(capture, /catch \{ managed.Dispose\(\); throw; \}/)
 const activate = section('static Dictionary<string, object> Activate(', 'static bool IsForeground')
-assert.match(activate, /how == null \|\| !Native\.IsWindow\(h\) \|\| \(confirmedPid = PidOf\(confirmed\)\) == 0 \|\| !IsForeground\(confirmed\)/)
+assert.match(activate, /how == null \|\| !Native\.IsWindow\(h\) \|\| \(receiver != h && \(confirmed != receiver \|\| !IsEnabledOwnedPopup\(h, confirmed\)\)\) \|\|\s*\(confirmedPid = PidOf\(confirmed\)\) == 0 \|\| !IsForeground\(confirmed\)\) how = "failed"/)
 assert.match(activate, /SetSticky\(confirmed\);\s*_kickoffFocus\.Confirm\(confirmed\.ToInt64\(\), confirmedPid\)/)
 assert.match(activate, /dialog != IntPtr\.Zero \? dialog : h/)
 assert.match(activate, /"pid", confirmedPid == 0 \? null : \(object\)confirmedPid/)

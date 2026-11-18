@@ -31,7 +31,7 @@ const excluded = {
   'test-approval-attention.mjs': 'alias imports test-attention.mjs, which is already run directly',
 }
 const reviewed = new Set([
-  'action-feedback', 'agent-pointer', 'approval-attribution', 'approval-channel', 'ask-invariants', 'ask-merge', 'ask-orphan', 'ask-release',
+  'action-feedback', 'agent-pointer', 'argument-recovery', 'approval-attribution', 'approval-channel', 'ask-invariants', 'ask-merge', 'ask-orphan', 'ask-release',
   'attention-native', 'attention', 'audit-completion', 'batch-coverage', 'buildusermessage', 'bundled-skill', 'client-export',
   'coactive', 'compact-feedback', 'control-targets', 'core-system-recovery', 'cursor', 'cycle-completion',
   'cycle-no-timeout', 'cycle-open', 'desktop-acceptance-io', 'desktop-ownership', 'drag-options', 'evidence-protocol',
@@ -42,6 +42,7 @@ const reviewed = new Set([
   'release-channel', 'renders', 'root-integration', 'session-identity', 'skill-gate', 'steer-message-shape',
   'task-rules', 'terminal-cleanup', 'timeout-branch', 'turnend-agent', 'turnend-rootagent',
   'ui-geometry', 'uia-budget', 'uia-read-timeout', 'uia-native', 'uia-targets-native', 'verification-region', 'window-management-key',
+  'window-screenshot',
 ].map(name => `test-${name}.mjs`))
 const files = fs.readdirSync(path.join(root, 'build')).filter(name => /^test-.+\.mjs$/.test(name)).sort()
 const unreviewed = files.filter(name => !reviewed.has(name) && !excluded[name])

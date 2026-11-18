@@ -253,13 +253,13 @@ const apply = new Function(
   'mkDataDir', 'snapshotPath', 'installAudit', 'registerTools', 'fs', 'os', 'path', 'createCycleGate', 'agentKeyOf',
   'setTimeout', 'clearTimeout', 'Date', 'recoveryProblem', 'installHumanAttention', 'fileURLToPath', 'installToolExposure',
   'scopeOf', 'ACTIVATION_TOOL', 'createCycleLifecycle', 'createLeaveTimer', 'createTerminalCleanup',
-  'installApprovalAttribution', 'readApprovalEnv', 'describeApprovalEnv', 'ACTUATION_TOOLS', 'appendGate', 'gateArgSummary', 'redactReasonText',
+  'installArgumentRecovery', 'hostLlm', 'installApprovalAttribution', 'readApprovalEnv', 'describeApprovalEnv', 'ACTUATION_TOOLS', 'appendGate', 'gateArgSummary', 'redactReasonText',
   `${prelude}\nreturn apply;`,
 )((d) => d, fluent, ComputerUse, policyDecision, () => true, () => true, '', () => false,
   mkDataDir, () => '', () => {}, registerTools, fs, os, path, createCycleGate, agentKeyOf,
   setTimeout, clearTimeout, Date, recoveryProblem, noop, (p) => p, noop, () => undefined,
   ACTIVATION_TOOL, createCycleLifecycle, createLeaveTimer, createTerminalCleanup,
-  installApprovalAttribution, readApprovalEnv, describeApprovalEnv, ACTUATION_TOOLS, appendGate, gateArgSummary, redactReasonText)
+  noop, {}, installApprovalAttribution, readApprovalEnv, describeApprovalEnv, ACTUATION_TOOLS, appendGate, gateArgSummary, redactReasonText)
 apply(ctx, {
   enabled: true, progressiveTools: false, automationMode: 'autonomous',
   maxActionsPerMinute: 60, snapshotDir: dataDir,

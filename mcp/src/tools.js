@@ -115,6 +115,8 @@ const tools = [
       x: { type: 'integer' }, y: { type: 'integer' },
       button: { type: 'string', enum: ['left', 'right', 'middle'] },
       clicks: { type: 'integer', minimum: 1, maximum: 3, description: '2=double 3=triple' },
+      ctrl: { type: 'boolean' }, shift: { type: 'boolean' },
+      durationMs: { type: 'integer', minimum: 20, maximum: 2000 },
       verificationRegion: { type: 'string', description: 'Expected effect rectangle "x,y,w,h" in screen pixels, independent of click location. Pixel change does not prove semantic success.' },
     },
   }),
@@ -139,7 +141,8 @@ const tools = [
   }),
   tool('cu_key', 'Press a key combo, e.g. "ctrl+shift+t", "enter", "alt+f4", "win".', {
     type: 'object', additionalProperties: false, required: ['combo'],
-    properties: { combo: { type: 'string' }, holdMs: { type: 'integer', maximum: 5000 } },
+    properties: { combo: { type: 'string' }, holdMs: { type: 'integer', maximum: 5000 },
+      durationMs: { type: 'integer', minimum: 20, maximum: 2000 } },
   }),
   tool('cu_type', 'Type text. CJK/long text is auto-pasted via clipboard (IME-proof); ASCII short text uses SendInput unicode events. Refuses password fields unless allowPassword is set (ask the human first).', {
     type: 'object', additionalProperties: false, required: ['text'],
@@ -210,7 +213,7 @@ const handlers = {
   cu_drag: a => cu.drag(targetOf({ mark: a.fromMark, x: a.fromX, y: a.fromY }),
     targetOf({ mark: a.toMark, x: a.toX, y: a.toY }), { durationMs: a.durationMs, expectCursor: a.expectCursor, expectHwnd: a.hwnd }),
   cu_scroll: a => cu.scroll(a.direction, a.lines ?? 3, a.mark || a.x !== undefined ? { at: targetOf(a) } : {}),
-  cu_key: a => cu.key(parseKeyCommand(a.combo).combo, { holdMs: a.holdMs }),
+  cu_key: a => cu.key(parseKeyCommand(a.combo).combo, { holdMs: a.holdMs, durationMs: a.durationMs }),
   cu_type: a => cu.type(a.text, { mode: a.mode, allowPassword: a.allowPassword }),
   cu_clipboard_write: a => cu.clipWrite(a.text),
   cu_activate_window: a => cu.activateWindow(a),

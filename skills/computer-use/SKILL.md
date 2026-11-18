@@ -11,6 +11,14 @@ Read this entry before driving. The skill gate requires this receipt once per se
 
 Tools load for the current Agent after a successful `skill` load or this receipt; if invisible, call `computer_use_activate` (opens no cycle, releases no brake). Stop/exit and computer_ask work before activation. Issue real tool calls: a target handle is a string argument to computer_uia_act — tags, examples and prose do not execute; in a run_code-only host, call tools through run_code. Observation and the safety direction (ask, stop, exit) are not gated; a human brake still refuses observation. Read a referenced file only when its condition applies.
 
+## BrowserSkill confirmation on Windows
+
+When using BrowserSkill, identify which component is asking. For an existing user tab, `bsk_tabs` with `action:"borrow"` waits for the extension's decision. If the profile requires confirmation, tell the user before issuing the call where to look for “允许借用标签页？” in their browser. Send the borrow once and continue on its success receipt. Preserve the extension's confirmation setting. For a page JavaScript `dialog_pending`, decide the dialog within the task's authorization and await the original operation.
+
+For an ordinary Windows prompt that continues an authorized operation, use the existing task authorization. Locate the dialog in its owning window, read its requested effect, click the matching control once and verify the resulting application state. A full-access conversation running in autonomous mode can do this unattended. The host reads `sandboxPolicy.resolve({session}).mode` and `approval.effectivePolicy(session)` for that call. BrowserSkill separately owns its tab-borrow preference.
+
+When explaining a missed prompt, compare the request and its result with screenshot times and intervening tool calls. An earlier frame or a later empty `dialog-status` cannot establish what was visible while borrowing. Use a frame from the waiting interval to identify the visible prompt. If that frame is missing, report the gap. The success receipt names the borrowed tab and windows. It omits the approver. To inspect a named DSH v4 session locally, run `python scripts/inspect-borrow.py <session-file>` from this skill's directory. It reads direct tool records. Compressed sessions require Python's Zstandard support (standard in 3.14, or the `zstandard` module).
+
 ## Cycle boundary (one rule)
 
 A desktop cycle covers **one continuous desktop block**, not the user's task and not the turn.
@@ -32,6 +40,16 @@ The plugin also has a deterministic backstop: after a non-desktop top-level tool
 
 ## Start, act, verify
 
+On a multi-display desktop, keep the task in its existing work window. Inspect `computer_state {hwnd}` for the work area, owned popups and nine sampled pixel receivers. If a required popup opens on another screen, identify its owner and use `computer_window {op:"move", hwnd:popup, workHwnd:parent}`. Check `contained:true`, then activate the popup and observe it again. The same call leaves an already contained window in place. For a covered window, query its controls by hwnd. Pixel samples describe only the sampled positions.
+
+For a screenshot-bound click, the worker rechecks a known accessible control or the local pixels before pressing. On STALE_SCREENSHOT, observe again and select the current target. Window OCR accepts `hwnd` with an optional absolute crop inside the surface. Window-scoped pixel waits and OCR read the same surface as the screenshot, including behind other windows. For a targeted action, automatic feedback follows its window and active owned popup. Inspect the returned title and controls before choosing the next action.
+
+On Windows, `computer_shot {hwnd}` reads the selected window surface even under an opaque window. A background capture can be inspected. For input, bring the intended window forward and take a fresh shot with a screenshotId. Minimized or unavailable surfaces can return a capture error. Default screenshots wait for the observed area to go quiet. Repeated static views return sooner. If `settled:false` is returned, observe again before acting.
+
+For a visual action inside one window, use `computer_shot {hwnd}` and pass its `screenshotId` with the observed image coordinates to click, drag or scroll. Click and wheel accept integer `x` and `y`; drag takes `from` and `to` as coordinate pairs. Use the dimensions returned with that ID, including after attachment resizing. On `STALE_SCREENSHOT`, take a fresh window capture. A change of page, zoom or scroll inside the same window also calls for fresh visual evidence. If the route cannot inspect the image, use a UIA field, mark, or OCR result.
+
+For keyboard or text input, pass the observed `hwnd` to require that exact foreground window. `computer_uia {hwnd,focused:true}` reads the focused control and its current selections. Check the returned text and selection status. To scroll an inner pane, query its Scroll pattern and use `computer_uia_act {target,action:"scroll",value:"down"}`; compare the returned percentages. To find an app by name or AppID, `computer_state {appQuery:"..."}` returns Start registrations and visible matching windows. Check each window's `matchBy` and title before choosing between windows sharing an executable.
+
 1. Identify the app with `computer_state {windows:true}`, reusing a known window; activate its hwnd with `computer_window` and require `activated:true` before capturing or driving; bind the intended record/field/document too. Minimized: restore, then activate. An occlusion error means inspect what covers it.
 2. Cheapest sufficient observation first: returned readback → focused UIA query → reusable mark map → image only when visual evidence is needed. Do not re-read state to satisfy a checklist.
 3. Prefer `computer_uia {hwnd, role, name, id}` + `computer_uia_act` for pattern controls (`name` substring, `id` exact AutomationId, scoped by hwnd). Prefer the returned `target`; after replacement `rebind:true` recovers only with native identity or complete unique semantic evidence in the same window — changed context, ambiguity and incomplete searches refuse. Use target OR name/id/role, never both; narrow the query instead of taking the first same-name button. Tabs use `action:"select"`; fields may `setValue` with readback.
@@ -43,6 +61,16 @@ The plugin also has a deterministic backstop: after a non-desktop top-level tool
 `since` (same query + previous observation id) returns added/changed/removed elements and order changes; omitted elements keep their state, while no/expired base, changed scope, partial results or an uneconomical diff return full. `snapshot` retrieves a retained observation without capturing — not fresh verification; page it with `offset`/`limit`. `computer_ctrl {action:"clear_cache"}` clears this Agent's cache without a cycle. Caches are bounded and expire; storage failure falls back to bounded memory and memory pressure to inline results without a fake snapshot id. Omit since/snapshot for fresh evidence after losing the baseline. See [progressive-control.md](references/progressive-control.md).
 
 **`computer_launch {target}`** opens an app/URL/folder/document in one call instead of the 4+ step Win+R route; the launcher resolves aliases (`calc`), `shell:` folders, URLs, paths and associations. Pass `args` (one array entry per argument value, never a pre-built command line) to start an executable with arguments — e.g. a dedicated browser profile: target `…\msedge.exe`, args `["--user-data-dir=D:\profiles\job", "--new-window", "<url>"]`. It is an actuation (same approval/brake/audit funnel, lights the border), and `launched:true` means it reached the launcher, not that the app is ready — verify with `computer_state` before driving. For code, give the full path.
+
+## Window and control actions
+
+Check the current tool schemas for these Windows actions and options. Older plugin versions can share this manual.
+
+Use `computer_window {hwnd, observe:true}` to activate a known window and read its UIA controls in one call. The observation covers the window that received activation, including an owned modal. Use `computer_type {expectTarget, text}` with an observed field when entering text in that exact field matters. If focus changes, inspect its contents before continuing a partial write.
+
+Use `computer_uia_act {target, action:"selectText", value}` to select an exact passage. Add immediately adjacent `prefix` or `suffix` if the passage occurs more than once. Check `selectionVerified`. On a slider, `setValue` accepts a numeric string and returns `rangeValue`. For list items, `addToSelection` and `removeFromSelection` preserve other selected items when supported.
+
+Use `computer_click {mark, ctrl:true}` for Ctrl-click. Click and key accept `durationMs` from 20 to 2000. `computer_key` accepts `Control_L`, `Shift_L`, `Alt_L` and numeric keypad digits such as `KP_9` and `Numpad_0`. Num Lock determines how an app interprets keypad digits.
 
 ## Screenshots and coordinates
 

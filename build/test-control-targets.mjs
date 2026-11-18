@@ -73,6 +73,26 @@ try {
   await f.definitions.get('computer_uia_act').execute(args, {})
   await f.definitions.get('computer_batch').execute({ actions: [{ tool: 'computer_uia_act', args }], shot: 'never' }, {})
   const acts = f.writes.slice(-2); assert.deepEqual(acts[0], acts[1]); assert.equal(acts[0].requireUnique, true); assert.equal(acts[0].depth, 22); assert.equal(acts[0].automationId, 'save'); checks++
+  const options = [], g = await fixture(); owned.push(g.dir)
+  g.cu.landmarks = async opts => { options.push(opts); return { count: 0, hwnd: 10, marks: [] } }
+  const owner = { agent: {} }, marksArgs = { hwnd: 10, uiaOnly: true, refresh: true }
+  await g.definitions.get('computer_marks').execute(marksArgs, owner)
+  await g.definitions.get('computer_batch').execute({ actions: [{ tool: 'computer_marks', args: marksArgs }], shot: 'never' }, owner)
+  assert.deepEqual(options, [marksArgs, marksArgs]); checks++
+  g.cu.activateWindow = async () => ({ activated: true, hwnd: 22, modalOf: 10 })
+  g.cu.call = async (op, a) => {
+    assert.equal(op, 'uia'); assert.equal(a.hwnd, 22)
+    return { count: 1, flat: [{ name: 'Editor', target: 'field-22' }], hwnd: 22 }
+  }
+  const activation = await g.definitions.get('computer_window').execute({ hwnd: 10, observe: true }, owner)
+  assert.equal(activation.observation.elements[0].target, 'field-22')
+  g.cu.type = async (text, opts) => { assert.equal(opts.expectTarget, 'field-22'); return { chars: text.length } }
+  const typeArgs = { text: 'a', expectTarget: 'field-22', feedback: 'none' }
+  assert.equal((await g.definitions.get('computer_type').execute(typeArgs, owner)).chars, 1)
+  const typed = await g.definitions.get('computer_batch').execute({ actions: [{ tool: 'computer_type', args: typeArgs }], shot: 'never' }, owner)
+  assert.equal(typed.actions[0].result.chars, 1)
+  await assert.rejects(g.definitions.get('computer_type').execute(typeArgs, { agent: {} }), /TARGET_NOT_OBSERVED/)
+  checks++
   f.cu.screenshot = async () => { f.frame.sig = 'changed-during-capture'; return { image: Buffer.from('x'), region: f.frame.region } }
   await assert.rejects(f.cu.marks({ landmarkMap: refreshed }), /STALE_MARK/); checks++
   // A newer unrelated cache entry must never win over the current source hash.

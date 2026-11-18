@@ -28,10 +28,15 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime; // AsBuffer: byte[] -> WinRT IBuffer
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
+using System.Windows.Automation.Text;
 using System.Windows.Forms; // Clipboard (watch out: bare Point stays our own struct)
 // Inbox OCR (zero external dependencies): the union Windows.winmd ships in lib/core/winmd.
+using Windows.Graphics.Capture;
+using Windows.Graphics.DirectX;
+using Windows.Graphics.DirectX.Direct3D11;
 using Windows.Media.Ocr;
 using Windows.Graphics.Imaging;
 
@@ -323,6 +328,10 @@ namespace DshComputerUse.Worker
         uint pid;
         public long Target { get { lock (sync) { return hwnd; } } }
         public void Reset() { lock (sync) { hwnd = 0; pid = 0; } }
+        public bool Confirms(long target, uint process)
+        {
+            lock (sync) { return target != 0 && process != 0 && hwnd == target && pid == process; }
+        }
         public void Confirm(long target, uint process)
         {
             lock (sync) { hwnd = target; pid = process; }
@@ -492,6 +501,8 @@ namespace DshComputerUse.Worker
         // GW_OWNER=4: a modal dialog's owner is the window that opened it (SameInputFamily).
         [DllImport("user32.dll")]
         public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetLastActivePopup(IntPtr hWnd);
         // ---- caret evidence: where WOULD the next character go? ----
         // GUITHREADINFO reports the caret for the FOREGROUND THREAD without AttachThreadInput, and
         // works in apps where UIA has no TextPattern (Word's document, many Win32 editors).
@@ -3409,6 +3420,127 @@ namespace DshComputerUse.Worker
         }
     }
 
+    // An HWND capture session owns its frames, D3D device and CPU copies only for this request.
+    sealed class WindowFrames : IDisposable
+    {
+        [ComImport, Guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IItemInterop {
+            [PreserveSig] int CreateForWindow(IntPtr hwnd, ref Guid iid, out IntPtr item);
+            [PreserveSig] int CreateForMonitor(IntPtr monitor, ref Guid iid, out IntPtr item);
+        }
+        [DllImport("d3d11.dll")]
+        static extern int D3D11CreateDevice(IntPtr adapter, int driver, IntPtr software, uint flags,
+            IntPtr levels, uint count, uint sdk, out IntPtr device, out int feature, out IntPtr context);
+        [DllImport("d3d11.dll")]
+        static extern int CreateDirect3D11DeviceFromDXGIDevice(IntPtr dxgi, out IntPtr device);
+        [DllImport("dwmapi.dll")]
+        static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT bounds, int size);
+
+        IDirect3DDevice device;
+        Direct3D11CaptureFramePool pool;
+        GraphicsCaptureSession session;
+        GraphicsCaptureItem item;
+        readonly int width, height;
+        public readonly RECT Bounds, WindowBounds;
+        public byte[] Pixels { get; private set; }
+        public long CapturedAt { get; private set; }
+        byte[] signature;
+
+        static IDirect3DDevice CreateDevice()
+        {
+            IntPtr native = IntPtr.Zero, context = IntPtr.Zero, dxgi = IntPtr.Zero, projected = IntPtr.Zero;
+            try {
+                int level;
+                int hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 32, IntPtr.Zero, 0, 7, out native, out level, out context);
+                if (hr < 0) Marshal.ThrowExceptionForHR(D3D11CreateDevice(IntPtr.Zero, 5, IntPtr.Zero, 32, IntPtr.Zero, 0, 7, out native, out level, out context));
+                Guid iid = new Guid("54EC77FA-1377-44E6-8C32-88FD5F44C84C");
+                Marshal.ThrowExceptionForHR(Marshal.QueryInterface(native, ref iid, out dxgi));
+                Marshal.ThrowExceptionForHR(CreateDirect3D11DeviceFromDXGIDevice(dxgi, out projected));
+                return (IDirect3DDevice)Marshal.GetObjectForIUnknown(projected);
+            } finally {
+                foreach (IntPtr p in new IntPtr[] { projected, dxgi, context, native }) if (p != IntPtr.Zero) Marshal.Release(p);
+            }
+        }
+
+        public WindowFrames(IntPtr hwnd, RECT window)
+        {
+            try {
+                if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows Graphics Capture is unavailable");
+                var factory = (IItemInterop)WindowsRuntimeMarshal.GetActivationFactory(typeof(GraphicsCaptureItem));
+                Guid iid = new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
+                IntPtr ptr;
+                Marshal.ThrowExceptionForHR(factory.CreateForWindow(hwnd, ref iid, out ptr));
+                try { item = (GraphicsCaptureItem)Marshal.GetObjectForIUnknown(ptr); }
+                finally { Marshal.Release(ptr); }
+                WindowBounds = window;
+                width = item.Size.Width; height = item.Size.Height;
+                RECT dwm;
+                if (DwmGetWindowAttribute(hwnd, 9, out dwm, Marshal.SizeOf(typeof(RECT))) == 0 &&
+                    dwm.Right - dwm.Left == width && dwm.Bottom - dwm.Top == height) Bounds = dwm;
+                else if (window.Right - window.Left == width && window.Bottom - window.Top == height) Bounds = window;
+                else throw new Exception("capture surface and window bounds differ; observe again after resizing");
+                device = CreateDevice();
+                pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, item.Size);
+                session = pool.CreateCaptureSession(item);
+                if (Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession", "IsCursorCaptureEnabled"))
+                    session.IsCursorCaptureEnabled = false;
+                session.StartCapture();
+            } catch { Dispose(); throw; }
+        }
+
+        public byte[] Sample()
+        {
+            var timer = Stopwatch.StartNew();
+            Direct3D11CaptureFrame frame;
+            while ((frame = pool.TryGetNextFrame()) == null) {
+                if (Pixels != null) return signature; // this session already delivered the current surface
+                if (timer.ElapsedMilliseconds >= 900) throw new TimeoutException("window produced no capture frame");
+                Thread.Sleep(8);
+            }
+            using (frame) {
+                if (frame.ContentSize.Width != width || frame.ContentSize.Height != height) throw new Exception("window resized during capture");
+                var copy = SoftwareBitmap.CreateCopyFromSurfaceAsync(frame.Surface, BitmapAlphaMode.Ignore);
+                var task = copy.AsTask();
+                if (!task.Wait(900)) {
+                    copy.Cancel();
+                    task.ContinueWith(t => { if (t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion) t.Result.Dispose(); else if (t.IsFaulted) GC.KeepAlive(t.Exception); });
+                    throw new TimeoutException("timed out reading window pixels");
+                }
+                using (var bitmap = task.Result) {
+                    if (bitmap.PixelWidth != width || bitmap.PixelHeight != height) throw new Exception("surface size changed");
+                    if (Pixels == null) Pixels = new byte[checked(width * height * 4)];
+                    bitmap.CopyToBuffer(Pixels.AsBuffer());
+                }
+                CapturedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                // RGB samples detect small color-only updates that a global mean can miss.
+                byte[] next = new byte[((width + 3) / 4) * ((height + 3) / 4) * 3]; int n = 0;
+                for (int y = 0; y < height; y += 4)
+                    for (int x = 0; x < width; x += 4) {
+                        int offset = (y * width + x) * 4;
+                        next[n++] = Pixels[offset]; next[n++] = Pixels[offset + 1]; next[n++] = Pixels[offset + 2];
+                    }
+                signature = next;
+            }
+            return signature;
+        }
+
+        public byte[] Signature { get { return signature; } }
+
+        public Bitmap ToBitmap()
+        {
+            Bitmap target = new Bitmap(width, height, PixelFormat.Format32bppRgb);
+            var lockBits = target.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+            try { Marshal.Copy(Pixels, 0, lockBits.Scan0, Pixels.Length); }
+            finally { target.UnlockBits(lockBits); }
+            return target;
+        }
+        public void Dispose()
+        {
+            try { if (session != null) session.Dispose(); }
+            finally { try { if (pool != null) pool.Dispose(); } finally { if (device != null) device.Dispose(); } }
+        }
+    }
+
     static class Program
     {
         public const int ProtocolVersion = 2;
@@ -3549,15 +3681,20 @@ namespace DshComputerUse.Worker
 
         static IDisposable GuardReceiver(IntPtr expected, uint pid, bool keyboard)
         {
+            return GuardWindowReceiver(expected, pid, keyboard, false);
+        }
+
+        static IDisposable GuardWindowReceiver(IntPtr expected, uint pid, bool keyboard, bool exactWindow)
+        {
             return new ReceiverScope(delegate {
-                IntPtr actual = keyboard ? InputForeground() : InputPointReceiver();
+                IntPtr actual = exactWindow ? GetAncestor(Native.GetForegroundWindow(), 2) : keyboard ? InputForeground() : InputPointReceiver();
                 string problem = InputReceiverProblem(expected.ToInt64(), pid, InputWindowExists(expected), InputWindowPid(expected), actual.ToInt64());
                 if (problem != null)
                 {
                     // Same-family foreground for KEYBOARD only: the dialog is where the keystrokes
                     // belong, so accept it and follow it. Mouse/point receivers keep the strict
                     // check — a click must land on the pixel's real owner, never be retargeted.
-                    if (keyboard && SameInputFamily(expected, TopLevel(actual))) { SetSticky(TopLevel(actual)); return; }
+                    if (!exactWindow && keyboard && SameInputFamily(expected, TopLevel(actual))) { SetSticky(TopLevel(actual)); return; }
                     throw InputInterrupted("INPUT_TARGET_CHANGED", problem + ". Remaining input was refused; inspect any partial effect before retrying.");
                 }
             });
@@ -4359,7 +4496,8 @@ namespace DshComputerUse.Worker
         static string _ocrLanguage;
         static Dictionary<string, object> Ocr(Dictionary<string, object> a)
         {
-            ValidateKickoffCapture(a);
+            IntPtr window = new IntPtr(GetI(a, "hwnd", 0));
+            ValidateCaptureTarget(a, window);
             if (_ocrEngine == null)
             {
                 _ocrEngine = OcrEngine.TryCreateFromUserProfileLanguages();
@@ -4369,6 +4507,7 @@ namespace DshComputerUse.Worker
                 throw new Exception("OCR_UNAVAILABLE: no OCR recognizer language is installed on this machine. " +
                     "Install one (Settings > Time & language > Language > add a language with 'Text recognition') " +
                     "or read regions with computer_shot instead.");
+            if (window != IntPtr.Zero) return WindowOcr(a, window);
             int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
             int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
             int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
@@ -4410,9 +4549,41 @@ namespace DshComputerUse.Worker
                 if (mem != IntPtr.Zero) Native.DeleteDC(mem);
                 if (screen != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screen);
             }
-            SoftwareBitmap bitmap = SoftwareBitmap.CreateCopyFromBuffer(
-                WindowsRuntimeBufferExtensions.AsBuffer(bgra), BitmapPixelFormat.Bgra8, w, h);
-            OcrResult result = _ocrEngine.RecognizeAsync(bitmap).AsTask().GetAwaiter().GetResult();
+            return RecognizePixels(bgra, x, y, w, h);
+        }
+
+        static Dictionary<string, object> WindowOcr(Dictionary<string, object> args, IntPtr window)
+        {
+            RECT bounds;
+            string geometry = ScreenshotGeometry(window, out bounds);
+            if (geometry == null) throw new Exception("OCR_TARGET_UNAVAILABLE: window closed or minimized");
+            using (var frames = new WindowFrames(window, bounds)) {
+                RECT r = frames.Bounds;
+                int x = GetI(args, "x", r.Left), y = GetI(args, "y", r.Top);
+                int w = GetI(args, "width", r.Right - r.Left), h = GetI(args, "height", r.Bottom - r.Top);
+                if (w <= 0 || h <= 0 || x < r.Left || y < r.Top || (long)x+w > r.Right || (long)y+h > r.Bottom ||
+                    (long)w*h > 16L*1024*1024) throw new Exception("OCR region must fit inside the window surface and within 16M pixels");
+                frames.Sample();
+                byte[] pixels = frames.Pixels;
+                if (x != r.Left || y != r.Top || w != r.Right-r.Left || h != r.Bottom-r.Top) {
+                    pixels = new byte[checked(w*h*4)];
+                    for (int i = 0; i < h; i++) Buffer.BlockCopy(frames.Pixels,
+                        ((y-r.Top+i)*(r.Right-r.Left)+x-r.Left)*4, pixels, i*w*4, w*4);
+                }
+                var result = RecognizePixels(pixels, x, y, w, h);
+                ValidateCaptureTarget(args, window);
+                if (ScreenshotGeometry(window, out bounds) != geometry) throw new Exception("OCR_TARGET_CHANGED: observe this window again");
+                result["hwnd"] = window.ToInt64(); result["captureBackend"] = "windows-graphics-capture";
+                return result;
+            }
+        }
+
+        static Dictionary<string, object> RecognizePixels(byte[] bgra, int x, int y, int w, int h)
+        {
+            OcrResult result;
+            using (SoftwareBitmap bitmap = SoftwareBitmap.CreateCopyFromBuffer(
+                WindowsRuntimeBufferExtensions.AsBuffer(bgra), BitmapPixelFormat.Bgra8, w, h))
+                result = _ocrEngine.RecognizeAsync(bitmap).AsTask().GetAwaiter().GetResult();
             List<object> lines = new List<object>();
             StringBuilder joined = new StringBuilder();
             foreach (OcrLine line in result.Lines)
@@ -4432,16 +4603,240 @@ namespace DshComputerUse.Worker
                 "region", new int[] { x, y, w, h });
         }
 
+        [DllImport("user32.dll")]
+        static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+        static string ScreenshotGeometry(IntPtr window, out RECT bounds)
+        {
+            bounds = new RECT();
+            if (!Native.IsWindowVisible(window) || Native.IsIconic(window) || !Native.GetWindowRect(window, out bounds) ||
+                bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top) return null;
+            uint dpi = 0;
+            try { dpi = Native.GetDpiForWindow(window); } catch (EntryPointNotFoundException) { }
+            return String.Join(",", new object[] { window.ToInt64(), PidOf(window), bounds.Left, bounds.Top,
+                bounds.Right, bounds.Bottom, dpi, Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN),
+                Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN),
+                Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN) });
+        }
+
+        sealed class ClickControl
+        {
+            public System.Windows.Rect Rect;
+            public string RuntimeId, Name, Id;
+            public int Role;
+            public static ClickControl Read(AutomationElement e)
+            {
+                var c = e.Cached;
+                var type = c.ControlType;
+                if (type != ControlType.Button && type != ControlType.Hyperlink && type != ControlType.CheckBox &&
+                    type != ControlType.RadioButton && type != ControlType.MenuItem && type != ControlType.TabItem &&
+                    type != ControlType.ListItem && type != ControlType.ComboBox) return null;
+                var ids = e.GetRuntimeId(); var rect = c.BoundingRectangle;
+                if (!c.IsEnabled || c.IsOffscreen || ids == null || ids.Length == 0 || rect.IsEmpty || rect.Width <= 0 || rect.Height <= 0) return null;
+                return new ClickControl { Rect = rect, Role = type.Id, Name = c.Name, Id = c.AutomationId,
+                    RuntimeId = String.Join(".", ids) };
+            }
+            public bool Same(ClickControl other)
+            {
+                return other != null && RuntimeId == other.RuntimeId && Id == other.Id && Role == other.Role &&
+                    Name == other.Name && Rect == other.Rect;
+            }
+        }
+        // A slow UIA provider must not hold the screenshot worker. At most one provider scan
+        // is outstanding. Pixel evidence remains available if there is no usable control.
+        static int witnessProviderBusy;
+        static Task<T> StartWitnessRead<T>(Func<T> query) where T : class
+        {
+            if (Interlocked.CompareExchange(ref witnessProviderBusy, 1, 0) != 0) return null;
+            return Task.Run(delegate {
+                try { return query(); } catch { return null; }
+                finally { Interlocked.Exchange(ref witnessProviderBusy, 0); }
+            });
+        }
+        static CacheRequest WitnessCache()
+        {
+            var cache = UiSelectorCache(); cache.Add(AutomationElement.BoundingRectangleProperty);
+            cache.Add(AutomationElement.IsEnabledProperty); cache.Add(AutomationElement.IsOffscreenProperty); return cache;
+        }
+        static List<ClickControl> ReadClickControls(IntPtr window)
+        {
+            var result = new List<ClickControl>(); var cache = WitnessCache();
+            var root = AutomationElement.FromHandle(window);
+            UiWalkBounded(root, 5, 72, 73, new UiReadBudget(120, UiClockMs),
+                delegate(AutomationElement e) {
+                    if (e != root) try { var c = ClickControl.Read(e); if (c != null) result.Add(c); } catch (ElementNotAvailableException) { }
+                    return false;
+                }, delegate(AutomationElement e) { return TreeWalker.ControlViewWalker.GetFirstChild(e, cache); },
+                delegate(AutomationElement e) { return TreeWalker.ControlViewWalker.GetNextSibling(e, cache); });
+            return result;
+        }
+        static ClickControl ControlAt(int x, int y)
+        {
+            var cache = WitnessCache();
+            using (cache.Activate()) {
+                var e = AutomationElement.FromPoint(new System.Windows.Point(x, y));
+                for (int depth = 0; e != null && depth < 5; depth++) {
+                    var c = ClickControl.Read(e); if (c != null) return c;
+                    e = TreeWalker.ControlViewWalker.GetParent(e, cache);
+                }
+            }
+            return null;
+        }
+
+        sealed class ClickWitness
+        {
+            public string Id, Geometry;
+            public RECT Bounds;
+            public byte[] Pixels, InitialPixels; // cursor-free RGB, one sample every four physical pixels
+            public int Bytes { get { return Pixels.Length + (InitialPixels == null ? 0 : InitialPixels.Length); } }
+            public List<ClickControl> Controls;
+        }
+        static readonly Queue<ClickWitness> clickWitnesses = new Queue<ClickWitness>();
+        static int witnessBytes;
+        static string RememberClickWitness(string geometry, RECT bounds, byte[] pixels, List<ClickControl> controls, byte[] initial)
+        {
+            const int limit = 16 * 1024 * 1024;
+            var id = Guid.NewGuid().ToString("N");
+            var shot = new ClickWitness { Id = id, Geometry = geometry, Bounds = bounds, Pixels = pixels, Controls = controls };
+            if (controls != null && controls.Count != 0 && !Object.ReferenceEquals(initial,pixels) && !initial.SequenceEqual(pixels))
+                shot.InitialPixels = initial;
+            while (clickWitnesses.Count > 0 && (clickWitnesses.Count >= 12 || witnessBytes + shot.Bytes > limit))
+                witnessBytes -= clickWitnesses.Dequeue().Bytes;
+            if (shot.Bytes <= limit) {
+                clickWitnesses.Enqueue(shot); witnessBytes += shot.Bytes; return id;
+            }
+            return null;
+        }
+        static bool SameClickPatch(ClickWitness shot, byte[] current, int x, int y)
+        {
+            if (current == null || current.Length != shot.Pixels.Length) return false;
+            int width = shot.Bounds.Right - shot.Bounds.Left, height = shot.Bounds.Bottom - shot.Bounds.Top;
+            int columns = (width + 3) / 4, changed = 0;
+            x -= shot.Bounds.Left; y -= shot.Bounds.Top;
+            if (x < 0 || y < 0 || x >= width || y >= height) return false;
+            for (int row = Math.Max(0, y - 18) / 4; row <= Math.Min(height - 1, y + 18) / 4; row++)
+                for (int col = Math.Max(0, x - 32) / 4; col <= Math.Min(width - 1, x + 32) / 4; col++) {
+                    int i = 3 * (row * columns + col);
+                    if (Math.Abs(shot.Pixels[i] - current[i]) > 12 || Math.Abs(shot.Pixels[i+1] - current[i+1]) > 12 ||
+                        Math.Abs(shot.Pixels[i+2] - current[i+2]) > 12) if (++changed >= 3) return false;
+                }
+            return true;
+        }
+        static string CheckClickWitness(Dictionary<string, object> args, int x, int y)
+        {
+            string id = GetS(args, "shotWitness", null);
+            if (id == null) return null;
+            IntPtr hwnd = new IntPtr(GetI(args, "expectHwnd", 0)); RECT bounds;
+            var shot = clickWitnesses.FirstOrDefault(w => w.Id == id);
+            if (shot != null && ScreenshotGeometry(hwnd, out bounds) == shot.Geometry) {
+                var oldControl = shot.Controls == null ? null : shot.Controls.Where(c => c.Rect.Contains(x, y))
+                    .OrderBy(c => c.Rect.Width * c.Rect.Height).FirstOrDefault();
+                var query = StartWitnessRead(delegate { return new ClickControl[] { ControlAt(x, y) }; });
+                bool ready = query != null && query.Wait(250) && query.Result != null;
+                var current = ready ? query.Result[0] : null;
+                if (oldControl != null) {
+                    if (ready && oldControl.Same(current) &&
+                        (shot.InitialPixels == null || SameClickPatch(shot, shot.InitialPixels, x, y))) return "uia";
+                } else if (ready && current == null) {
+                    try {
+                        using (var frames = new WindowFrames(hwnd, bounds))
+                            if (frames.Bounds.Left == shot.Bounds.Left && frames.Bounds.Top == shot.Bounds.Top &&
+                                frames.Bounds.Right == shot.Bounds.Right && frames.Bounds.Bottom == shot.Bounds.Bottom &&
+                                SameClickPatch(shot, frames.Sample(), x, y)) return "pixels";
+                    } catch { /* unavailable pixels cannot authorize the old click */ }
+                }
+            }
+            throw InputInterrupted("STALE_SCREENSHOT", "Click target changed or its observation expired. Inspect this window again.");
+        }
+
+        static void CheckScreenshotPoint(Dictionary<string, object> a, int x, int y)
+        {
+            string expected = GetS(a, "shotGeometry", null);
+            if (expected == null && !GetB(a, "strictHwnd", false)) return;
+            IntPtr window = new IntPtr(GetI(a, "expectHwnd", 0));
+            RECT bounds;
+            POINT point; point.X = x; point.Y = y;
+            if ((expected != null && ScreenshotGeometry(window, out bounds) != expected) || !Native.IsWindowEnabled(window) ||
+                GetAncestor(Native.WindowFromPoint(point), 2) != window ||
+                GetAncestor(Native.GetForegroundWindow(), 2) != window)
+                throw InputInterrupted(expected != null ? "STALE_SCREENSHOT" : "INPUT_TARGET_CHANGED",
+                    "The window moved, changed focus, or the point is covered. Observe the named window again.");
+        }
+
+        // Only a matching settled observation, with the same input tick and geometry, earns
+        // the short repeat window. A change during either path starts a full quiet interval.
+        static string lastCaptureKey;
+        static byte[] lastCaptureSample;
+        static uint lastCaptureInput;
+        static readonly Stopwatch CaptureClock = Stopwatch.StartNew();
+        static long lastSettledAt;
+        static bool WaitForCapture(Dictionary<string, object> args, string key, Func<byte[]> sample,
+            out int elapsed, out double difference)
+        {
+            string mode = GetS(args, "wait", "auto");
+            int cap = Math.Max(1, GetI(args, "waitCapMs", mode == "auto" ? 2500 : 10000));
+            int quiet = Math.Max(1, GetI(args, "stableMs", mode == "auto" ? 450 : 700));
+            var timer = Stopwatch.StartNew();
+            uint input = Native.LastInputTick();
+            byte[] previous = sample();
+            bool repeat = mode == "auto" && !args.ContainsKey("stableMs") && key == lastCaptureKey &&
+                CaptureClock.ElapsedMilliseconds - lastSettledAt < 12000 && input == lastCaptureInput &&
+                previous != null && lastCaptureSample != null && previous.SequenceEqual(lastCaptureSample);
+            lastCaptureKey = null; lastCaptureSample = null;
+            long quietSince = timer.ElapsedMilliseconds;
+            int required = repeat ? Math.Min(205, quiet) : quiet;
+            difference = 0;
+            do {
+                long remaining = cap - timer.ElapsedMilliseconds;
+                if (remaining <= 0) break;
+                Thread.Sleep((int)Math.Min(45, Math.Min(remaining, Math.Max(1, required - (timer.ElapsedMilliseconds - quietSince)))));
+                byte[] current = sample();
+                uint tick = Native.LastInputTick();
+                difference = Object.ReferenceEquals(current, previous) && current != null ? 0 : SigDiffPct(previous, current, 4);
+                if (difference > 0 || input != tick) { quietSince = timer.ElapsedMilliseconds; required = quiet; input = tick; }
+                previous = current;
+                if (current != null && timer.ElapsedMilliseconds - quietSince >= required) {
+                    lastCaptureKey = key; lastCaptureSample = current; lastCaptureInput = tick;
+                    lastSettledAt = CaptureClock.ElapsedMilliseconds; elapsed = (int)timer.ElapsedMilliseconds; return true;
+                }
+            } while (timer.ElapsedMilliseconds < cap);
+            elapsed = (int)timer.ElapsedMilliseconds; return false;
+        }
+
+        static void ValidateCaptureTarget(Dictionary<string, object> args, IntPtr hwnd)
+        {
+            // WGC reads exactly this surface even if the confirmed app is behind another window.
+            if (hwnd != IntPtr.Zero && _kickoffFocus.Confirms(hwnd.ToInt64(), PidOf(hwnd)) && Native.IsWindow(hwnd) &&
+                (!IsHostWindow(hwnd) || HostDrivingAllowed())) return;
+            IntPtr owner = new IntPtr(_kickoffFocus.Target);
+            if (hwnd != IntPtr.Zero && owner != IntPtr.Zero && hwnd != owner && _kickoffFocus.Confirms(owner.ToInt64(), PidOf(owner)) &&
+                (!IsHostWindow(owner) || HostDrivingAllowed()) && FeedbackSurface(owner) == hwnd) return;
+            ValidateKickoffCapture(args);
+            if (hwnd != IntPtr.Zero && GetB(args, "__kickoff", true) && Panic.CycleLit && !Panic.Stopped &&
+                !Panic.Exited && hwnd != TopLevel(Native.GetForegroundWindow()))
+                throw new Exception("KICKOFF-FOCUS-REQUIRED: select this window before observing its background surface");
+        }
+
         static Dictionary<string, object> Capture(Dictionary<string, object> a)
         {
-            ValidateKickoffCapture(a); // before even the pixel-stability sampler
+            IntPtr shotWindow = new IntPtr(GetI(a, "shotWindow", 0));
+            ValidateCaptureTarget(a, shotWindow);
             int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
             int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
             int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
             int vh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
             int x = GetI(a, "x", vx), y = GetI(a, "y", vy);
             int w = GetI(a, "width", vw), h = GetI(a, "height", vh);
-            if (GetB(a, "clamp", true))
+            string geometry = null;
+            if (shotWindow != IntPtr.Zero)
+            {
+                RECT bounds;
+                geometry = ScreenshotGeometry(shotWindow, out bounds);
+                if (geometry == null) throw new Exception("SCREENSHOT_WINDOW_UNAVAILABLE: select a visible window");
+                x = bounds.Left; y = bounds.Top;
+                w = bounds.Right - x; h = bounds.Bottom - y;
+            }
+            if (shotWindow == IntPtr.Zero && GetB(a, "clamp", true))
             {
                 int x2 = Math.Max(x, vx), y2 = Math.Max(y, vy);
                 int x3 = Math.Min(x + w, vx + vw), y3 = Math.Min(y + h, vy + vh);
@@ -4450,69 +4845,103 @@ namespace DshComputerUse.Worker
             }
             bool withCursor = GetB(a, "cursor", false);
 
-            // Timing redundancy (user-requested): PRIMARY = wait for pixel stability, so a
-            // slow network never yields a half-rendered screenshot. FALLBACK = a hard cap;
-            // if the screen still will not settle we shoot anyway and report settled:false,
-            // so the caller knows to distrust the image instead of stalling the whole task.
             string waitMode = GetS(a, "wait", "auto");
-            bool settled = true;
-            int settleMs = 0;
+            bool settled = true, cursorDrawn = false;
+            int settleMs = 0, cursorFlags = 0, cursorAtX = 0, cursorAtY = 0;
             double settleDiff = 0;
-            int settleEstimate = 0;
-            if (waitMode != "none")
-            {
-                int cap = GetI(a, "waitCapMs", waitMode == "auto" ? 2500 : 10000);
-                int stabMs = GetI(a, "stableMs", waitMode == "auto" ? 450 : 700);
-                settled = SettleWait(cap, stabMs, 220, 8, GetD(a, "diffPct", 0.30),
-                                     out settleMs, out settleDiff, out settleEstimate);
-            }
-
-            ValidateKickoffCapture(a); // focus may have changed while the page was settling
-            IntPtr screen = Native.GetDC(IntPtr.Zero);
-            IntPtr mem = Native.CreateCompatibleDC(screen);
-            Native.BITMAPINFO bmi = new Native.BITMAPINFO();
-            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER));
-            bmi.bmiHeader.biWidth = w; bmi.bmiHeader.biHeight = -h;
-            bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = 0;
-            IntPtr bits;
-            IntPtr dib = Native.CreateDIBSection(screen, ref bmi, 0, out bits, IntPtr.Zero, 0);
-            IntPtr old = Native.SelectObject(mem, dib);
-            // SRCCOPY | CAPTUREBLT so layered windows are included
-            Native.BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020 | 0x40000000);
-            long capturedAt = NowMs();
-            bool cursorDrawn = false;
-            int cursorFlags = 0, cursorAtX = 0, cursorAtY = 0;
-            if (withCursor)
-            {
-                CURSORINFO ci = new CURSORINFO();
-                ci.cbSize = (uint)Marshal.SizeOf(typeof(CURSORINFO));
-                if (Native.GetCursorInfo(ref ci))
-                {
-                    cursorFlags = (int)ci.flags; cursorAtX = ci.ptScreenPos.X; cursorAtY = ci.ptScreenPos.Y;
-                    if ((ci.flags & Native.CURSOR_SHOWING) != 0)
-                    {
-                        // Draw straight into the DC that already owns the DIB. The first
-                        // version created a second DC and SelectObject'd the SAME bitmap into
-                        // it — GDI forbids a bitmap living in two DCs at once, that SelectObject
-                        // failed silently, and DrawIconEx painted into memG's default 1x1
-                        // monochrome bitmap. Result: cursorDrawn=true with no arrow in the image.
-                        cursorDrawn = Native.DrawIconEx(mem, ci.ptScreenPos.X - x, ci.ptScreenPos.Y - y, ci.hCursor, 0, 0, 0, IntPtr.Zero, Native.DI_NORMAL);
+            long capturedAt;
+            bool foregroundAtCapture = shotWindow != IntPtr.Zero && GetAncestor(Native.GetForegroundWindow(), 2) == shotWindow;
+            string witness = null;
+            Bitmap managed;
+            if (shotWindow != IntPtr.Zero) {
+                RECT bounds;
+                if (ScreenshotGeometry(shotWindow, out bounds) != geometry) throw new Exception("STALE_SCREENSHOT: window changed before capture");
+                try {
+                    bool keepWitness = foregroundAtCapture && GetB(a, "clickWitness", false);
+                    using (var frames = new WindowFrames(shotWindow, bounds)) {
+                        byte[] firstPixels = keepWitness ? frames.Sample() : null;
+                        var controls = keepWitness ? StartWitnessRead(delegate { return ReadClickControls(shotWindow); }) : null;
+                        if (waitMode == "none") { if (!keepWitness) frames.Sample(); }
+                        else settled = WaitForCapture(a, geometry, frames.Sample, out settleMs, out settleDiff);
+                        x = frames.Bounds.Left; y = frames.Bounds.Top;
+                        w = frames.Bounds.Right - x; h = frames.Bounds.Bottom - y;
+                        managed = frames.ToBitmap(); capturedAt = frames.CapturedAt;
+                        if (keepWitness && settled) {
+                            byte[] captured = frames.Signature;
+                            var matched = controls != null && controls.Wait(120) ? controls.Result : null;
+                            witness = RememberClickWitness(geometry, frames.Bounds, captured, matched, firstPixels);
+                        }
+                    }
+                } catch (Exception ex) {
+                    throw new Exception("CAPTURE_UNAVAILABLE: Windows.Graphics.Capture could not read this window: " + ex.GetBaseException().Message);
+                }
+                if (withCursor) {
+                    CURSORINFO ci = new CURSORINFO(); ci.cbSize = (uint)Marshal.SizeOf(typeof(CURSORINFO));
+                    if (Native.GetCursorInfo(ref ci)) {
+                        cursorFlags = (int)ci.flags; cursorAtX = ci.ptScreenPos.X; cursorAtY = ci.ptScreenPos.Y;
+                        if ((ci.flags & Native.CURSOR_SHOWING) != 0 && GetAncestor(Native.WindowFromPoint(ci.ptScreenPos), 2) == shotWindow) {
+                            using (Graphics graphics = Graphics.FromImage(managed)) {
+                                IntPtr dc = graphics.GetHdc();
+                                try { cursorDrawn = Native.DrawIconEx(dc, cursorAtX - x, cursorAtY - y, ci.hCursor, 0, 0, 0, IntPtr.Zero, Native.DI_NORMAL); }
+                                finally { graphics.ReleaseHdc(dc); }
+                            }
+                        }
                     }
                 }
+            } else {
+                if (waitMode != "none")
+                    settled = WaitForCapture(a, String.Join(",", new int[] { x, y, w, h }),
+                        delegate { return CaptureRegionSamples(x, y, w, h, 8); }, out settleMs, out settleDiff);
+                ValidateKickoffCapture(a);
+                IntPtr screen = Native.GetDC(IntPtr.Zero);
+                IntPtr mem = Native.CreateCompatibleDC(screen);
+                Native.BITMAPINFO bmi = new Native.BITMAPINFO();
+                bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER));
+                bmi.bmiHeader.biWidth = w; bmi.bmiHeader.biHeight = -h;
+                bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = 0;
+                IntPtr bits;
+                IntPtr dib = Native.CreateDIBSection(screen, ref bmi, 0, out bits, IntPtr.Zero, 0);
+                IntPtr old = Native.SelectObject(mem, dib);
+                // SRCCOPY | CAPTUREBLT so layered windows are included
+                Native.BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020 | 0x40000000);
+                capturedAt = NowMs();
+                if (withCursor)
+                {
+                    CURSORINFO ci = new CURSORINFO();
+                    ci.cbSize = (uint)Marshal.SizeOf(typeof(CURSORINFO));
+                    if (Native.GetCursorInfo(ref ci))
+                    {
+                        cursorFlags = (int)ci.flags; cursorAtX = ci.ptScreenPos.X; cursorAtY = ci.ptScreenPos.Y;
+                        if ((ci.flags & Native.CURSOR_SHOWING) != 0)
+                        {
+                            // Draw straight into the DC that already owns the DIB. The first
+                            // version created a second DC and SelectObject'd the SAME bitmap into
+                            // it — GDI forbids a bitmap living in two DCs at once, that SelectObject
+                            // failed silently, and DrawIconEx painted into memG's default 1x1
+                            // monochrome bitmap. Result: cursorDrawn=true with no arrow in the image.
+                            cursorDrawn = Native.DrawIconEx(mem, ci.ptScreenPos.X - x, ci.ptScreenPos.Y - y, ci.hCursor, 0, 0, 0, IntPtr.Zero, Native.DI_NORMAL);
+                        }
+                    }
+                }
+                // copy DIB pixels into a managed bitmap BEFORE freeing the DIB —
+                // a Bitmap that wraps DIB memory must never outlive the DIB
+                Bitmap wrap = new Bitmap(w, h, 4 * w, PixelFormat.Format32bppRgb, bits);
+                managed = new Bitmap(w, h);
+                using (Graphics cg = Graphics.FromImage(managed))
+                {
+                    cg.DrawImage(wrap, 0, 0, w, h);
+                }
+                wrap.Dispose();
+                Native.SelectObject(mem, old);
+                Native.DeleteObject(dib); Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen);
             }
-            // copy DIB pixels into a managed bitmap BEFORE freeing the DIB —
-            // a Bitmap that wraps DIB memory must never outlive the DIB
-            Bitmap wrap = new Bitmap(w, h, 4 * w, PixelFormat.Format32bppRgb, bits);
-            Bitmap managed = new Bitmap(w, h);
-            using (Graphics cg = Graphics.FromImage(managed))
-            {
-                cg.DrawImage(wrap, 0, 0, w, h);
+            try {
+                ValidateCaptureTarget(a, shotWindow);
+                RECT after;
+                if (geometry != null && ScreenshotGeometry(shotWindow, out after) != geometry)
+                    throw new Exception("STALE_SCREENSHOT: window geometry changed during capture; capture again");
             }
-            wrap.Dispose();
-            Native.SelectObject(mem, old);
-            Native.DeleteObject(dib); Native.DeleteDC(mem); Native.ReleaseDC(IntPtr.Zero, screen);
-            try { ValidateKickoffCapture(a); }
             catch { managed.Dispose(); throw; } // discard pixels if focus changed during capture
             Bitmap bmp = managed;
 
@@ -4555,6 +4984,12 @@ namespace DshComputerUse.Worker
                 "capturedAt", capturedAt,
                 "cursor", PtDict(cp2.X, cp2.Y),
                 "ts", NowMs());
+            res["captureBackend"] = shotWindow == IntPtr.Zero ? "desktop-bitblt" : "windows-graphics-capture";
+            if (geometry != null) {
+                res["hwnd"] = shotWindow.ToInt64();
+                if (witness != null) res["shotWitness"] = witness;
+                if ((!GetB(a, "clickWitness", false) || witness != null) && foregroundAtCapture && GetAncestor(Native.GetForegroundWindow(), 2) == shotWindow) res["shotGeometry"] = geometry;
+            }
             if (withCursor)
             {
                 // Diagnostics for the visual-calibration contract: the pointer must be
@@ -4570,7 +5005,7 @@ namespace DshComputerUse.Worker
                     ? "pointer burned into the image at cursorInImage"
                     : ((cursorFlags & 1) == 0
                         ? "pointer was HIDDEN (CURSOR_SHOWING=0) at capture time"
-                        : "DrawIconEx refused; pointer not burned in");
+                        : "pointer outside the captured target or unavailable for drawing");
             }
             if (waitMode != "none")
             {
@@ -4578,8 +5013,7 @@ namespace DshComputerUse.Worker
                 res["settleMs"] = settleMs;
                 res["settleDiffPct"] = Math.Round(settleDiff, 3);
                 if (!settled)
-                    res["settleNote"] = "page never went quiet within the cap — this image may be a partial render; ~" +
-                                        settleEstimate + "ms more might have finished it (or re-shoot with wait:\"stable\")";
+                    res["settleNote"] = "The observed surface did not remain quiet before the deadline. Inspect again.";
             }
             // Tell the human a capture just happened: a yellow border flashes around the
             // captured rectangle. Deliberately fired AFTER the pixels are grabbed, so the
@@ -4772,7 +5206,7 @@ namespace DshComputerUse.Worker
                 Native.GetCursorPos(out p);
             }
             CheckHumanInput();
-            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections, "cursor", CursorSnapshot());
+            return Dict("x", p.X, "y", p.Y, "positionCorrections", _positionCorrections, "cursor", CursorSnapshot(), "actionHwnd", TopLevel(Native.WindowFromPoint(p)).ToInt64());
         }
 
         static Rectangle ClickSampleRegion(int x, int y, Rectangle desktop)
@@ -4838,6 +5272,8 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Click(Dictionary<string, object> a)
         {
+            CheckScreenshotPoint(a, GetI(a, "x", 0), GetI(a, "y", 0));
+            CheckClickWitness(a, GetI(a, "x", 0), GetI(a, "y", 0));
             Rectangle sampleRegion = VerificationSampleRegion(a, GetI(a, "x", 0), GetI(a, "y", 0), new Rectangle(
                 Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN),
                 Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN)));
@@ -5007,14 +5443,28 @@ namespace DshComputerUse.Worker
             if (tx != int.MinValue) HostGuardPoint(tx, ty, "click");
             if (under == IntPtr.Zero) under = InputPointReceiver();
 
+            string checkedTarget = null;
             uint down = Native.MOUSEEVENTF_LEFTDOWN, up = Native.MOUSEEVENTF_LEFTUP;
             if (btn == "right") { down = Native.MOUSEEVENTF_RIGHTDOWN; up = Native.MOUSEEVENTF_RIGHTUP; }
             else if (btn == "middle") { down = Native.MOUSEEVENTF_MIDDLEDOWN; up = Native.MOUSEEVENTF_MIDDLEUP; }
+            CheckScreenshotPoint(a, tx, ty);
             using (GuardReceiver(under, InputWindowPid(under), false)) {
-                for (int i = 0; i < clicks; i++) {
-                    SendMouse(down, 0, 0, 0); Thread.Sleep(30); SendMouse(up, 0, 0, 0);
-                    if (i < clicks - 1) Thread.Sleep(gap);
-                }
+                var modifiers = new List<ushort>();
+                if (GetB(a, "ctrl", false)) modifiers.Add(0x11);
+                if (GetB(a, "shift", false)) modifiers.Add(0x10);
+                KeyboardChord.Run(modifiers, SendKey, ReleaseKeyForCleanup,
+                    delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
+                    delegate {
+                        for (int i = 0; i < clicks; i++) {
+                            if (i == 0) checkedTarget = CheckClickWitness(a, tx, ty);
+                            CheckHumanInput();
+                            CheckScreenshotPoint(a, tx, ty);
+                            SendMouse(down, 0, 0, 0);
+                            WaitForKeyHold(GetI(a, "holdMs", 30));
+                            SendMouse(up, 0, 0, 0);
+                            if (i < clicks - 1) Thread.Sleep(gap);
+                        }
+                    });
             }
             EndActuationForReadback();
             byte[] after = null;
@@ -5028,6 +5478,8 @@ namespace DshComputerUse.Worker
             CheckHumanInput();
             Dictionary<string, object> clickOut = Dict("x", fp.X, "y", fp.Y, "positionCorrections", _positionCorrections, "focus", clickFocus);
             if (_lastRefocus != null) clickOut["refocused"] = _lastRefocus;
+            if (checkedTarget != null) clickOut["targetCheck"] = checkedTarget;
+            if (under != IntPtr.Zero) clickOut["actionHwnd"] = TopLevel(under).ToInt64();
             if (coveredBy != null) clickOut["coveredBy"] = coveredBy;
             if (under != IntPtr.Zero)
                 clickOut["receiver"] = Short(WinTitleOf(under), 40) + " (pid " + PidOf(under) + ")";
@@ -5089,6 +5541,8 @@ namespace DshComputerUse.Worker
             int tx = GetI(a, "toX", int.MinValue), ty = GetI(a, "toY", int.MinValue);
             if (fx == int.MinValue || fy == int.MinValue || tx == int.MinValue || ty == int.MinValue)
                 throw new Exception("fromX,fromY,toX,toY required");
+            CheckScreenshotPoint(a, fx, fy);
+            CheckScreenshotPoint(a, tx, ty);
             // both ends are input destinations - the button goes down under (fx,fy) and comes up
             // under (tx,ty) - so either one can be the host window
             HostGuardPoint(fx, fy, "drag");
@@ -5111,6 +5565,8 @@ namespace DshComputerUse.Worker
             IntPtr startWindow = CheckDragStart(a, startPoint.X, startPoint.Y);
             Dictionary<string, object> startCursor = CursorSnapshot();
             Dictionary<string, object> cursorCheck = CheckDragCursor(GetS(a, "expectCursor", ""), startCursor);
+            CheckScreenshotPoint(a, fx, fy);
+            CheckScreenshotPoint(a, tx, ty);
             using (GuardReceiver(startWindow, InputWindowPid(startWindow), false))
                 SendMouse(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
             Thread.Sleep(80);
@@ -5148,6 +5604,8 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Scroll(Dictionary<string, object> a)
         {
+            int x = GetI(a, "x", 0), y = GetI(a, "y", 0);
+            CheckScreenshotPoint(a, x, y);
             string dir = GetS(a, "direction", "down");
             int lines = Math.Max(1, Math.Min(30, GetI(a, "lines", 3)));
             uint flag = (dir == "left" || dir == "right") ? Native.MOUSEEVENTF_HWHEEL : Native.MOUSEEVENTF_WHEEL;
@@ -5163,12 +5621,13 @@ namespace DshComputerUse.Worker
                 throw InputInterrupted("INPUT_TARGET_CHANGED", "Scroll receiver differs from the observed target. No wheel input was sent.");
             using (GuardReceiver(scrollTarget, InputWindowPid(scrollTarget), false)) {
                 for (int i = 0; i < lines; i++) {
+                    CheckScreenshotPoint(a, x, y);
                     SendMouse(flag, 0, 0, unchecked((uint)(sign * (int)Native.WHEEL_DELTA)));
                     Thread.Sleep(25);
                 }
             }
             POINT p; Native.GetCursorPos(out p);
-            return PtDict(p.X, p.Y);
+            return Dict("x", p.X, "y", p.Y, "actionHwnd", TopLevel(scrollTarget).ToInt64());
         }
 
         // Physical ownership is checked before focus or input, for every action.
@@ -5201,7 +5660,8 @@ namespace DshComputerUse.Worker
             if (op == "click" || op == "move" || op == "drag" || op == "scroll" ||
                 op == "key" || op == "type" || op == "selectRange" || op == "shiftClick" || op == "uiaAct")
             {
-                _lastRefocus = EnsureTargetForeground();
+                _lastRefocus = GetB(a, "strictHwnd", false) || GetS(a, "shotGeometry", null) != null
+                    ? null : EnsureTargetForeground();
             }
             // Validation and focus readback do not own input. The first real mutation
             // or SendInput opens the actual scope and its deep-blue cue.
@@ -5409,7 +5869,12 @@ namespace DshComputerUse.Worker
         /// window look "changed".
         static byte[] FrameSignatureRect(int rx, int ry, int rw, int rh, int step)
         {
-            if (rw <= 16 || rh <= 16) return null;
+            return rw <= 16 || rh <= 16 ? null : CaptureRegionSamples(rx, ry, rw, rh, step);
+        }
+
+        static byte[] CaptureRegionSamples(int rx, int ry, int rw, int rh, int step)
+        {
+            if (rw <= 0 || rh <= 0) return null;
             IntPtr screen = Native.GetDC(IntPtr.Zero);
             IntPtr mem = Native.CreateCompatibleDC(screen);
             Native.BITMAPINFO bmi = new Native.BITMAPINFO();
@@ -5488,13 +5953,6 @@ namespace DshComputerUse.Worker
         /// FALLBACK (so a slow or never-quiet page can never stall the loop): a hard cap;
         /// when it trips we also extrapolate how much longer the screen *would* have needed,
         /// so the caller can decide to re-shoot instead of guessing blindly.
-        static bool SettleWait(int capMs, int stableMs, int pollMs, int step, double diffPct,
-                               out int waitedMs, out double lastDiff, out int estimateMs)
-        {
-            return SettleSampleWait(capMs, stableMs, pollMs, diffPct, delegate { return FrameSignature(step); },
-                                    out waitedMs, out lastDiff, out estimateMs);
-        }
-
         static bool SettleSampleWait(int capMs, int stableMs, int pollMs, double diffPct, Func<byte[]> sample,
                                      out int waitedMs, out double lastDiff, out int estimateMs)
         {
@@ -5538,35 +5996,37 @@ namespace DshComputerUse.Worker
 
         // Explicit window scope excludes unrelated desktop animation without loosening the
         // change threshold. A moved/minimized/replaced window invalidates the observation.
-        static Func<byte[]> WaitSampler(Dictionary<string, object> a, int step, out object scope,
+        static WindowFrames OpenWaitSurface(Dictionary<string, object> args)
+        {
+            IntPtr h = new IntPtr(GetI(args, "hwnd", 0));
+            if (h == IntPtr.Zero) return null;
+            ValidateCaptureTarget(args, h);
+            RECT r;
+            if (ScreenshotGeometry(h, out r) == null) throw new Exception("WAIT_TARGET_UNAVAILABLE: window closed or minimized");
+            return new WindowFrames(h, r);
+        }
+        static Func<byte[]> WaitSampler(Dictionary<string, object> a, WindowFrames frames, int step, out object scope,
             out int rx, out int ry, out int rw, out int rh)
         {
-            if (!a.ContainsKey("hwnd") || GetI(a, "hwnd", 0) == 0)
-            {
-                rx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
-                ry = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
-                rw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
-                rh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            if (frames == null) {
+                rx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN); ry = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+                rw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN); rh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
                 scope = Dict("kind", "virtual-desktop", "region", Dict("x", rx, "y", ry, "width", rw, "height", rh));
                 return delegate { return FrameSignature(step); };
             }
-            IntPtr h = new IntPtr(GetI(a, "hwnd", 0));
-            if (!Native.IsWindow(h) || Native.IsIconic(h))
-                throw new Exception("WAIT_TARGET_UNAVAILABLE: window is closed or minimized; restore/requery first");
-            RECT original; Native.GetWindowRect(h, out original);
-            uint pid = PidOf(h);
-            Rectangle virtualRect = SystemInformation.VirtualScreen;
-            Rectangle visible = Rectangle.Intersect(virtualRect, Rectangle.FromLTRB(original.Left, original.Top, original.Right, original.Bottom));
-            if (visible.Width <= 16 || visible.Height <= 16)
-                throw new Exception("WAIT_TARGET_UNAVAILABLE: window has no usable visible screen region");
-            rx = visible.X; ry = visible.Y; rw = visible.Width; rh = visible.Height;
-            scope = Dict("kind", "window", "hwnd", h.ToInt64(), "region", Dict("x", rx, "y", ry, "width", rw, "height", rh));
+            IntPtr h = new IntPtr(GetI(a, "hwnd", 0)); RECT rect;
+            string geometry = ScreenshotGeometry(h, out rect);
+            if (geometry == null || rect.Left != frames.WindowBounds.Left || rect.Top != frames.WindowBounds.Top ||
+                rect.Right != frames.WindowBounds.Right || rect.Bottom != frames.WindowBounds.Bottom)
+                throw new Exception("WAIT_TARGET_CHANGED: window moved while opening capture");
+            rx = frames.Bounds.Left; ry = frames.Bounds.Top; rw = frames.Bounds.Right-rx; rh = frames.Bounds.Bottom-ry;
+            scope = Dict("kind", "window", "hwnd", h.ToInt64(), "captureBackend", "windows-graphics-capture",
+                "region", Dict("x", rx, "y", ry, "width", rw, "height", rh));
             return delegate {
-                RECT current;
-                if (!Native.IsWindow(h) || Native.IsIconic(h) || PidOf(h) != pid || !Native.GetWindowRect(h, out current) ||
-                    current.Left != original.Left || current.Top != original.Top || current.Right != original.Right || current.Bottom != original.Bottom)
+                ValidateCaptureTarget(a, h);
+                if (geometry == null || ScreenshotGeometry(h, out rect) != geometry)
                     throw new Exception("WAIT_TARGET_CHANGED: window identity or bounds changed during sampling; requery before waiting again");
-                return FrameSignatureRect(visible.X, visible.Y, visible.Width, visible.Height, step);
+                return frames.Sample();
             };
         }
 
@@ -5574,6 +6034,9 @@ namespace DshComputerUse.Worker
         /// threshold — "where did it change", not just "did it" (test report 2026-11-04: a
         /// 0.344% diff cannot distinguish a sent message from a blinking caret without this).
         static int[] SigDiffBounds(byte[] a, byte[] b, int threshold, int cols, int step, int rx, int ry)
+        { return SampleDiffBounds(a, b, threshold, cols, step, rx, ry, 1); }
+
+        static int[] SampleDiffBounds(byte[] a, byte[] b, int threshold, int cols, int step, int rx, int ry, int channels)
         {
             if (a == null || b == null || a.Length != b.Length || cols <= 0) return null;
             int minX = -1, minY = -1, maxX = -1, maxY = -1;
@@ -5582,7 +6045,7 @@ namespace DshComputerUse.Worker
                 int d = a[i] - b[i];
                 if (d < 0) d = -d;
                 if (d <= threshold) continue;
-                int c = i % cols, r = i / cols;
+                int cell = i / channels, c = cell % cols, r = cell / cols;
                 if (minX < 0 || c < minX) minX = c;
                 if (c > maxX) maxX = c;
                 if (minY < 0 || r < minY) minY = r;
@@ -5595,6 +6058,11 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> WaitStable(Dictionary<string, object> a)
         {
+            using (var frames = OpenWaitSurface(a)) return WaitStable(a, frames);
+        }
+
+        static Dictionary<string, object> WaitStable(Dictionary<string, object> a, WindowFrames frames)
+        {
             int capMs = Math.Max(400, GetI(a, "timeoutMs", 8000));
             int stableMs = Math.Max(150, GetI(a, "stableMs", 600));
             int pollMs = Math.Max(120, GetI(a, "pollMs", 240));
@@ -5602,9 +6070,26 @@ namespace DshComputerUse.Worker
             double diffPct = GetD(a, "diffPct", 0.30);
             int waited, estimate; double lastDiff;
             int rx, ry, rw, rh;
-            object scope; Func<byte[]> sample = WaitSampler(a, step, out scope, out rx, out ry, out rw, out rh);
+            if (frames != null) step = 4;
+            object scope; Func<byte[]> sample = WaitSampler(a, frames, step, out scope, out rx, out ry, out rw, out rh);
+            bool smallContinuous = true;
+            int pairs = 0;
+            if (frames != null) {
+                var read = sample; byte[] previous = null;
+                sample = delegate {
+                    var pixels = read();
+                    if (previous != null && smallContinuous) {
+                        double delta = SigDiffPct(previous, pixels, 8);
+                        smallContinuous = delta > 0 && delta < 1; pairs++;
+                    }
+                    previous = pixels; return pixels;
+                };
+            }
             bool ok = SettleSampleWait(capMs, stableMs, pollMs, diffPct, sample, out waited, out lastDiff, out estimate);
-            if (!ok)
+            if (!ok && frames != null && waited >= 2400 && pairs >= 6 && smallContinuous)
+                return Dict("stable", true, "waitedMs", waited, "lastDiffPct", Math.Round(lastDiff, 3),
+                    "scope", scope, "estimateMs", 0, "caretSteady", true, "note", "small continuous differences consistent with a blinking caret");
+            if (!ok && frames == null)
             {
                 // CARET / BLINK DETECTION (test report 2026-11-04): a blinking caret is a ~1-2 Hz
                 // periodic sub-percent change that never settles — Notepad burned the full 8 s cap
@@ -5637,12 +6122,18 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> WaitChange(Dictionary<string, object> a)
         {
+            using (var frames = OpenWaitSurface(a)) return WaitChange(a, frames);
+        }
+
+        static Dictionary<string, object> WaitChange(Dictionary<string, object> a, WindowFrames frames)
+        {
             int timeoutMs = Math.Max(300, GetI(a, "timeoutMs", 6000));
             int pollMs = Math.Max(100, GetI(a, "pollMs", 220));
             int step = Math.Max(4, Math.Min(64, GetI(a, "step", 8)));
             double diffPct = GetD(a, "diffPct", 0.30);
             int rx, ry, rw, rh;
-            object scope; Func<byte[]> sample = WaitSampler(a, step, out scope, out rx, out ry, out rw, out rh);
+            if (frames != null) step = 4;
+            object scope; Func<byte[]> sample = WaitSampler(a, frames, step, out scope, out rx, out ry, out rw, out rh);
             byte[] first = sample();
             long t0 = NowMs();
             int samples = 0;
@@ -5657,10 +6148,14 @@ namespace DshComputerUse.Worker
                 {
                     // WHERE it changed (test report 2026-11-04): 0.344% cannot tell a sent
                     // message from a caret blink; the bounding box can — input area vs caret.
-                    int[] bounds = SigDiffBounds(first, cur, 8, cols, step, rx, ry);
+                    int[] bounds = SampleDiffBounds(first, cur, 8, cols, step, rx, ry, frames == null ? 1 : 3);
                     Dictionary<string, object> hit = Dict("changed", true, "afterMs", NowMs() - t0,
                         "diffPct", Math.Round(d, 3), "samples", samples, "scope", scope);
-                    if (bounds != null) hit["changeBounds"] = Dict("x", bounds[0], "y", bounds[1], "width", bounds[2], "height", bounds[3]);
+                    if (bounds != null && frames != null) {
+                    bounds[2] = Math.Min(bounds[2], rx + rw - bounds[0]);
+                    bounds[3] = Math.Min(bounds[3], ry + rh - bounds[1]);
+                }
+                if (bounds != null) hit["changeBounds"] = Dict("x", bounds[0], "y", bounds[1], "width", bounds[2], "height", bounds[3]);
                     return hit;
                 }
             }
@@ -5830,6 +6325,7 @@ namespace DshComputerUse.Worker
             d["caps"] = 0x14; d["capslock"] = 0x14; d["apps"] = 0x5D;
             d["prtsc"] = 0x2C; d["printscreen"] = 0x2C; d["numlock"] = 0x90;
             d["plus"] = 0xBB; d["minus"] = 0xBD; d["comma"] = 0xBC; d["period"] = 0xBE;
+            for (int i = 0; i <= 9; i++) d["numpad" + i] = (ushort)(0x60 + i);
             for (int i = 1; i <= 24; i++) d["f" + i] = (ushort)(0x6F + i);
             return d;
         }
@@ -5854,8 +6350,13 @@ namespace DshComputerUse.Worker
             foreach (string raw in combo.Split('+')) {
                 string key = raw.Trim().ToLowerInvariant();
                 if (key.Length == 0) throw new Exception("key combo contains an empty token; use plus for the + key");
+                if ((key.StartsWith("kp_") || key.StartsWith("numpad_")) && key.Length == key.IndexOf('_') + 2 &&
+                    key[key.Length - 1] >= '0' && key[key.Length - 1] <= '9')
+                    key = "numpad" + key[key.Length - 1];
                 switch (key) {
-                    case "control": key = "ctrl"; break;
+                    case "shift_l": key = "shift"; break;
+                    case "alt_l": key = "alt"; break;
+                    case "control_l": case "control": key = "ctrl"; break;
                     case "lwin": case "windows": case "meta": key = "win"; break;
                     case "return": key = "enter"; break;
                     case "escape": key = "esc"; break;
@@ -5915,6 +6416,11 @@ namespace DshComputerUse.Worker
 
         static Dictionary<string, object> Key(Dictionary<string, object> a)
         {
+            return KeyWithExpectedFocus(a, null);
+        }
+
+        static Dictionary<string, object> KeyWithExpectedFocus(Dictionary<string, object> a, AutomationElement expectedField)
+        {
             if (_receiverCheck != null) _receiverCheck(); // nested paste may not silently repair a stolen receiver
             string combo = GetS(a, "combo", null);
             if (combo == null) throw new Exception("combo required (e.g. 'ctrl+shift+t', 'enter')");
@@ -5935,7 +6441,7 @@ namespace DshComputerUse.Worker
             List<ushort> vks = new List<ushort>();
             foreach (string k in keys) { ushort vk = VkOf(k); if (!vks.Contains(vk)) vks.Add(vk); }
             bool windowManagement = WindowManagementChord.IsExact(combo);
-            using (GuardReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true))
+            using (GuardWindowReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true, GetB(a, "strictHwnd", false)))
             {
                 if (windowManagement)
                     WindowManagementChord.Run(vks, SendKey, ReleaseKeyForCleanup,
@@ -5943,7 +6449,10 @@ namespace DshComputerUse.Worker
                         delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); },
                         delegate { WaitForKeyHold(0); }, InvalidateKeyboardTarget);
                 else
-                    KeyboardChord.Run(vks, SendKey, ReleaseKeyForCleanup,
+                    KeyboardChord.Run(vks, delegate(ushort vk, bool up) {
+                            if (!up) RequireExpectedFocus(expectedField);
+                            SendKey(vk, up);
+                        }, ReleaseKeyForCleanup,
                         delegate(ushort vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; },
                         delegate { WaitForKeyHold(Math.Max(20, GetI(a, "holdMs", 60))); });
             }
@@ -5974,9 +6483,16 @@ namespace DshComputerUse.Worker
             HostGuardNamed(a, "type");
             Dictionary<string, object> focus = FocusReport(a, true);
             HostGuardForeground("type");   // same rule as `key`: the foreground window is the victim
-            using (GuardReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true)) {
+            using (GuardWindowReceiver(new IntPtr(Convert.ToInt64(focus["hwnd"])), Convert.ToUInt32(focus["pid"]), true, GetB(a, "strictHwnd", false))) {
             // ...and whether whatever owns the focus can hold text at all. Typing into a control
             // with no editable pattern is silently discarded, or interpreted as shortcuts.
+            string expectedToken = GetS(a, "expectTarget", null);
+            AutomationElement expectedField = null;
+            if (expectedToken != null) {
+                string resolved; int scanned;
+                expectedField = ResolveUiTarget(GetUiTarget(expectedToken), false, 6, 120, out resolved, out scanned);
+                RequireExpectedFocus(expectedField);
+            }
             string typeWarn = null;
             bool nonEditableButton = false;
             try
@@ -6003,6 +6519,8 @@ namespace DshComputerUse.Worker
             string mode = GetS(a, "mode", "unicode");
             if (mode == "paste")
             {
+                var pasteKeys = Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800);
+                if (GetB(a, "strictHwnd", false)) { pasteKeys["strictHwnd"] = true; pasteKeys["expectHwnd"] = a["expectHwnd"]; }
                 bool keep = GetB(a, "restoreClipboard", false);
                 string restore = "not-requested";
                 if (keep)
@@ -6021,7 +6539,7 @@ namespace DshComputerUse.Worker
                             MarkMutation();
                             Clipboard.SetDataObject(text, true);
                             Thread.Sleep(60);
-                            Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
+                            KeyWithExpectedFocus(pasteKeys, expectedField);
                             Dictionary<string, object> downgraded = Dict("mode", "paste", "chars", text.Length, "focus", focus,
                                 "clipboardRestore", "skipped-unpreservable-clipboard");
                             downgraded["clipboardWarning"] = "The previous clipboard could not be preserved (private or oversized formats) and was overwritten by this paste. Restore it manually if it mattered.";
@@ -6035,7 +6553,7 @@ namespace DshComputerUse.Worker
                             Thread.Sleep(60);
                             if (!lease.StillOwned())
                                 throw NotDispatched("CLIPBOARD_CHANGED", "CLIPBOARD_CHANGED: clipboard changed before paste; no paste keystrokes sent.");
-                            Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
+                            KeyWithExpectedFocus(pasteKeys, expectedField);
                         }
                         catch (Exception error) { inputError = error; throw; }
                         finally
@@ -6053,7 +6571,7 @@ namespace DshComputerUse.Worker
                     MarkMutation();
                     Clipboard.SetDataObject(text, true);
                     Thread.Sleep(60);
-                    Key(Dict("combo", "ctrl+v", "holdMs", 40, "indicatorMs", 800));
+                    KeyWithExpectedFocus(pasteKeys, expectedField);
                 }
                 Dictionary<string, object> pr = Dict("mode", "paste", "chars", text.Length, "focus", focus,
                     "clipboardRestore", restore);
@@ -6067,6 +6585,7 @@ namespace DshComputerUse.Worker
             foreach (char ch in text)
             {
                 if (ch == '\r') continue;
+                RequireExpectedFocus(expectedField);
                 if (ch == '\n') { SendKey(0x0D, false); SendKey(0x0D, true); Thread.Sleep(15); continue; }
                 INPUT down = new INPUT();
                 down.type = Native.INPUT_KEYBOARD;
@@ -6091,6 +6610,16 @@ namespace DshComputerUse.Worker
             return AddFocusReadback(tr, a, focus);
             }
         }
+        static void RequireExpectedFocus(AutomationElement expected)
+        {
+            if (expected == null) return;
+            try {
+                var actual = AutomationElement.FocusedElement;
+                if (actual != null && Automation.Compare(actual, expected)) return;
+            } catch (ElementNotAvailableException) { }
+            throw InputInterrupted("INPUT_FIELD_CHANGED", "The expected field no longer has focus; inspect the field before continuing.");
+        }
+
         static Dictionary<string, object> AddFocusReadback(Dictionary<string, object> result, Dictionary<string, object> args, Dictionary<string, object> before)
         {
             var after = FocusReport(args, false);
@@ -6234,8 +6763,85 @@ namespace DshComputerUse.Worker
                 "minimized", Native.IsIconic(h));
         }
 
+        static Dictionary<string, object> WindowOnDisplay(IntPtr hwnd)
+        {
+            var window = WinDict(hwnd);
+            var screen = Screen.FromHandle(hwnd);
+            var work = screen.WorkingArea;
+            window["display"] = screen.DeviceName;
+            window["workArea"] = Dict("x", work.X, "y", work.Y, "width", work.Width, "height", work.Height);
+            return window;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct COMBOBOXINFO
+        {
+            public int cbSize; public RECT item, button; public uint buttonState;
+            public IntPtr combo, edit, list;
+        }
+        [DllImport("user32.dll")] static extern bool GetComboBoxInfo(IntPtr combo, ref COMBOBOXINFO info);
+
+        static IntPtr FeedbackSurface(IntPtr owner)
+        {
+            IntPtr foreground = TopLevel(Native.GetForegroundWindow());
+            IntPtr active = owner;
+            if (IsEnabledOwnedPopup(owner, foreground)) active = foreground;
+            else if (!Native.IsWindowEnabled(owner)) {
+                var modal = Native.GetLastActivePopup(owner);
+                if (IsEnabledOwnedPopup(owner, modal)) active = modal;
+            }
+            if (active != foreground) return active;
+            uint pid; uint tid = Native.GetWindowThreadProcessId(active, out pid);
+            var gui = new Native.GUITHREADINFO(); gui.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
+            if (tid == 0 || !Native.GetGUIThreadInfo(tid, ref gui)) return active;
+            if (gui.hwndMenuOwner != IntPtr.Zero && TopLevel(gui.hwndMenuOwner) == active) {
+                IntPtr menu = IntPtr.Zero;
+                Native.EnumWindows(delegate(IntPtr h, IntPtr unused) {
+                    uint process;
+                    if (Native.IsWindowVisible(h) && ClassOf(h) == "#32768" && Native.GetWindowThreadProcessId(h, out process) == tid) {
+                        menu = h; return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+                if (menu != IntPtr.Zero) return menu;
+            }
+            for (IntPtr h = gui.hwndFocus; h != IntPtr.Zero && h != active && TopLevel(h) == active; h = Native.GetParent(h)) {
+                var combo = new COMBOBOXINFO(); combo.cbSize = Marshal.SizeOf(typeof(COMBOBOXINFO));
+                if (GetComboBoxInfo(h, ref combo) && combo.combo == h && Native.IsWindowVisible(combo.list)) return combo.list;
+            }
+            return active;
+        }
+
+        static Dictionary<string, object> WindowDetails(IntPtr hwnd)
+        {
+            RECT r;
+            if (!Native.IsWindow(hwnd) || !Native.GetWindowRect(hwnd, out r)) throw new Exception("WINDOW_UNAVAILABLE: observe windows again");
+            var popups = new List<object>();
+            Native.EnumWindows(delegate(IntPtr h, IntPtr unused) {
+                if (IsEnabledOwnedPopup(hwnd, h)) popups.Add(WindowOnDisplay(h));
+                return true;
+            }, IntPtr.Zero);
+            var samples = new List<object>();
+            if (Native.IsWindowVisible(hwnd) && !Native.IsIconic(hwnd)) {
+                foreach (int fx in new int[] { 1, 2, 3 }) foreach (int fy in new int[] { 1, 2, 3 }) {
+                    POINT p; p.X = r.Left + (r.Right-r.Left)*fx/4; p.Y = r.Top + (r.Bottom-r.Top)*fy/4;
+                    var hit = GetAncestor(Native.WindowFromPoint(p), 2);
+                    samples.Add(Dict("x", p.X, "y", p.Y, "receiver", hit.ToInt64(), "target", hit == hwnd));
+                }
+            }
+            return Dict("window", WindowOnDisplay(hwnd), "ownedPopups", popups, "hitSamples", samples);
+        }
+
         static Dictionary<string, object> Windows(Dictionary<string, object> a)
         {
+            if (a.ContainsKey("feedbackHwnd")) {
+                IntPtr owner = TopLevel(new IntPtr(GetI(a, "feedbackHwnd", 0)));
+                if (!Native.IsWindow(owner)) throw new Exception("WINDOW_UNAVAILABLE: feedback target closed");
+                IntPtr target = FeedbackSurface(owner);
+                return Dict("owner", owner.ToInt64(), "ownerTitle", WinTitleOf(owner), "target", WinDict(target), "popup", target != owner);
+            }
+            if (a.ContainsKey("inspectHwnd")) return WindowDetails(new IntPtr(GetI(a, "inspectHwnd", 0)));
+            if (a.ContainsKey("appQuery")) return FindRegisteredApps(GetS(a, "appQuery", ""));
             uint self = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
             List<object> list = new List<object>();
             Native.EnumWindows(delegate(IntPtr h, IntPtr l)
@@ -6253,6 +6859,79 @@ namespace DshComputerUse.Worker
             }, IntPtr.Zero);
             return Dict("windows", list, "virtualScreen", VirtualScreenDict(),
                 "cooperation", Panic.CooperationState(), "indicator", IndicatorSnapshot());
+        }
+
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode)]
+        static extern int GetApplicationUserModelId(IntPtr process, ref uint length, StringBuilder id);
+
+        static string ProcessAppId(uint pid)
+        {
+            IntPtr process = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (process == IntPtr.Zero) return null;
+            try {
+                uint length = 512;
+                var id = new StringBuilder((int)length);
+                return GetApplicationUserModelId(process, ref length, id) == 0 ? id.ToString() : null;
+            } catch (EntryPointNotFoundException) { return null; }
+            finally { Native.CloseHandle(process); }
+        }
+
+        static object ShellRead(object target, string member, params object[] args)
+        {
+            return target.GetType().InvokeMember(member, System.Reflection.BindingFlags.GetProperty |
+                System.Reflection.BindingFlags.InvokeMethod, null, target, args);
+        }
+
+        static void ReleaseShell(object obj)
+        {
+            if (obj != null && Marshal.IsComObject(obj)) Marshal.ReleaseComObject(obj);
+        }
+
+        static Dictionary<string, object> FindRegisteredApps(string query)
+        {
+            query = query.Trim();
+            if (query.Length < 1 || query.Length > 120) throw new Exception("appQuery requires 1 to 120 characters");
+            var matches = new List<Dictionary<string, object>>();
+            object shell = null, folder = null, items = null;
+            bool truncated = false;
+            try {
+                shell = Activator.CreateInstance(System.Type.GetTypeFromProgID("Shell.Application", true));
+                folder = ShellRead(shell, "NameSpace", "shell:AppsFolder");
+                items = ShellRead(folder, "Items");
+                int count = Convert.ToInt32(ShellRead(items, "Count"));
+                for (int i = 0; i < count; i++) {
+                    object item = ShellRead(items, "Item", i);
+                    try {
+                        string name = Convert.ToString(ShellRead(item, "Name"));
+                        string id = Convert.ToString(ShellRead(item, "Path"));
+                        if (name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0 && id.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        if (matches.Count >= 30) { truncated = true; break; }
+                        string target = Convert.ToString(ShellRead(item, "ExtendedProperty", "System.Link.TargetParsingPath"));
+                        matches.Add(Dict("name", name, "appId", id, "executable", target, "windows", new List<object>()));
+                    } finally { ReleaseShell(item); }
+                }
+            } finally { ReleaseShell(items); ReleaseShell(folder); ReleaseShell(shell); }
+            var identities = new Dictionary<uint, string[]>();
+            if (matches.Count > 0) Native.EnumWindows(delegate(IntPtr h, IntPtr unused) {
+                if (!Native.IsWindowVisible(h)) return true;
+                uint pid = PidOf(h);
+                string[] identity;
+                if (!identities.TryGetValue(pid, out identity)) {
+                    identity = new string[] { ProcessAppId(pid), ProcessImagePath(pid) };
+                    identities.Add(pid, identity);
+                }
+                foreach (var app in matches) {
+                    string via = null;
+                    if (!String.IsNullOrEmpty(identity[0])) {
+                        if (String.Equals(identity[0], (string)app["appId"], StringComparison.OrdinalIgnoreCase)) via = "appId";
+                    } else if (!String.IsNullOrEmpty(identity[1]) && String.Equals(identity[1], (string)app["executable"], StringComparison.OrdinalIgnoreCase)) via = "executable";
+                    if (via == null) continue;
+                    var window = WinDict(h); window["matchBy"] = via;
+                    ((List<object>)app["windows"]).Add(window);
+                }
+                return true;
+            }, IntPtr.Zero);
+            return Dict("apps", matches, "truncated", truncated, "source", "shell:AppsFolder", "windowScope", "visible top-level windows");
         }
 
         static string IndicatorStateName(int want)
@@ -6326,6 +7005,17 @@ namespace DshComputerUse.Worker
             throw new Exception(msg.ToString());
         }
 
+        static bool IsEnabledOwnedPopup(IntPtr owner, IntPtr popup)
+        {
+            if (popup == IntPtr.Zero || popup == owner || !Native.IsWindowVisible(popup) || !Native.IsWindowEnabled(popup)) return false;
+            IntPtr h = popup;
+            for (int depth = 0; depth < 32 && h != IntPtr.Zero; depth++) {
+                h = Native.GetWindow(h, 4); // GW_OWNER
+                if (h == owner) return true;
+            }
+            return false;
+        }
+
         static Dictionary<string, object> Activate(Dictionary<string, object> a)
         {
             IntPtr h = FindHwnd(a);
@@ -6334,7 +7024,16 @@ namespace DshComputerUse.Worker
             AgentActing(a, "activate");
             // The whole ladder now lives in RefocusWindow (shared with the keyboard focus
             // guard, which must re-assert the same window before typing).
-            string how = RefocusWindow(h, GetB(a, "clickFallback", true));
+            IntPtr receiver = h;
+            if (!Native.IsWindowEnabled(h)) {
+                receiver = Native.GetForegroundWindow();
+                if (!IsEnabledOwnedPopup(h, receiver)) receiver = Native.GetLastActivePopup(h);
+                if (!IsEnabledOwnedPopup(h, receiver)) receiver = Native.GetWindow(h, 6); // GW_ENABLEDPOPUP
+                if (!IsEnabledOwnedPopup(h, receiver))
+                    return Dict("activated", false, "hwnd", h.ToInt64(), "hint", "Window is disabled. Observe its current dialog before activating.");
+                HostGuard(receiver, "activate");
+            }
+            string how = RefocusWindow(receiver, GetB(a, "clickFallback", true));
             uint confirmedPid = 0;
             long modalOf = 0;
             IntPtr foreground = Native.GetForegroundWindow();
@@ -6343,7 +7042,8 @@ namespace DshComputerUse.Worker
             // refused while the app was literally waiting for an answer.
             IntPtr dialog = (foreground != IntPtr.Zero && foreground != h && SameInputFamily(h, foreground)) ? foreground : IntPtr.Zero;
             IntPtr confirmed = dialog != IntPtr.Zero ? dialog : h;
-            if (how == null || !Native.IsWindow(h) || (confirmedPid = PidOf(confirmed)) == 0 || !IsForeground(confirmed)) how = "failed";
+            if (how == null || !Native.IsWindow(h) || (receiver != h && (confirmed != receiver || !IsEnabledOwnedPopup(h, confirmed))) ||
+                (confirmedPid = PidOf(confirmed)) == 0 || !IsForeground(confirmed)) how = "failed";
             else
             {
                 if (dialog != IntPtr.Zero) modalOf = h.ToInt64();
@@ -7280,13 +7980,16 @@ namespace DshComputerUse.Worker
 
             string repaired = null;
             IntPtr fg = Native.GetForegroundWindow();
-            if (refocus && want != IntPtr.Zero && TopLevel(fg) != want)
+            bool exact = GetB(a, "strictHwnd", false) || GetS(a, "shotGeometry", null) != null;
+            if (refocus && exact && (!Native.IsWindowEnabled(want) || want != GetAncestor(fg, 2)))
+                throw InputInterrupted("INPUT_TARGET_CHANGED", "The explicitly named window is no longer foreground. Observe the receiver again.");
+            if (refocus && !exact && want != IntPtr.Zero && TopLevel(fg) != want)
             {
                 repaired = RefocusWindow(want, true);
                 Thread.Sleep(50);
                 fg = Native.GetForegroundWindow();
             }
-            IntPtr root = TopLevel(fg);
+            IntPtr root = exact ? GetAncestor(fg, 2) : TopLevel(fg);
             if (refocus)
             {
                 string mismatch = KickoffFocus.InputProblem(want.ToInt64(),
@@ -7442,6 +8145,26 @@ namespace DshComputerUse.Worker
                 case "move":
                 {
                     RECT cur; Native.GetWindowRect(h, out cur);
+                    if (a.ContainsKey("workHwnd")) {
+                        var anchor = new IntPtr(GetI(a, "workHwnd", 0));
+                        if (!Native.IsWindowVisible(anchor) || Native.IsIconic(anchor) || Native.IsIconic(h) || IsZoomed(h))
+                            throw new Exception("WORK_AREA_UNAVAILABLE: observe a visible work window and a restored target");
+                        var screen = Screen.FromHandle(anchor);
+                        var area = screen.WorkingArea;
+                        Rectangle actual = Rectangle.FromLTRB(cur.Left, cur.Top, cur.Right, cur.Bottom);
+                        bool moved = !area.Contains(actual);
+                        if (moved) {
+                            int width = Math.Min(area.Width, actual.Width), height = Math.Min(area.Height, actual.Height);
+                            int x = area.Left + (area.Width - width)/2, y = area.Top + (area.Height - height)/2;
+                            if (!Native.SetWindowPos(h, IntPtr.Zero, x, y, width, height, 0x0004 | 0x0010))
+                                throw new Exception("WINDOW_PLACEMENT_FAILED: inspect the current window rectangle");
+                            Thread.Sleep(140);
+                        }
+                        RECT after;
+                        if (!Native.GetWindowRect(h, out after)) throw new Exception("WINDOW_UNAVAILABLE: moved window disappeared");
+                        bool contained = area.Contains(Rectangle.FromLTRB(after.Left, after.Top, after.Right, after.Bottom));
+                        return Dict("done", "move", "ok", contained, "moved", moved, "contained", contained, "display", screen.DeviceName, "rect", RectDict(after));
+                    }
                     int mx = GetI(a, "x", cur.Left), my = GetI(a, "y", cur.Top);
                     int mw = GetI(a, "width", cur.Right - cur.Left), mh = GetI(a, "height", cur.Bottom - cur.Top);
                     if (Native.IsIconic(h)) Native.ShowWindow(h, Native.SW_RESTORE);
@@ -7456,6 +8179,9 @@ namespace DshComputerUse.Worker
             Thread.Sleep(80);
             return Dict("done", op);
         }
+
+        [DllImport("user32.dll")]
+        static extern bool IsZoomed(IntPtr hwnd);
 
         // ---------- UIA ----------
         static void AddUiGeometry(Dictionary<string, object> d, System.Windows.Rect? bounds,
@@ -7684,8 +8410,53 @@ namespace DshComputerUse.Worker
             return d;
         }
 
+        static Dictionary<string, object> FocusedText(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || GetAncestor(Native.GetForegroundWindow(), 2) != hwnd)
+                throw new Exception("FOCUS_CHANGED: name the current foreground window");
+            AutomationElement focus = AutomationElement.FocusedElement;
+            AutomationElement root = AutomationElement.FromHandle(hwnd);
+            AutomationElement ancestor = focus;
+            for (int i = 0; i < 48 && ancestor != null && !Automation.Compare(ancestor, root); i++)
+                ancestor = TreeWalker.RawViewWalker.GetParent(ancestor);
+            if (ancestor == null || !Automation.Compare(ancestor, root))
+                throw new Exception("FOCUS_CHANGED: the focused control is outside the named window");
+            object password = focus.GetCurrentPropertyValue(AutomationElement.IsPasswordProperty, true);
+            if (!(password is bool) || (bool)password) return Dict("hwnd", hwnd.ToInt64(), "textStatus", "protected-or-unknown");
+            const int max = 2048;
+            var result = Dict("hwnd", hwnd.ToInt64(), "id", focus.Current.AutomationId, "role", focus.Current.ControlType.ProgrammaticName,
+                "selectionStatus", "unavailable", "textStatus", "unavailable");
+            object pattern;
+            string value = null;
+            if (focus.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) {
+                var text = (TextPattern)pattern;
+                value = text.DocumentRange.GetText(max + 1);
+                if (text.SupportedTextSelection != SupportedTextSelection.None) {
+                    var ranges = text.GetSelection();
+                    var selections = new List<string>();
+                    bool truncated = ranges.Length > 8;
+                    foreach (var range in ranges.Take(8)) {
+                        string part = range.GetText(max + 1);
+                        truncated |= part.Length > max;
+                        selections.Add(part.Substring(0, Math.Min(max, part.Length)));
+                    }
+                    result["selections"] = selections;
+                    result["selectionStatus"] = truncated ? "truncated" : "read";
+                }
+            } else if (focus.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) value = ((ValuePattern)pattern).Current.Value;
+            if (value != null) {
+                result["value"] = value.Substring(0, Math.Min(value.Length, max));
+                result["textStatus"] = value.Length > max ? "truncated" : "read";
+            }
+            var current = AutomationElement.FocusedElement;
+            if (GetAncestor(Native.GetForegroundWindow(), 2) != hwnd || current == null || !Automation.Compare(current, focus))
+                throw new Exception("FOCUS_CHANGED: capture the focused field again");
+            return result;
+        }
+
         static Dictionary<string, object> Uia(Dictionary<string, object> a)
         {
+            if (GetB(a, "focused", false)) return FocusedText(new IntPtr(GetI(a, "hwnd", 0)));
             IntPtr root = FindHwnd(a);
             int maxDepth = Math.Max(1, Math.Min(24, GetI(a, "depth", 6)));
             int maxNodes = Math.Max(10, Math.Min(1200, GetI(a, "maxNodes", 120)));
@@ -7925,6 +8696,30 @@ namespace DshComputerUse.Worker
             return matches;
         }
 
+        static TextPatternRange SelectExactText(TextPattern pattern, string value, string prefix, string suffix)
+        {
+            if (String.IsNullOrEmpty(value)) throw new Exception("selectText requires nonempty text in value");
+            if (pattern.SupportedTextSelection == SupportedTextSelection.None)
+                throw new Exception("Text selection is unavailable on this control.");
+            var document = pattern.DocumentRange;
+            string needle = prefix + value + suffix;
+            var match = document.FindText(needle, false, false);
+            if (match == null) throw new Exception("TEXT_NOT_FOUND: no matching passage in this control");
+            var rest = document.Clone();
+            rest.MoveEndpointByRange(TextPatternRangeEndpoint.Start, match, TextPatternRangeEndpoint.Start);
+            if (rest.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, 1) != 1 ||
+                rest.FindText(needle, false, false) != null)
+                throw new Exception("AMBIGUOUS_TEXT: supply more adjacent prefix or suffix text");
+            if (prefix.Length > 0)
+                match.MoveEndpointByRange(TextPatternRangeEndpoint.Start, match.FindText(prefix, false, false), TextPatternRangeEndpoint.End);
+            if (suffix.Length > 0)
+                match.MoveEndpointByRange(TextPatternRangeEndpoint.End, match.FindText(suffix, true, false), TextPatternRangeEndpoint.Start);
+            if (match.GetText(value.Length + 1) != value) throw new Exception("TEXT_CHANGED: query the passage again");
+            MarkMutation();
+            match.Select();
+            return match;
+        }
+
         static Dictionary<string, object> UiaAct(Dictionary<string, object> a)
         {
             string action = GetS(a, "action", "invoke");
@@ -7983,6 +8778,8 @@ namespace DshComputerUse.Worker
 
             object pat = null;
             string via = null;
+            TextPatternRange selectedRange = null;
+            double beforeScrollPercent = 0;
             switch (action)
             {
                 case "invoke":
@@ -7990,6 +8787,22 @@ namespace DshComputerUse.Worker
                     break;
                 case "select":
                     if (found.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pat)) { MarkMutation(); ((SelectionItemPattern)pat).Select(); via = "SelectionItemPattern"; }
+                    break;
+                case "addToSelection":
+                case "removeFromSelection":
+                    if (found.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pat)) {
+                        var item = (SelectionItemPattern)pat;
+                        MarkMutation();
+                        if (action == "addToSelection") item.AddToSelection(); else item.RemoveFromSelection();
+                        via = "SelectionItemPattern." + action;
+                    }
+                    break;
+                case "selectText":
+                    if (found.Current.IsPassword) throw new Exception("selectText is unavailable on password controls");
+                    if (found.TryGetCurrentPattern(TextPattern.Pattern, out pat)) {
+                        selectedRange = SelectExactText((TextPattern)pat, GetS(a, "value", ""), GetS(a, "prefix", "") ?? "", GetS(a, "suffix", "") ?? "");
+                        via = "TextPattern.Select";
+                    }
                     break;
                 case "expand":
                     if (found.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pat)) { MarkMutation(); ((ExpandCollapsePattern)pat).Expand(); via = "ExpandCollapsePattern.Expand"; }
@@ -8004,6 +8817,15 @@ namespace DshComputerUse.Worker
                     {
                         string val = GetS(a, "value", "");
                         if (found.TryGetCurrentPattern(ValuePattern.Pattern, out pat)) { MarkMutation(); ((ValuePattern)pat).SetValue(val); via = "ValuePattern"; }
+                        else if (found.TryGetCurrentPattern(RangeValuePattern.Pattern, out pat)) {
+                            var range = (RangeValuePattern)pat;
+                            double number;
+                            if (!Double.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out number) ||
+                                Double.IsNaN(number) || Double.IsInfinity(number) || number < range.Current.Minimum || number > range.Current.Maximum)
+                                throw new Exception("RANGE_VALUE_INVALID: supply a finite value within the control's range");
+                            if (range.Current.IsReadOnly) throw new Exception("RANGE_VALUE_READ_ONLY");
+                            MarkMutation(); range.SetValue(number); via = "RangeValuePattern";
+                        }
                         break;
                     }
                 case "focus":
@@ -8011,8 +8833,22 @@ namespace DshComputerUse.Worker
                 case "scrollIntoView":
                     if (found.TryGetCurrentPattern(ScrollItemPattern.Pattern, out pat)) { MarkMutation(); ((ScrollItemPattern)pat).ScrollIntoView(); via = "ScrollItemPattern"; }
                     break;
+                case "scroll":
+                    if (found.TryGetCurrentPattern(ScrollPattern.Pattern, out pat)) {
+                        var scroll = (ScrollPattern)pat;
+                        string direction = GetS(a, "value", "");
+                        bool horizontal = direction == "left" || direction == "right";
+                        if (!horizontal && direction != "up" && direction != "down") throw new Exception("scroll value must be up, down, left or right");
+                        if (horizontal ? !scroll.Current.HorizontallyScrollable : !scroll.Current.VerticallyScrollable)
+                            throw new Exception("SCROLL_AXIS_UNAVAILABLE: select a scrollable container for this axis");
+                        var amount = direction == "up" || direction == "left" ? ScrollAmount.LargeDecrement : ScrollAmount.LargeIncrement;
+                        beforeScrollPercent = horizontal ? scroll.Current.HorizontalScrollPercent : scroll.Current.VerticalScrollPercent;
+                        MarkMutation(); scroll.Scroll(horizontal ? amount : ScrollAmount.NoAmount, horizontal ? ScrollAmount.NoAmount : amount);
+                        via = "ScrollPattern";
+                    }
+                    break;
                 default:
-                    throw new Exception("action must be invoke|select|expand|collapse|toggle|setValue|focus|scrollIntoView");
+                    throw new Exception("action must be invoke|select|addToSelection|removeFromSelection|selectText|expand|collapse|toggle|setValue|focus|scrollIntoView");
             }
             EndActuationForReadback();
             if (via == null)
@@ -8020,6 +8856,20 @@ namespace DshComputerUse.Worker
 
             Thread.Sleep(GetI(a, "settleMs", 120));
             Dictionary<string, object> res = Dict("action", action, "via", via, "element", ElemDict(found), "scanned", seen);
+            try {
+                if (via == "ScrollPattern") {
+                    var scroll = ((ScrollPattern)pat).Current;
+                    string direction = GetS(a, "value", "");
+                    res["beforePercent"] = beforeScrollPercent;
+                    res["afterPercent"] = direction == "left" || direction == "right" ? scroll.HorizontalScrollPercent : scroll.VerticalScrollPercent;
+                } else if (selectedRange != null) {
+                    var selected = ((TextPattern)pat).GetSelection();
+                    res["selectionVerified"] = selected.Length == 1 && selected[0].Compare(selectedRange);
+                } else if (via == "RangeValuePattern") res["rangeValue"] = ((RangeValuePattern)pat).Current.Value;
+                else if (action == "addToSelection" || action == "removeFromSelection")
+                    res["isSelected"] = ((SelectionItemPattern)pat).Current.IsSelected;
+            } catch (InvalidOperationException) { res["readbackUnavailable"] = true; }
+              catch (System.Runtime.InteropServices.COMException) { res["readbackUnavailable"] = true; }
             if (observed != null) res["resolution"] = Dict("target", token, "mode", resolution, "rebound", resolution != "runtime-id");
             if (skipped.Count > 0) res["skippedEarlierMatches"] = skipped;
             return res;
@@ -8250,6 +9100,7 @@ namespace DshComputerUse.Worker
             // Compatibility entry point: no coordinate/frequency/quietMs override can
             // disable the event-driven handoff. Plain Esc and the screen corner are ordinary UI.
             CheckHumanInput();
+            lastCaptureKey = null; lastCaptureSample = null;
             Panic.AgentActed();
         }
 

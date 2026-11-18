@@ -14,7 +14,7 @@ try {
  const raw=execFileSync(exe,[],{windowsHide:true,timeout:15000,encoding:'utf8',env:{...process.env,DSH_HOME:path.join(dir,'home'),DSH_COMPUTER_USE_STOP_FILE:path.join(dir,'STOP'),DSH_COMPUTER_USE_EXIT_FILE:path.join(dir,'EXITED'),DSH_COMPUTER_USE_AUDIT_LOG:path.join(dir,'audit.jsonl')}});
  const result=JSON.parse(raw);assert(result.assertions>=65);assert(result.cases.filter(r=>'pass'in r).every(r=>r.pass));
  const text=fs.readFileSync(source,'utf8');
- assert.match(text,/KeyboardChord.Run\(vks, SendKey, ReleaseKeyForCleanup/);
+ assert.match(text,/KeyboardChord\.Run\(vks, delegate\(ushort vk, bool up\)\s*\{\s*if \(!up\) RequireExpectedFocus\(expectedField\);\s*SendKey\(vk, up\);\s*\}, ReleaseKeyForCleanup/);
  assert.match(text,/if \(!lease.StillOwned\(\)\)/);
  assert.match(text,/finally\s*\{[\s\S]*?restore = lease.Restore\(\)/);
  // Owned-key cleanup is behavior-tested in test-human-handoff; its old direct

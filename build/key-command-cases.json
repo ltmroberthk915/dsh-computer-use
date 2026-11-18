@@ -1,5 +1,8 @@
 {
   "valid": [
+    { "input": "Control_L+Shift_L+esc", "combo": "ctrl+shift+esc", "risk": true },
+    { "input": "Numpad_0", "combo": "numpad0", "risk": false },
+    { "input": "KP_9", "combo": "numpad9", "risk": false },
     { "input": "win+r", "combo": "win+r", "risk": true },
     { "input": " r + WINDOWS ", "combo": "win+r", "risk": true },
     { "input": "r + rwin", "combo": "rwin+r", "risk": true },
