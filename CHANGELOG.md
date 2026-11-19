@@ -1,3 +1,9 @@
+# 2.3.3 — Windows OCR crop handling and text coordinates
+
+- A crop that crosses a target window's edge now reads the intersecting area. The result reports the requested crop and the area actually read. Empty and disjoint crops are rejected.
+- Text-only OCR returns visual rows with absolute screen centers. Small regions use 2× magnification by default. Callers can choose 1× or 2× when text is hard to recognize.
+- OCR accepts surrounding whitespace in crop strings and preserves negative screen coordinates.
+
 # 2.3.1 — save only the selected batch screenshot as an attachment
 
 - Each explicit screenshot keeps its original file. On image-capable routes a

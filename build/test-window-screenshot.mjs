@@ -23,6 +23,28 @@ registerTools({ ctx, cu, register: def => definitions.set(def.name, def), define
   snapshotPath: () => path.join(dir, 'shot-' + randomUUID() + '.jpg') })
 const run = (tool, args, owner = exec) => definitions.get('computer_' + tool).execute(args, owner)
 try {
+  // OCR rectangles and text centers are expressed in physical screen coordinates.
+  // Sorting native column-first lines should keep the words of a CJK label together.
+  const lines = [
+    {text:'A4', words:[{text:'A4',x:190,y:91,w:20,h:12}]},
+    {text:'纸张大小', words:[{text:'纸张',x:-80,y:90,w:25,h:14},{text:'大小',x:-50,y:90,w:25,h:14}]},
+    {text:'Copies 12', words:[{text:'Copies',x:-80,y:45,w:50,h:14},{text:'12',x:190,y:46,w:20,h:12}]},
+  ]
+  cu.ocr = async params => {
+    assert.deepEqual(params, {hwnd:12,x:-120,y:21,width:350,height:120,scale:1})
+    return {hwnd:12,language:'zh-Hans-CN',region:[-100,21,330,120],requestedRegion:[-120,21,350,120],scale:1,lines}
+  }
+  const ocr = await run('ocr',{hwnd:12,region:'  -120,21,350,120  ',scale:1})
+  const [message] = definitions.get('computer_ocr').output.render({},ocr)
+  assert.equal(message.type,'text')
+  assert.match(message.text,/clippedFrom=-120,21,350,120/)
+  assert.match(message.text,/@-55,52 Copies  \|  @200,52 12\n@-53,97 纸张大小  \|  @200,97 A4/)
+  assert.deepEqual(ocr.lines,lines)
+  await assert.rejects(run('ocr',{hwnd:12,region:'0,0,-1,10'}),/region/)
+  await assert.rejects(run('ocr',{hwnd:12,region:'0,0,2147483648,20'}),/32-bit/)
+  await assert.rejects(run('ocr',{hwnd:12,scale:3}),/scale/)
+
+
   const shot = await run('shot', { hwnd: 12 })
   assert.deepEqual(shot.imageSize, [100, 40])
   const args = { screenshotId: shot.screenshotId, x: 25, y: 20 }

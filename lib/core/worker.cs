@@ -4517,7 +4517,7 @@ namespace DshComputerUse.Worker
             if (GetB(a, "clamp", true))
             {
                 int x2 = Math.Max(x, vx), y2 = Math.Max(y, vy);
-                int x3 = Math.Min(x + w, vx + vw), y3 = Math.Min(y + h, vy + vh);
+                int x3 = (int)Math.Min((long)x + w, (long)vx + vw), y3 = (int)Math.Min((long)y + h, (long)vy + vh);
                 if (x3 <= x2 || y3 <= y2) throw new Exception("region outside virtual desktop");
                 x = x2; y = y2; w = x3 - x2; h = y3 - y2;
             }
@@ -4549,7 +4549,7 @@ namespace DshComputerUse.Worker
                 if (mem != IntPtr.Zero) Native.DeleteDC(mem);
                 if (screen != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screen);
             }
-            return RecognizePixels(bgra, x, y, w, h);
+            return RecognizePixels(bgra, x, y, w, h, GetI(a, "scale", 0));
         }
 
         static Dictionary<string, object> WindowOcr(Dictionary<string, object> args, IntPtr window)
@@ -4561,8 +4561,13 @@ namespace DshComputerUse.Worker
                 RECT r = frames.Bounds;
                 int x = GetI(args, "x", r.Left), y = GetI(args, "y", r.Top);
                 int w = GetI(args, "width", r.Right - r.Left), h = GetI(args, "height", r.Bottom - r.Top);
-                if (w <= 0 || h <= 0 || x < r.Left || y < r.Top || (long)x+w > r.Right || (long)y+h > r.Bottom ||
-                    (long)w*h > 16L*1024*1024) throw new Exception("OCR region must fit inside the window surface and within 16M pixels");
+                int[] requested = { x, y, w, h };
+                int left = Math.Max(x, r.Left), top = Math.Max(y, r.Top);
+                long right = Math.Min((long)x + w, r.Right), bottom = Math.Min((long)y + h, r.Bottom);
+                if (w <= 0 || h <= 0 || right <= left || bottom <= top)
+                    throw new Exception("OCR region outside window surface " + String.Join(",", new int[] { r.Left, r.Top, r.Right-r.Left, r.Bottom-r.Top }));
+                x = left; y = top; w = (int)(right-left); h = (int)(bottom-top);
+                if ((long)w*h > 16L*1024*1024) throw new Exception("OCR region exceeds 16M pixels; crop tighter");
                 frames.Sample();
                 byte[] pixels = frames.Pixels;
                 if (x != r.Left || y != r.Top || w != r.Right-r.Left || h != r.Bottom-r.Top) {
@@ -4570,19 +4575,48 @@ namespace DshComputerUse.Worker
                     for (int i = 0; i < h; i++) Buffer.BlockCopy(frames.Pixels,
                         ((y-r.Top+i)*(r.Right-r.Left)+x-r.Left)*4, pixels, i*w*4, w*4);
                 }
-                var result = RecognizePixels(pixels, x, y, w, h);
+                var result = RecognizePixels(pixels, x, y, w, h, GetI(args, "scale", 0));
                 ValidateCaptureTarget(args, window);
                 if (ScreenshotGeometry(window, out bounds) != geometry) throw new Exception("OCR_TARGET_CHANGED: observe this window again");
+                if (requested[0] != x || requested[1] != y || requested[2] != w || requested[3] != h)
+                    result["requestedRegion"] = requested;
                 result["hwnd"] = window.ToInt64(); result["captureBackend"] = "windows-graphics-capture";
                 return result;
             }
         }
 
-        static Dictionary<string, object> RecognizePixels(byte[] bgra, int x, int y, int w, int h)
+        static byte[] EnlargeOcrPixels(byte[] pixels, int width, int height)
         {
+            // Preserve GDI screen captures whose unused alpha byte may be zero.
+            var pin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+            try {
+                using (var source = new Bitmap(width, height, width*4, PixelFormat.Format32bppRgb, pin.AddrOfPinnedObject()))
+                using (var target = new Bitmap(width*2, height*2, PixelFormat.Format32bppArgb)) {
+                    using (var g = Graphics.FromImage(target)) {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        g.DrawImage(source, new Rectangle(0, 0, target.Width, target.Height));
+                    }
+                    var bits = target.LockBits(new Rectangle(0, 0, target.Width, target.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                    try {
+                        byte[] data = new byte[target.Width*target.Height*4];
+                        Marshal.Copy(bits.Scan0, data, 0, data.Length);
+                        return data;
+                    } finally { target.UnlockBits(bits); }
+                }
+            } finally { pin.Free(); }
+        }
+
+        static Dictionary<string, object> RecognizePixels(byte[] bgra, int x, int y, int w, int h, int requestedScale)
+        {
+            bool fits = (long)w*h <= 1024*1024 && Math.Max(w,h)*2L <= OcrEngine.MaxImageDimension;
+            if (requestedScale < 0 || requestedScale > 2 || (requestedScale == 2 && !fits))
+                throw new Exception("OCR scale 2 requires a crop within 1M pixels and the Windows OCR dimension limit");
+            int scale = requestedScale == 0 ? (fits ? 2 : 1) : requestedScale;
+            if (scale == 2) bgra = EnlargeOcrPixels(bgra, w, h);
             OcrResult result;
             using (SoftwareBitmap bitmap = SoftwareBitmap.CreateCopyFromBuffer(
-                WindowsRuntimeBufferExtensions.AsBuffer(bgra), BitmapPixelFormat.Bgra8, w, h))
+                WindowsRuntimeBufferExtensions.AsBuffer(bgra), BitmapPixelFormat.Bgra8, w*scale, h*scale))
                 result = _ocrEngine.RecognizeAsync(bitmap).AsTask().GetAwaiter().GetResult();
             List<object> lines = new List<object>();
             StringBuilder joined = new StringBuilder();
@@ -4591,15 +4625,17 @@ namespace DshComputerUse.Worker
                 List<object> words = new List<object>();
                 foreach (OcrWord word in line.Words)
                 {
-                    words.Add(Dict("text", word.Text,
-                        "x", x + (int)word.BoundingRect.X, "y", y + (int)word.BoundingRect.Y,
-                        "w", (int)word.BoundingRect.Width, "h", (int)word.BoundingRect.Height));
+                    var box = word.BoundingRect;
+                    int left = (int)(box.X/scale), top = (int)(box.Y/scale);
+                    words.Add(Dict("text", word.Text, "x", x+left, "y", y+top,
+                        "w", (int)Math.Ceiling((box.X+box.Width)/scale)-left,
+                        "h", (int)Math.Ceiling((box.Y+box.Height)/scale)-top));
                 }
                 lines.Add(Dict("text", line.Text, "words", words));
                 if (joined.Length > 0) joined.Append('\n');
                 joined.Append(line.Text);
             }
-            return Dict("lines", lines, "text", joined.ToString(), "language", _ocrLanguage,
+            return Dict("lines", lines, "text", joined.ToString(), "language", _ocrLanguage, "scale", scale,
                 "region", new int[] { x, y, w, h });
         }
 
@@ -4839,7 +4875,7 @@ namespace DshComputerUse.Worker
             if (shotWindow == IntPtr.Zero && GetB(a, "clamp", true))
             {
                 int x2 = Math.Max(x, vx), y2 = Math.Max(y, vy);
-                int x3 = Math.Min(x + w, vx + vw), y3 = Math.Min(y + h, vy + vh);
+                int x3 = (int)Math.Min((long)x + w, (long)vx + vw), y3 = (int)Math.Min((long)y + h, (long)vy + vh);
                 if (x3 <= x2 || y3 <= y2) throw new Exception("region outside virtual desktop");
                 x = x2; y = y2; w = x3 - x2; h = y3 - y2;
             }
