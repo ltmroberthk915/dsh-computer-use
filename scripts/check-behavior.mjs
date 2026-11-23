@@ -42,6 +42,11 @@ const reviewed = new Set([
   'release-channel', 'renders', 'root-integration', 'session-identity', 'skill-gate', 'steer-message-shape',
   'task-rules', 'terminal-cleanup', 'timeout-branch', 'turnend-agent', 'turnend-rootagent',
   'ui-geometry', 'uia-budget', 'uia-read-timeout', 'uia-native', 'uia-targets-native', 'verification-region', 'window-management-key',
+  // UIA feature coverage (CUA-IMPL-1123). Each of these establishes its own isolation:
+  // uia-feature and uia-public-smoke call requirePrivateDesktop (private non-input desktop, verified
+  // child desktop, test-private STOP/EXITED/OWNER/AUDIT); uia-tool-contract drives only the
+  // registered tool bodies against a recording core and starts no worker or window.
+  'uia-feature', 'uia-public-smoke', 'uia-tool-contract',
   'window-screenshot',
 ].map(name => `test-${name}.mjs`))
 const files = fs.readdirSync(path.join(root, 'build')).filter(name => /^test-.+\.mjs$/.test(name)).sort()

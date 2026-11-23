@@ -70,6 +70,12 @@ Use `computer_window {hwnd, observe:true}` to activate a known window and read i
 
 Use `computer_uia_act {target, action:"selectText", value}` to select an exact passage. Add immediately adjacent `prefix` or `suffix` if the passage occurs more than once. Check `selectionVerified`. On a slider, `setValue` accepts a numeric string and returns `rangeValue`. For list items, `addToSelection` and `removeFromSelection` preserve other selected items when supported.
 
+Why a passage repeats: add `selectionType` to move the caret instead of selecting the whole match — `cursor_before` collapses the matched range to its start, `cursor_after` to its end. The default stays `select`. One request commits exactly one selection, and `selectionVerified` is only true when the control's own range matches the requested endpoints.
+
+Discover what a control can actually do before acting: `computer_uia {hwnd, actions:true}` returns, per control, an `actions` list plus an `actionSchema` summary, both derived from the patterns AND the live state that control really reports — a password box never advertises `selectText`, a read-only field never advertises `setValue`, a disabled control advertises no mutation and no focus, a leaf node advertises neither `expand` nor `collapse`, `addToSelection` needs a multi-select container and an unselected item, `removeFromSelection` needs a selected item that is not the last one of a required selection, and a control with no scrollable axis never advertises `scroll`/`setScrollPercent`. It is opt-in because discovery costs several provider reads per element.
+
+Position a scrollable control exactly: `computer_uia_act {target, action:"setScrollPercent", horizontalPercent, verticalPercent}` takes 0–100 per axis, and `-1` (or an omitted axis) leaves that axis untouched; an unavailable axis and an out-of-range value are refused by name before anything moves. `action:"setCurrentView", value:<viewId>` switches a MultipleView control using an id the control reports (see `actionSchema.views`), and `action:"realize"` materialises a virtualised item — after a successful Realize the element may be invalidated, so re-observe before acting on it again rather than replaying.
+
 Use `computer_click {mark, ctrl:true}` for Ctrl-click. Click and key accept `durationMs` from 20 to 2000. `computer_key` accepts `Control_L`, `Shift_L`, `Alt_L` and numeric keypad digits such as `KP_9` and `Numpad_0`. Num Lock determines how an app interprets keypad digits.
 
 ## Screenshots and coordinates

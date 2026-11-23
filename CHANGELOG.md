@@ -1,3 +1,12 @@
+# 2.3.4 — Precise control actions and caret placement
+
+Windows Computer Use 2.3.4 adds two improvements for DeepSeek Harness.
+
+- Discover actions per Windows control. Scroll either axis to an exact percentage, switch views, or bring a virtualized item into view.
+- Select matching text or place the caret before or after it. The plugin reads back the endpoints to verify the selection.
+
+新版支持查询控件可用动作、精确滚动、切换视图、显示虚拟条目，以及把光标放在匹配文字前后。
+
 # 2.3.3 — Windows OCR crop handling and text coordinates
 
 - A crop that crosses a target window's edge now reads the intersecting area. The result reports the requested crop and the area actually read. Empty and disjoint crops are rejected.

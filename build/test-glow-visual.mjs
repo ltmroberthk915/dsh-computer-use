@@ -56,6 +56,9 @@ const worker = fs.readFileSync(source, 'utf8').replace(/\r\n/g, '\n')
 // The HWND capture and settle changes preserve the reviewed painter byte for byte.
 // The HWND capture and settle changes preserve the reviewed painter byte for byte.
 // Verified against the previous worker: the OCR changes leave the painter byte for byte identical.
+// 2026-11-23: compared the painter against HEAD before updating the non-painting digest for the UIA
+// feature work (action discovery, setScrollPercent/realize/setCurrentView, selectText selectionType).
+// The painting block is byte for byte 834e1db1… and the worker diff is confined to the UIA sections.
 const artStart = worker.indexOf('        // Thin, square screen-edge rails')
 const artEnd = worker.indexOf('\n    }\n\n    // ---------- emergency stop ----------', artStart)
 assert(artStart > 0 && artEnd > artStart, 'known contiguous presentation block')
@@ -63,7 +66,7 @@ const controlSource = (worker.slice(0, artStart) + '        /* VISUAL_PAINTING *
   .replace('        [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);\n', '')
   .replace('            TryExcludeOverlayFromCapture(hwnd);\n', '')
 assert.equal(createHash('sha256').update(controlSource).digest('hex'),
-  "75c2ae0a5509f9170342023ef39cfed4942b5247bbd8d2e08a767d3b643f5184",
+  "df483ded0880d842f3eefb63add98841dc4bf5d01c79ed9b9d4213bc69502b97",
   'painting changes preserve the reviewed control logic, timing and window interaction styles')
 assert(worker.includes('public static int HumanYieldAlpha(int tick)\n        { return 90 + (int)Math.Round(35 * (1 - Math.Cos((unchecked((uint)tick) % 2800) * 2 * Math.PI / 2800.0))); }'),
   'breathing timing inside painting region is unchanged')

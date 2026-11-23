@@ -2,9 +2,9 @@
 
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
 
-**The most precise way to drive Windows from DeepSeek Harness — and the cheapest per task.**
+**Windows Computer Use 2.3.4 for DeepSeek Harness**
 
-Describe the goal. Your agent reads exact control identities, acts through the controls themselves, verifies the result — and finishes a known sequence in one model round trip instead of ten.
+Discover available actions per control, scroll to an exact percentage, switch views, and place the caret before or after matching text. Includes OCR and batch actions.
 
 English | [中文](README.zh.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md) · [2.0.0 changes](docs/RELEASE-2.0.0.md)
 

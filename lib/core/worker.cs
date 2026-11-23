@@ -8300,6 +8300,293 @@ namespace DshComputerUse.Worker
             return d;
         }
 
+        // ---- action discovery (opt-in) -------------------------------------------------------
+        // Derived ONLY from what the element actually reports: a pattern is listed when its own
+        // "Is<Pattern>PatternAvailable" property is true, and an action is listed when the pattern
+        // object is really obtainable. A control that does not support something is never told it
+        // does, which is the difference between a capability list and a wish list.
+        //
+        // This is deliberately NOT part of the default response: a broad inventory would pay a
+        // provider read per element for information almost no caller needs.
+        internal static List<string> UiActionsFor(AutomationElement e, UiReadBudget budget)
+        {
+            var actions = new List<string>();
+            if (e == null) return actions;
+            // Every provider access is its OWN budget.Read, so the soft budget is checked between
+            // synchronous COM calls (an individual call cannot be interrupted) and each read is
+            // counted once — wrapping the whole group would check only before and after it.
+            Action<string> add = name => { if (!actions.Contains(name)) actions.Add(name); };
+
+            bool enabled = BudgetBool(budget, delegate { return e.Current.IsEnabled; }, false);
+            bool focusable = BudgetBool(budget, delegate { return e.Current.IsKeyboardFocusable; }, false);
+            // Unknown password state is treated AS a password and unknown read-only state AS
+            // read-only: a capability list must never advertise what it could not confirm.
+            bool password = BudgetBool(budget, delegate { return e.Current.IsPassword; }, true);
+
+            if (BudgetPattern(budget, e, InvokePattern.Pattern) != null && enabled) add("invoke");
+            if (BudgetPattern(budget, e, TogglePattern.Pattern) != null && enabled) add("toggle");
+
+            // ExpandCollapse: a leaf node can hold the pattern and still be unable to expand, so the
+            // real ExpandCollapseState decides. Only a collapsed node can be expanded and only an
+            // expanded one can be collapsed; a leaf or partially-expanded node advertises neither.
+            object expandPattern = BudgetPattern(budget, e, ExpandCollapsePattern.Pattern);
+            if (expandPattern != null && enabled) {
+                var expand = (ExpandCollapsePattern)expandPattern;
+                ExpandCollapseState state = ExpandCollapseState.LeafNode;
+                try { state = budget.Read(delegate { return expand.Current.ExpandCollapseState; }); }
+                catch (UiBudgetStop) { throw; }
+                catch { }
+                if (state == ExpandCollapseState.Collapsed) { add("expand"); }
+                else if (state == ExpandCollapseState.Expanded) { add("collapse"); }
+                // PartiallyExpanded: neither direction is guaranteed, so it advertises neither.
+            }
+
+            if (BudgetPattern(budget, e, ScrollItemPattern.Pattern) != null) add("scrollIntoView");
+            if (BudgetPattern(budget, e, VirtualizedItemPattern.Pattern) != null) add("realize");
+
+            // SelectionItem: add/remove only exist where the container really allows multi-select and
+            // only where removing is allowed. A single-select list (or a required single selection)
+            // can still `select`, but advertising add/remove there would promise something the
+            // control refuses.
+            object itemPattern = BudgetPattern(budget, e, SelectionItemPattern.Pattern);
+            if (itemPattern != null && enabled) {
+                var item = (SelectionItemPattern)itemPattern;
+                add("select");
+                object container = null;
+                try { container = budget.Read(delegate { return item.Current.SelectionContainer; }); }
+                catch (UiBudgetStop) { throw; }
+                catch { }
+                AutomationElement holder = container as AutomationElement;
+                if (holder != null) {
+                    // Read the container through its SelectionPattern: the server-side
+                    // SelectionContainer element does not carry a cached property set, so a plain
+                    // GetCurrentPropertyValue returns NotSupported and would silently allow
+                    // add/remove that the container actually refuses.
+                    bool canSelectMultiple = false, selectionRequired = false;
+                    object selectionPattern = null;
+                    try { selectionPattern = budget.Read(delegate { object p; return holder.TryGetCurrentPattern(SelectionPattern.Pattern, out p) ? p : null; }); }
+                    catch (UiBudgetStop) { throw; }
+                    catch { }
+                    var selection = selectionPattern as SelectionPattern;
+                    if (selection != null) {
+                        try { canSelectMultiple = budget.Read(delegate { return selection.Current.CanSelectMultiple; }); }
+                        catch (UiBudgetStop) { throw; }
+                        catch { }
+                        try { selectionRequired = budget.Read(delegate { return selection.Current.IsSelectionRequired; }); }
+                        catch (UiBudgetStop) { throw; }
+                        catch { }
+                    } else {
+                        // No SelectionPattern means multi-select cannot be confirmed: stay
+                        // conservative and advertise only `select`.
+                        canSelectMultiple = false;
+                    }
+                    // Removing is legal in more places than "multi-select and not required":
+                    //   * an UNSELECTED item cannot be removed at all;
+                    //   * a SELECTED item can be removed when the selection is not required;
+                    //   * with a REQUIRED selection, a selected item can still be removed as long as
+                    //     it is not the only remaining one (so a single-select list whose selection
+                    //     is clearable still allows remove).
+                    // Adding needs a container that really allows multiple selection AND an item that
+                    // is not selected yet.
+                    bool isSelected = false;
+                    try { isSelected = budget.Read(delegate { return item.Current.IsSelected; }); }
+                    catch (UiBudgetStop) { throw; }
+                    catch { }
+
+                    if (canSelectMultiple && !isSelected) add("addToSelection");
+
+                    if (isSelected) {
+                        bool canRemove;
+                        if (!selectionRequired) canRemove = true;
+                        else {
+                            // A required selection protects only the LAST selected item, so the
+                            // selected count decides — read it under the same budget.
+                            int selectedCount = -1;
+                            if (selection != null) {
+                                try { selectedCount = budget.Read(delegate { return selection.Current.GetSelection().Length; }); }
+                                catch (UiBudgetStop) { throw; }
+                                catch { selectedCount = -1; }
+                            }
+                            // Unknown count with a required selection: stay conservative and do not
+                            // advertise remove, because removing the last one would be refused.
+                            canRemove = selectedCount > 1;
+                        }
+                        if (canRemove) add("removeFromSelection");
+                    }
+                }
+            }
+
+            object pattern = BudgetPattern(budget, e, ValuePattern.Pattern);
+            if (pattern != null && enabled) {
+                bool readOnly = BudgetBool(budget, delegate { return ((ValuePattern)pattern).Current.IsReadOnly; }, true);
+                if (!readOnly) add("setValue");
+            } else {
+                pattern = BudgetPattern(budget, e, RangeValuePattern.Pattern);
+                if (pattern != null && enabled) {
+                    bool readOnly = BudgetBool(budget, delegate { return ((RangeValuePattern)pattern).Current.IsReadOnly; }, true);
+                    if (!readOnly) add("setValue");
+                }
+            }
+
+            pattern = BudgetPattern(budget, e, ScrollPattern.Pattern);
+            if (pattern != null && enabled) {
+                var scroll = (ScrollPattern)pattern;
+                bool horizontal = BudgetBool(budget, delegate { return scroll.Current.HorizontallyScrollable; }, false);
+                bool vertical = BudgetBool(budget, delegate { return scroll.Current.VerticallyScrollable; }, false);
+                if (horizontal || vertical) { add("scroll"); add("setScrollPercent"); }
+            }
+
+            if (BudgetPattern(budget, e, MultipleViewPattern.Pattern) != null && enabled) add("setCurrentView");
+
+            // Text: selectText needs a SELECTABLE, non-password control — having a TextPattern is
+            // not the same thing (read-only viewers and password boxes both expose one).
+            pattern = BudgetPattern(budget, e, TextPattern.Pattern);
+            if (pattern != null && !password && enabled) {
+                var text = (TextPattern)pattern;
+                bool selectable = BudgetBool(budget, delegate { return text.SupportedTextSelection != SupportedTextSelection.None; }, false);
+                if (selectable) add("selectText");
+            }
+            // focus follows IsKeyboardFocusable AND the enabled state: a disabled control reports
+            // itself focusable on some providers yet cannot take focus, so it advertises neither.
+            if (focusable && enabled) add("focus");
+            return actions;
+        }
+
+        /// <summary>
+        /// A property read under the caller's budget. `fallbackWhenUnreadable` decides what an
+        /// UNKNOWN answer means, and it matters both ways: for a RESTRICTIVE property (IsPassword,
+        /// IsReadOnly) unknown must fall back to the restrictive value, never to the permissive one,
+        /// so a provider error can never advertise an action the control might refuse.
+        /// </summary>
+        static bool BudgetBool(UiReadBudget budget, Func<bool> read, bool fallbackWhenUnreadable)
+        {
+            try { return budget.Read(delegate { return read(); }); }
+            catch (UiBudgetStop) { throw; }
+            catch { return fallbackWhenUnreadable; }
+        }
+
+        /// <summary>
+        /// Obtain one pattern under the caller's budget. UiBudgetStop is ALWAYS rethrown — a budget
+        /// exhaustion must never be mistaken for "the control does not support this".
+        /// </summary>
+        static object BudgetPattern(UiReadBudget budget, AutomationElement e, AutomationPattern required)
+        {
+            try
+            {
+                return budget.Read(delegate
+                {
+                    object pattern;
+                    return e.TryGetCurrentPattern(required, out pattern) ? pattern : null;
+                });
+            }
+            catch (UiBudgetStop) { throw; }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// The terse parameter summary an action really takes, plus the live capability ranges a
+        /// caller needs to pick a legal value (scroll axes, view ids, value bounds). Only values the
+        /// provider already exposes are reported.
+        /// </summary>
+        internal static Dictionary<string, object> UiActionSchema(AutomationElement e, List<string> actions, UiReadBudget budget)
+        {
+            var schema = new Dictionary<string, object>();
+            if (e == null) return schema;
+            foreach (string action in actions)
+            {
+                switch (action)
+                {
+                    case "setScrollPercent":
+                        schema[action] = Dict("argument", "horizontalPercent/verticalPercent (0-100, or -1 to leave that axis unchanged)");
+                        break;
+                    case "scroll":
+                        schema[action] = Dict("argument", "value: up|down|left|right");
+                        break;
+                    case "setCurrentView":
+                        schema[action] = Dict("argument", "value: a viewId from views");
+                        break;
+                    case "setValue":
+                        schema[action] = Dict("argument", "value: text, or a finite number within range");
+                        break;
+                    case "selectText":
+                        schema[action] = Dict("argument", "value + optional prefix/suffix; optional selectionType select|cursor_before|cursor_after");
+                        break;
+                    default:
+                        schema[action] = Dict("argument", "none");
+                        break;
+                }
+            }
+            // Live capability detail: only what this control reports right now. Each provider access
+            // is its own budget.Read, and UiBudgetStop is rethrown rather than swallowed.
+            try
+            {
+                if (actions.Contains("setScrollPercent"))
+                {
+                    object pattern = BudgetPattern(budget, e, ScrollPattern.Pattern);
+                    if (pattern != null)
+                    {
+                        var scroll = (ScrollPattern)pattern;
+                        bool horizontal = BudgetBool(budget, delegate { return scroll.Current.HorizontallyScrollable; }, false);
+                        bool vertical = BudgetBool(budget, delegate { return scroll.Current.VerticallyScrollable; }, false);
+                        double? verticalPercent = null, horizontalPercent = null;
+                        try { verticalPercent = budget.Read(delegate { return scroll.Current.VerticalScrollPercent; }); } catch (UiBudgetStop) { throw; } catch { }
+                        try { horizontalPercent = budget.Read(delegate { return scroll.Current.HorizontalScrollPercent; }); } catch (UiBudgetStop) { throw; } catch { }
+                        schema["scrollAxes"] = Dict("horizontal", horizontal, "vertical", vertical,
+                            "verticalPercent", verticalPercent, "horizontalPercent", horizontalPercent);
+                    }
+                }
+                if (actions.Contains("setCurrentView"))
+                {
+                    object pattern = BudgetPattern(budget, e, MultipleViewPattern.Pattern);
+                    if (pattern != null)
+                    {
+                        var views = (MultipleViewPattern)pattern;
+                        // A control may report many views; listing them is bounded so an absurd list
+                        // can neither blow the response nor the budget.
+                        const int maxViews = 32;
+                        int[] ids = null;
+                        try { ids = budget.Read(delegate { return views.Current.GetSupportedViews(); }) ?? new int[0]; }
+                        catch (UiBudgetStop) { throw; } catch { }
+                        if (ids != null)
+                        {
+                            var named = new List<object>();
+                            foreach (int id in ids.Take(maxViews))
+                            {
+                                int viewId = id;
+                                string name = null;
+                                // Each view name is one more provider read, counted on its own.
+                                try { name = budget.Read(delegate { return views.GetViewName(viewId); }); }
+                                catch (UiBudgetStop) { throw; } catch { }
+                                named.Add(Dict("id", viewId, "name", name));
+                            }
+                            schema["views"] = named;
+                            schema["viewsTruncated"] = ids.Length > maxViews;
+                            try { schema["currentView"] = budget.Read(delegate { return views.Current.CurrentView; }); }
+                            catch (UiBudgetStop) { throw; } catch { }
+                        }
+                    }
+                }
+                if (actions.Contains("setValue"))
+                {
+                    object pattern = BudgetPattern(budget, e, RangeValuePattern.Pattern);
+                    if (pattern != null)
+                    {
+                        var range = (RangeValuePattern)pattern;
+                        double? minimum = null, maximum = null, value = null;
+                        bool readOnly = false;
+                        try { minimum = budget.Read(delegate { return range.Current.Minimum; }); } catch (UiBudgetStop) { throw; } catch { }
+                        try { maximum = budget.Read(delegate { return range.Current.Maximum; }); } catch (UiBudgetStop) { throw; } catch { }
+                        try { value = budget.Read(delegate { return range.Current.Value; }); } catch (UiBudgetStop) { throw; } catch { }
+                        readOnly = BudgetBool(budget, delegate { return range.Current.IsReadOnly; }, true);
+                        schema["range"] = Dict("minimum", minimum, "maximum", maximum, "value", value, "readOnly", readOnly);
+                    }
+                }
+            }
+            catch (UiBudgetStop) { throw; }
+            catch { }
+            return schema;
+        }
+
         // >>>UIA-QUERY-BUDGET<<<
         // Cooperative limits between provider calls. A synchronous UIA/COM call
         // already in progress is NOT interruptible by this traversal budget.
@@ -8515,11 +8802,20 @@ namespace DshComputerUse.Worker
                     catch (UiBudgetStop) { evidenceRoot = null; }
                 }
                 string nameFilter = GetS(a, "nameContains", null), idFilter = GetS(a, "automationId", null), roleFilter = GetS(a, "role", null);
+                // Action discovery is OPT-IN: only a caller that asked for `actions` pays the extra
+                // provider reads per element, and a broad inventory never carries them.
+                bool wantActions = GetB(a, "actions", false);
                 CacheRequest selectorCache = UiSelectorCache();
                 UiWalkBounded(rootEl, maxDepth, maxNodes, Math.Max(1, Math.Min(80, GetI(a, "limit", 80))), budget,
                     delegate(AutomationElement match) {
                         if (!ElementMatchesBudgeted(match, nameFilter, idFilter, roleFilter, budget)) return false;
                         var item = ElemDictBudgeted(match, budget);
+                        if (wantActions) {
+                            // Discovery itself is one budgeted read; the schema is a second one.
+                            var discovered = budget.Read(delegate { return UiActionsFor(match, budget); });
+                            item["actions"] = discovered;
+                            item["actionSchema"] = budget.Read(delegate { return UiActionSchema(match, discovered, budget); });
+                        }
                         if (witness != null) {
                             try {
                                 if (evidenceRoot == null) throw new UiBudgetStop();
@@ -8732,6 +9028,43 @@ namespace DshComputerUse.Worker
             return matches;
         }
 
+        /// <summary>
+        /// Describe an element only if it still answers. Used after an action that may invalidate
+        /// it (Realize): a dead element must not turn a successful action into a failed one.
+        /// </summary>
+        static Dictionary<string, object> SafeElemDict(AutomationElement e, Dictionary<string, object> receipt)
+        {
+            try { return ElemDict(e); }
+            catch (Exception error)
+            {
+                receipt["elementUnavailable"] = error.GetType().Name;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// One axis of a scroll percentage: absent or -1 means "leave this axis unchanged"
+        /// (ScrollPattern.NoScroll), anything else must be a finite 0..100. A rejected value never
+        /// reaches the provider.
+        /// </summary>
+        static bool TryScrollPercent(string text, out double value)
+        {
+            value = ScrollPattern.NoScroll;
+            if (text == null) return true;
+            string trimmed = text.Trim();
+            if (trimmed.Length == 0) return true;
+            if (!Double.TryParse(trimmed, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out value)) return false;
+            if (Double.IsNaN(value) || Double.IsInfinity(value)) return false;
+            if (value == ScrollPattern.NoScroll) return true;
+            return value >= 0 && value <= 100;
+        }
+
+        /// <summary>
+        /// Locate the exact passage and return its range WITHOUT committing anything: no MarkMutation,
+        /// no Select. The caller validates, folds if asked, and then commits with exactly ONE
+        /// Select() — a request must produce one selection change, not two.
+        /// </summary>
         static TextPatternRange SelectExactText(TextPattern pattern, string value, string prefix, string suffix)
         {
             if (String.IsNullOrEmpty(value)) throw new Exception("selectText requires nonempty text in value");
@@ -8751,8 +9084,6 @@ namespace DshComputerUse.Worker
             if (suffix.Length > 0)
                 match.MoveEndpointByRange(TextPatternRangeEndpoint.End, match.FindText(suffix, true, false), TextPatternRangeEndpoint.Start);
             if (match.GetText(value.Length + 1) != value) throw new Exception("TEXT_CHANGED: query the passage again");
-            MarkMutation();
-            match.Select();
             return match;
         }
 
@@ -8815,6 +9146,9 @@ namespace DshComputerUse.Worker
             object pat = null;
             string via = null;
             TextPatternRange selectedRange = null;
+            string selectedType = "select";
+            bool beforeHorizontalEnabled = false, beforeVerticalEnabled = false;
+            object beforeViewId = null;
             double beforeScrollPercent = 0;
             switch (action)
             {
@@ -8836,7 +9170,23 @@ namespace DshComputerUse.Worker
                 case "selectText":
                     if (found.Current.IsPassword) throw new Exception("selectText is unavailable on password controls");
                     if (found.TryGetCurrentPattern(TextPattern.Pattern, out pat)) {
-                        selectedRange = SelectExactText((TextPattern)pat, GetS(a, "value", ""), GetS(a, "prefix", "") ?? "", GetS(a, "suffix", "") ?? "");
+                        string selectionType = GetS(a, "selectionType", "select");
+                        if (selectionType != "select" && selectionType != "cursor_before" && selectionType != "cursor_after")
+                            throw new Exception("INVALID_ARGUMENT: selectionType must be select, cursor_before or cursor_after; no action sent");
+                        var match = SelectExactText((TextPattern)pat, GetS(a, "value", ""), GetS(a, "prefix", "") ?? "", GetS(a, "suffix", "") ?? "");
+                        // Fold the SAME range: cursor_before collapses its end onto its start,
+                        // cursor_after collapses its start onto its end. Both are endpoint moves on
+                        // the one matched range, never a second search.
+                        if (selectionType == "cursor_before")
+                            match.MoveEndpointByRange(TextPatternRangeEndpoint.End, match, TextPatternRangeEndpoint.Start);
+                        else if (selectionType == "cursor_after")
+                            match.MoveEndpointByRange(TextPatternRangeEndpoint.Start, match, TextPatternRangeEndpoint.End);
+                        // EXACTLY ONE commit per request: the range is fully decided above, so this
+                        // is the only Select() a caller's SelectionChanged handler can observe.
+                        MarkMutation();
+                        match.Select();
+                        selectedRange = match;
+                        selectedType = selectionType;
                         via = "TextPattern.Select";
                     }
                     break;
@@ -8864,6 +9214,72 @@ namespace DshComputerUse.Worker
                         }
                         break;
                     }
+                case "setCurrentView":
+                    {
+                        // Validate the view id against what the provider actually reports BEFORE
+                        // touching it: an unsupported id must not be attempted at all.
+                        string viewText = GetS(a, "value", "");
+                        int viewId;
+                        if (!Int32.TryParse(viewText, System.Globalization.NumberStyles.Integer,
+                                System.Globalization.CultureInfo.InvariantCulture, out viewId))
+                            throw new Exception("INVALID_ARGUMENT: setCurrentView needs a numeric viewId in value; no action sent");
+                        if (found.TryGetCurrentPattern(MultipleViewPattern.Pattern, out pat)) {
+                            var multiple = (MultipleViewPattern)pat;
+                            int[] supported = multiple.Current.GetSupportedViews() ?? new int[0];
+                            if (Array.IndexOf(supported, viewId) < 0)
+                                throw new Exception("VIEW_ID_UNSUPPORTED: this control supports " +
+                                    String.Join(",", supported.Select(n => n.ToString())) + "; no action sent");
+                            beforeViewId = multiple.Current.CurrentView;
+                            MarkMutation();
+                            multiple.SetCurrentView(viewId);
+                            via = "MultipleViewPattern.SetCurrentView";
+                        }
+                        break;
+                    }
+                case "setScrollPercent":
+                    {
+                        // Each axis is independent: missing or -1 means "leave this axis unchanged",
+                        // exactly like ScrollPattern.NoScroll. 0..100 is the only legal range.
+                        // The PUBLIC contract is the two axis parameters; there is no undocumented
+                        // fallback from `value` to the horizontal axis.
+                        object rawH, rawV;
+                        string horizontalText = a.TryGetValue("horizontalPercent", out rawH) ? Convert.ToString(rawH, System.Globalization.CultureInfo.InvariantCulture) : null;
+                        string verticalText = a.TryGetValue("verticalPercent", out rawV) ? Convert.ToString(rawV, System.Globalization.CultureInfo.InvariantCulture) : null;
+                        if (horizontalText == null && verticalText == null)
+                            throw new Exception("INVALID_ARGUMENT: setScrollPercent needs horizontalPercent and/or verticalPercent (0-100, or -1 to leave an axis unchanged); no action sent");
+                        double horizontal, vertical;
+                        if (!TryScrollPercent(horizontalText, out horizontal))
+                            throw new Exception("INVALID_ARGUMENT: horizontalPercent must be 0-100 or -1; no action sent");
+                        if (!TryScrollPercent(verticalText, out vertical))
+                            throw new Exception("INVALID_ARGUMENT: verticalPercent must be 0-100 or -1; no action sent");
+                        if (found.TryGetCurrentPattern(ScrollPattern.Pattern, out pat)) {
+                            var scroll = (ScrollPattern)pat;
+                            bool wantsHorizontal = horizontal != ScrollPattern.NoScroll;
+                            bool wantsVertical = vertical != ScrollPattern.NoScroll;
+                            if (wantsHorizontal && !scroll.Current.HorizontallyScrollable)
+                                throw new Exception("SCROLL_AXIS_UNAVAILABLE: this control cannot scroll horizontally; no action sent");
+                            if (wantsVertical && !scroll.Current.VerticallyScrollable)
+                                throw new Exception("SCROLL_AXIS_UNAVAILABLE: this control cannot scroll vertically; no action sent");
+                            beforeHorizontalEnabled = scroll.Current.HorizontallyScrollable;
+                            beforeVerticalEnabled = scroll.Current.VerticallyScrollable;
+                            beforeScrollPercent = scroll.Current.VerticalScrollPercent;
+                            MarkMutation();
+                            scroll.SetScrollPercent(horizontal, vertical);
+                            via = "ScrollPattern.SetScrollPercent";
+                        }
+                        break;
+                    }
+                case "realize":
+                    {
+                        // VirtualizedItem.Realize can invalidate the element it was called on, so the
+                        // receipt says so and callers must re-observe instead of replaying.
+                        if (found.TryGetCurrentPattern(VirtualizedItemPattern.Pattern, out pat)) {
+                            MarkMutation();
+                            ((VirtualizedItemPattern)pat).Realize();
+                            via = "VirtualizedItemPattern.Realize";
+                        }
+                        break;
+                    }
                 case "focus":
                     MarkMutation(); found.SetFocus(); via = "SetFocus"; break;
                 case "scrollIntoView":
@@ -8884,23 +9300,82 @@ namespace DshComputerUse.Worker
                     }
                     break;
                 default:
-                    throw new Exception("action must be invoke|select|addToSelection|removeFromSelection|selectText|expand|collapse|toggle|setValue|focus|scrollIntoView");
+                    throw new Exception("action must be invoke|select|addToSelection|removeFromSelection|selectText|expand|collapse|toggle|setValue|focus|scrollIntoView|scroll|setScrollPercent|realize|setCurrentView");
             }
             EndActuationForReadback();
             if (via == null)
                 throw new Exception("element does not support '" + action + "': " + ElemDict(found)["name"]);
 
             Thread.Sleep(GetI(a, "settleMs", 120));
-            Dictionary<string, object> res = Dict("action", action, "via", via, "element", ElemDict(found), "scanned", seen);
+            Dictionary<string, object> res = Dict("action", action, "via", via, "scanned", seen);
+            // Realize is the one action that can invalidate the element it was called on, so the
+            // element is described LAST and only if it still answers; a dead element is reported as
+            // such instead of failing the whole (already successful) action.
+            if (via == "VirtualizedItemPattern.Realize") {
+                res["realized"] = true;
+                res["reobserveRequired"] = true;
+                res["element"] = SafeElemDict(found, res);
+                res["note"] = "Realize can invalidate this element; query again before another action on it";
+            } else {
+                res["element"] = ElemDict(found);
+            }
             try {
                 if (via == "ScrollPattern") {
                     var scroll = ((ScrollPattern)pat).Current;
                     string direction = GetS(a, "value", "");
                     res["beforePercent"] = beforeScrollPercent;
                     res["afterPercent"] = direction == "left" || direction == "right" ? scroll.HorizontalScrollPercent : scroll.VerticalScrollPercent;
+                } else if (via == "ScrollPattern.SetScrollPercent") {
+                    // Both axes are reported, and a "-1 / unchanged" axis is reported as exactly that
+                    // so a caller can prove the other axis was not disturbed.
+                    var scroll = ((ScrollPattern)pat).Current;
+                    res["horizontalPercent"] = scroll.HorizontalScrollPercent;
+                    res["verticalPercent"] = scroll.VerticalScrollPercent;
+                    res["horizontalScrollable"] = scroll.HorizontallyScrollable;
+                    res["verticalScrollable"] = scroll.VerticallyScrollable;
+                    res["beforePercent"] = beforeScrollPercent;
+                    res["afterPercent"] = scroll.VerticalScrollPercent;
+                    res["beforeHorizontalScrollable"] = beforeHorizontalEnabled;
+                    res["beforeVerticalScrollable"] = beforeVerticalEnabled;
+                } else if (via == "MultipleViewPattern.SetCurrentView") {
+                    var multiple = (MultipleViewPattern)pat;
+                    res["currentView"] = multiple.Current.CurrentView;
+                    res["beforeView"] = beforeViewId;
+                    res["supportedViews"] = multiple.Current.GetSupportedViews();
+                    res["viewChanged"] = !Equals(beforeViewId, multiple.Current.CurrentView);
+                } else if (via == "VirtualizedItemPattern.Realize") {
+                    // Already described above (realized / reobserveRequired / element-or-unavailable).
                 } else if (selectedRange != null) {
                     var selected = ((TextPattern)pat).GetSelection();
-                    res["selectionVerified"] = selected.Length == 1 && selected[0].Compare(selectedRange);
+                    res["selectionType"] = selectedType;
+                    // Endpoint proof WITHOUT trusting a bounded text length: ask the control's own
+                    // held range how it compares to the range we selected. That comparison is the
+                    // real UIA answer and needs no offsets at all.
+                    if (selected.Length == 1) {
+                        TextPatternRange held = selected[0];
+                        // Old-contract semantics: verified means the control HOLDS EXACTLY the range we
+                        // asked for. It starts false and only becomes true after the comparisons
+                        // really succeeded — a provider that accepts Select() but keeps a different
+                        // range must not read as verified.
+                        res["selectionVerified"] = false;
+                        bool startMatches = false, endMatches = false, collapsed = false;
+                        try {
+                            startMatches = held.CompareEndpoints(TextPatternRangeEndpoint.Start, selectedRange, TextPatternRangeEndpoint.Start) == 0;
+                            endMatches = held.CompareEndpoints(TextPatternRangeEndpoint.End, selectedRange, TextPatternRangeEndpoint.End) == 0;
+                            collapsed = held.CompareEndpoints(TextPatternRangeEndpoint.Start, held, TextPatternRangeEndpoint.End) == 0;
+                            res["startMatches"] = startMatches;
+                            res["endMatches"] = endMatches;
+                            res["collapsed"] = collapsed;
+                            bool foldRequested = selectedType == "cursor_before" || selectedType == "cursor_after";
+                            res["selectionVerified"] = startMatches && endMatches && (!foldRequested || collapsed);
+                        } catch (Exception comparisonError) {
+                            // Unverifiable is NOT verified: say so instead of claiming the old contract.
+                            res["selectionVerified"] = false;
+                            res["compareUnavailable"] = comparisonError.GetType().Name;
+                        }
+                        // No document-wide text read here: the absolute offsets are the fixture's own
+                        // business, and a 1 MiB prefix read has no place in a default action.
+                    } else res["selectionVerified"] = false;
                 } else if (via == "RangeValuePattern") res["rangeValue"] = ((RangeValuePattern)pat).Current.Value;
                 else if (action == "addToSelection" || action == "removeFromSelection")
                     res["isSelected"] = ((SelectionItemPattern)pat).Current.IsSelected;

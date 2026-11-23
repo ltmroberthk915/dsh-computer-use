@@ -51,7 +51,7 @@ const tools = [
   },
   {
     name: 'cu_uia_query',
-    description: 'Bounded UIA query inside an explicit window. Default depth6/120 nodes/1200ms soft budget. Broad searches require an observed point anchor. Truncated results are partial evidence; a single provider call cannot be preempted.',
+    description: 'Bounded UIA query inside an explicit window. Default depth6/120 nodes/1200ms soft budget. Broad searches require an observed point anchor. Truncated results are partial evidence; a single provider call cannot be preempted. actions:true adds, per control, the actions that control actually supports with a one-line argument summary and live capability values (scroll axes, view ids, value range).',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -62,6 +62,7 @@ const tools = [
         nameContains: { type: 'string' },
         anchor: { type: 'string', description: 'Observed screen point "x,y" inside hwnd; query its subtree' },
         budgetMs: { type: 'integer', minimum: 100, maximum: 5000 },
+        actions: { type: 'boolean', description: 'Per-control executable actions, derived from the patterns and states each control really reports; opt-in (costs several provider reads per element).' },
       },
     },
   },
