@@ -2,7 +2,7 @@
 
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
 
-**Windows Computer Use 2.3.4 for DeepSeek Harness**
+**Windows Computer Use 2.3.5 for DeepSeek Harness**
 
 Discover available actions per control, scroll to an exact percentage, switch views, and place the caret before or after matching text. Includes OCR and batch actions.
 

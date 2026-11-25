@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-style-computer-use",
-  "version": "2.3.4",
+  "version": "2.3.5",
   "description": "Windows desktop automation for DeepSeek Harness. Discover actions per control, scroll to an exact percentage, switch views, and place the caret before or after matching text. Includes OCR and a prebuilt Windows worker.",
   "type": "module",
   "main": "lib/index.js",

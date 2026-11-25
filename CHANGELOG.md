@@ -1,3 +1,7 @@
+# 2.3.5 — Host debug session permissions
+
+The host debug settings page now reports permissions for the selected conversation, including after switching chats or saving the debug switch. A missing session is reported as unknown. Fixes #5 via #6.
+
 # 2.3.4 — Precise control actions and caret placement
 
 Windows Computer Use 2.3.4 adds two improvements for DeepSeek Harness.

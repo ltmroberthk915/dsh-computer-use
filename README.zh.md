@@ -2,7 +2,7 @@
 
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
 
-**Windows 桌面操控 2.3.4 · DeepSeek Harness 插件**
+**Windows 桌面操控 2.3.5 · DeepSeek Harness 插件**
 
 先看控件支持哪些操作，再按百分比精确滚动、切换视图或显示离屏条目。编辑时可把光标准确放在匹配文字前后。支持 OCR 和批量操作。
 
