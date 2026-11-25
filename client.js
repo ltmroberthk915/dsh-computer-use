@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     const module = { exports: {} }
     const exports = module.exports
     const React = require('react')
-    const { createElement: h, useState, useEffect, useCallback } = React
+    const { createElement: h, useState, useEffect, useCallback, useRef, useSyncExternalStore } = React
 
     const API = '/api/computer-use/host-debug'
     const TEXT = {
@@ -55,35 +55,56 @@ window.__ModuleLoader__.load({
         h('b', { style: { color: ok ? 'inherit' : '#c0392b' } }, value))
     }
 
-    function SettingsPage () {
+    const subscribeToNothing = () => () => {}
+    const selectedId = current => current?.getSnapshot().key ?? null
+
+    async function requestStatus (sessionId, options) {
+      const url = sessionId ? API + '?session=' + encodeURIComponent(sessionId) : API
+      const r = await fetch(url, options)
+      const status = await r.json()
+      if (!r.ok) throw new Error(status.error || ('HTTP ' + r.status))
+      return status
+    }
+
+    function SettingsPage ({ current }) {
+      const sessionId = useSyncExternalStore(current?.subscribe ?? subscribeToNothing, () => selectedId(current))
       const [state, setState] = useState(null)
       const [error, setError] = useState(null)
       const [busy, setBusy] = useState(false)
+      const lastRead = useRef(0)
 
       const load = useCallback(async () => {
+        const read = ++lastRead.current
         setError(null)
         try {
-          const r = await fetch(API, { cache: 'no-store' })
-          const j = await r.json()
-          if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status))
-          setState(j)
-        } catch (e) { setError(String(e?.message ?? e)) }
-      }, [])
+          const status = await requestStatus(selectedId(current), { cache: 'no-store' })
+          if (read === lastRead.current) setState(status)
+        } catch (e) { if (read === lastRead.current) setError(String(e?.message ?? e)) }
+      }, [current])
 
-      useEffect(() => { load() }, [load])
+      useEffect(() => {
+        load()
+        return () => { lastRead.current++ }
+      }, [load, sessionId])
 
-      const save = useCallback(async (enabled) => {
+      async function save (enabled) {
         setBusy(true)
+        setError(null)
         try {
-          const r = await fetch(API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) })
-          const j = await r.json()
-          if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status))
-          setState(j)
+          const saved = await requestStatus(sessionId, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) })
+          if (saved.session.id === selectedId(current)) {
+            lastRead.current++
+            setState(saved)
+          } else {
+            // The switch is shared. Refresh the conversation selected during the save.
+            await load()
+          }
         } catch (e) { setError(String(e?.message ?? e)) } finally { setBusy(false) }
-      }, [])
+      }
 
-      const sandbox = state?.session?.sandbox ?? null
-      const full = state?.session?.fullAccess === true
+      const permission = state?.session?.id === sessionId ? state.session : null
+      const sandbox = permission?.sandbox ?? null
+      const full = permission?.fullAccess === true
       const enabled = state?.enabled === true
 
       return h('div', { style: { padding: '18px 22px', lineHeight: 1.55, maxWidth: 760 } },
@@ -94,7 +115,7 @@ window.__ModuleLoader__.load({
           row(TEXT.gate1, full ? TEXT.fullYes : (sandbox ? (TEXT.fullNo + '：' + sandbox) : TEXT.fullUnknown), full),
           row(TEXT.gate2, enabled ? TEXT.on : TEXT.off, enabled),
           h('p', { style: { margin: '10px 0 0', opacity: .75, fontSize: 13 } }, TEXT.gateHint),
-          !full ? h('p', { style: { margin: '6px 0 0', color: '#c0392b', fontSize: 13 } }, TEXT.warnGate1) : null,
+          sandbox && !full ? h('p', { style: { margin: '6px 0 0', color: '#c0392b', fontSize: 13 } }, TEXT.warnGate1) : null,
           !enabled ? h('p', { style: { margin: '6px 0 0', opacity: .75, fontSize: 13 } }, TEXT.warnOff) : null,
           state.lastBlockedAt ? h('p', { style: { margin: '6px 0 0', fontSize: 13 } }, TEXT.warnBlocked + '（' + TEXT.blockedAt + '：' + state.lastBlockedAt + '）') : null,
           h('p', { style: { margin: '6px 0 0', fontSize: 13, opacity: .6 } },
@@ -102,7 +123,7 @@ window.__ModuleLoader__.load({
         ) : h('p', { style: { opacity: .7 } }, TEXT.loading),
         h('div', { style: { display: 'flex', gap: 10, margin: '16px 0 14px' } },
           h('button', {
-            disabled: busy,
+            disabled: busy || !state,
             onClick: () => save(!enabled),
             style: { padding: '7px 16px', borderRadius: 6, border: '1px solid rgba(127,127,127,.4)', cursor: 'pointer', fontWeight: 600, background: enabled ? 'transparent' : '#1f6feb', color: enabled ? 'inherit' : '#fff' },
           }, busy ? '…' : (enabled ? '关闭调试模式' : '开启调试模式')),
@@ -119,7 +140,7 @@ window.__ModuleLoader__.load({
         order: 52,
         label: () => TEXT.nav,
         locale: 'settings.computerUseDebug',
-      }, () => h(SettingsPage)))
+      }, () => h(SettingsPage, { current: ctx.get('uiSession')?.adapter?.current })))
     }
 
     exports.apply = apply

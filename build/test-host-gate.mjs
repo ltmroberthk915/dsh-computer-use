@@ -54,9 +54,16 @@ assert.match(index, /Date\.now\(\) - gateNoticeAt < 10 \* 60_000/, 'cards are de
 assert.match(index, /notifyHostGate\(log\)/)
 assert.ok(!/await notifyHostGate/.test(index), 'the failed tool call never waits for the card')
 
-// 5) The settings page exists and calls the same-origin route.
+// 5) Both settings requests must describe the conversation on screen (issue #5).
 assert.match(client, /__ModuleLoader__\.load/)
 assert.match(client, /settings\.section/)
 assert.match(client, /\/api\/computer-use\/host-debug/)
+assert.match(client, /ctx\.get\('uiSession'\)\?\.adapter\?\.current/)
+assert.match(client, /'\?session=' \+ encodeURIComponent\(sessionId\)/)
+assert.match(client, /requestStatus\(selectedId\(current\), \{ cache: 'no-store'/)
+assert.match(client, /requestStatus\(sessionId, \{ method: 'POST'/)
+const settingsRoute = index.slice(index.indexOf('function handleHostDebug'), index.indexOf('// ---- gate notice'))
+assert.match(settingsRoute, /sessionPermission\(sid\)/)
+assert.doesNotMatch(settingsRoute, /DSH_SESSION_ID/, 'no selected conversation must yield unknown permission')
 
 console.log('ok test-host-gate — switch is host-only, both gates fail closed, host close is never allowed, notice is deduped')
