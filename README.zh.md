@@ -1,10 +1,10 @@
-# Codex 风格 Computer Use
+# Codex 风格 Computer Use · Windows 电脑操作与桌面自动化
 
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
 
-**Windows 桌面操控 2.3.5 · DeepSeek Harness 插件**
+**Windows 电脑操作、电脑控制与桌面自动化插件 · DeepSeek Harness**
 
-先看控件支持哪些操作，再按百分比精确滚动、切换视图或显示离屏条目。编辑时可把光标准确放在匹配文字前后。支持 OCR 和批量操作。
+让 DSH 的 agent 直接操作你的 Windows 桌面：用 UI Automation（UIA）读控件树，按编号标记精确点击、输入、拖拽并回读验证；支持窗口截图、OCR 找字、批量操作与人工接管。默认逐次审批，完全权限会话按授权执行并记入 `policy.jsonl`。交互风格是 Codex 式的——按控件身份寻址，而不是猜坐标。
 
 [English](README.md) | 中文 | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [安装](#在-dsh-market-安装和更新) · [版本记录](CHANGELOG.md) · [2.0.0 变更](docs/RELEASE-2.0.0.md)
 
@@ -85,6 +85,8 @@
 ## 在 dsh-market 安装和更新
 
 在市场搜索 **computer-use** 或 **Codex-style**，认准仓库 **ltmroberthk915/dsh-computer-use**、npm 包 **dsh-codex-style-computer-use**（维护者 **ltmroberthk**），点击**安装**。以后通过市场的**更新**或**全部更新**获取正式频道版本。两份原生组件都已随包提供，无需 PowerShell 7、SDK 或构建白名单。
+
+也可以在 [DSH Open Market 插件页](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/) 查看完整介绍与版本列表，再回到 DSH 内置市场安装。
 
 也可在 **设置 → 插件 → 添加插件** 输入 **`dsh-codex-style-computer-use`**，安装当前正式频道；要体验本页描述的 2.0.0，输入 **`dsh-codex-style-computer-use@2.0.0`**。这里填 npm 包名即可。宿主可能对新版本设置等待期，以界面提示为准。首次新增 bundle 可在支持的宿主中热加载；确认工具与 skill 已出现即可使用。替换已经加载的版本、客户端界面未刷新或界面提示 **restart-required / 需要重启** 时，从托盘完整退出 DSH 并重新打开。
 

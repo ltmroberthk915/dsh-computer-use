@@ -1,10 +1,10 @@
-# Codex-style Computer Use
+# Codex-style Computer Use · Windows Computer Use and Desktop Automation
 
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-codex-style-computer-use.json)](https://dshopen.org/zh/plugins/dsh-codex-style-computer-use/)
 
-**Windows Computer Use 2.3.5 for DeepSeek Harness**
+**Windows computer use, desktop automation and UI Automation plugin for DeepSeek Harness**
 
-Discover available actions per control, scroll to an exact percentage, switch views, and place the caret before or after matching text. Includes OCR and batch actions.
+Operate your Windows desktop from DSH: read UI Automation (UIA) control trees, click / type / drag by verified numbered marks and read back to confirm; window screenshots, OCR text finding, batch actions and human handoff. Per-action approval by default; full-access sessions run under that grant and log to `policy.jsonl`. The interaction style is Codex-like — address controls by identity instead of guessing coordinates.
 
 English | [中文](README.zh.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Español](README.es.md) | [Português](README.pt.md) | [العربية](README.ar.md) | [Русский](README.ru.md) | [فارسی](README.fa.md) · [Install](#install-and-update-in-dsh-market) · [Changelog](CHANGELOG.md) · [2.0.0 changes](docs/RELEASE-2.0.0.md)
 
@@ -90,6 +90,8 @@ this Agent's observation cache; it does not delete screenshots, attachments or u
 ## Install and update in dsh-market
 
 Search **computer-use** or **Codex-style** in the market. Look for repository **ltmroberthk915/dsh-computer-use** and npm package **dsh-codex-style-computer-use** (maintainer: **ltmroberthk**), then click **Install**. Use **Update** or **Update all** for stable-channel updates. Both native helpers are included; no PowerShell 7 or build permission is needed.
+
+You can also read the full description and version history on the [DSH Open Market page](https://dshopen.org/plugins/dsh-codex-style-computer-use/) before installing from the built-in market.
 
 Alternatively, enter **`dsh-codex-style-computer-use`** in **Settings → Plugins → Add plugin** for the current stable channel, or **`dsh-codex-style-computer-use@2.0.0`** for the version described here. Enter the npm package spec directly. Your host may apply a waiting period to fresh versions; follow its indication. A newly added bundle can load live on supported hosts; check that its tools and skill appear. Restart from the tray when replacing a loaded version, when the client remains stale, or when DSH reports **restart-required**.
 
